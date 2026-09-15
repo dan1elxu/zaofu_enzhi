@@ -323,7 +323,12 @@ _OVERSIZED_FILE_CAPS = {
     # origin/dev's current channel/workflow reactor call sites. The semantic
     # implementations remain in siblings; freeze the merged handler surface.
     # Two Channel dedup terminal events are mechanically registered here.
-    "src/zf/runtime/orchestrator_reactor.py": 6977,
+    # +10 (2026-09-15, channel auto mode): the auto-chain reactor wiring
+    # call site in _build_registry + a thin _register_channel_auto_chain_
+    # handlers delegate. The chain logic (question resolver + PRD handoff)
+    # lives in the channel_auto_chain.py sibling; only the registry
+    # composition point can sit here. Re-freeze at the new size.
+    "src/zf/runtime/orchestrator_reactor.py": 6987,
     # Merge 2026-06-22: dispatch recovery helpers crossed the previous cap.
     # Reconciliation 2026-07-03: RF-7B transition-only dispatch (+32) + prior
     # merges pushed to 4851. Freeze at clean dev size; next dispatch feature extracts.
@@ -448,6 +453,12 @@ _KNOWN_OVERSIZED_SOURCE_FILES = {
     # moves continuation reduction into candidate_rework_evidence.py.
     "src/zf/runtime/candidate_rework.py",
     "src/zf/runtime/channel_projection.py",
+    # Phase/round/consensus driver crossed the soft limit with the 2026-09-15
+    # auto-mode consensus branch (one flag-gated gate in _consensus_reached).
+    # Split trigger: the next phase-driver or consensus-gate change extracts
+    # _consensus_reached and the phase advance helpers into a
+    # channel_discussion_phases.py sibling.
+    "src/zf/runtime/channel_discussion.py",
     # Task Pipeline V4 durable-call integration crossed the soft limit while
     # keeping prepare/admit/hydrate behavior together. Split trigger: next
     # durable call preparation, admission, or hydration behavior change.

@@ -339,6 +339,23 @@ def discussion_engine_mode(value: object) -> str:
     }[product_mode]
 
 
+def channel_discussion_auto_enabled(channel: dict[str, Any] | None) -> bool:
+    """Whether a Channel discussion runs without owner intervention.
+
+    The flag is set at materialization time (auto template or
+    discussion_mode=auto override), carried by channel.discussion.mode.set,
+    and digest-bound like the rest of the discussion config. Owner approval
+    of the create-and-start Plan is the up-front delegation for every
+    automated decision an auto Channel makes.
+    """
+    discussion = (
+        (channel or {}).get("discussion")
+        if isinstance((channel or {}).get("discussion"), dict)
+        else {}
+    )
+    return discussion.get("auto") is True
+
+
 def validate_channel_member_contract(payload: dict[str, Any]) -> str:
     member_type_raw = str(payload.get("member_type") or "").strip()
     if member_type_raw and member_type_raw not in CHANNEL_MEMBER_TYPE_INPUTS:

@@ -624,12 +624,21 @@ def test_template_discussion_mode_override_is_explicit_and_bounded():
     assert materialized is not None
     assert materialized["discussion"]["mode"] == "multi_lens"
 
-    invalid, error = materialize_channel_template(
+    auto_mode, error = materialize_channel_template(
         "prd-clarification",
         overrides={"discussion_mode": "auto"},
     )
+    assert error == ""
+    assert auto_mode is not None
+    assert auto_mode["discussion"]["mode"] == "multi_lens"
+    assert auto_mode["discussion"]["auto"] is True
+
+    invalid, error = materialize_channel_template(
+        "prd-clarification",
+        overrides={"discussion_mode": "sideways"},
+    )
     assert invalid is None
-    assert error == "discussion_mode must be conversation, clarification, or multi_lens"
+    assert error == "discussion_mode must be conversation, clarification, multi_lens, or auto"
 
 
 def test_create_and_start_is_one_action_with_seeded_requirement_and_followup(

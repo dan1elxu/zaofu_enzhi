@@ -3,6 +3,7 @@
 [English](README.en.md) · [手册首页](../00-index.md)
 
 - [Channel 到 PRD](channel-to-prd.md): 自然群聊、按需多视角、Owner 定稿和受控交接。
+- [Channel Auto 模式](channel-auto-mode.md): auto 模板的全自动讨论 → 冻结 PRD → Task + Workflow Plan 链。
 - [受控 Workflow 启动](controlled-workflow-start.md): route catalog、Plan、Approve 和 Run freeze。
 - [完整快速开始](../01-quickstart.md): Kanban Agent、Research 和普通交付路线。
 - [Plan、Task Map 与调度](../13-plan-task-map-orchestrator-dispatch.md): 计划产物、准入和 Kernel 调度。

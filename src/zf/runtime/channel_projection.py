@@ -1670,6 +1670,8 @@ def _apply_discussion_mode(channel: dict[str, Any], event: ZfEvent, payload: dic
             pass
     if isinstance(payload.get("phase_deadline_seconds"), dict):
         discussion["phase_deadline_seconds"] = redact_obj(payload.get("phase_deadline_seconds"))
+    if payload.get("auto") is not None:
+        discussion["auto"] = payload.get("auto") is True
     discussion["updated_at"] = event.ts
     discussion["event_id"] = event.id
 

@@ -29,6 +29,7 @@ from zf.core.events import EventWriter
 from zf.core.state.locks import locked_path
 from zf.runtime.channel_projection import project_channel, project_channels
 from zf.runtime.channel_contracts import (
+    channel_discussion_auto_enabled,
     discussion_engine_mode,
     normalize_product_discussion_mode,
 )
@@ -743,6 +744,12 @@ def _consensus_reached(
     signed = set((consensus.get("signed") or {}).keys())
     if not roster or not roster <= signed:
         return False
+    if channel_discussion_auto_enabled(channel):
+        # Auto Channels delegate owner confirmation up front through the
+        # owner-approved create-and-start Plan; the full roster signature is
+        # the only remaining gate. Readiness still gates planning via
+        # channel_prd_planning_authorized downstream.
+        return True
     return bool(consensus.get("human_confirmed"))
 
 

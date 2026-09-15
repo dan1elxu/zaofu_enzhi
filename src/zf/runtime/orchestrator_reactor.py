@@ -396,7 +396,17 @@ class EventReactorMixin(OrchestratorAgentReactorMixin, DurableCallWorkflowMixin)
         self._register_workflow_graph_shadow_handlers(registry)
         self._register_light_flow_handlers(registry)
         self._register_goal_rescan_handlers(registry)
+        self._register_channel_auto_chain_handlers(registry)
         return registry
+
+    def _register_channel_auto_chain_handlers(self, registry) -> None:
+        """Auto Channel chain: question resolution + PRD handoff side cars."""
+        try:
+            from zf.runtime.channel_auto_chain import register_auto_chain_handlers
+
+            register_auto_chain_handlers(registry)
+        except Exception:
+            pass
 
     def _register_goal_rescan_handlers(self, registry) -> None:
         """B2(G1 消费侧):rescan → lane 微环 continuation,不新起 fanout。"""

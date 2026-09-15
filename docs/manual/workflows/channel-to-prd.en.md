@@ -28,10 +28,33 @@ Do not use it when:
 | `conversation` | Default natural discussion and targeted mentions | The user or Leader chooses who responds; no automatic fanout |
 | `clarification` | Fields, boundaries, or owner decisions are missing | Resolve open questions one by one |
 | `multi_lens` | Several independent views and synthesis are explicitly needed | An explicit Discuss action runs bounded fanout and synthesis |
+| `auto` | The user explicitly asks for a fully automatic discussion | After the create-and-start Plan is approved, discussion, PRD freeze, and Task + Workflow Plan generation run without further owner intervention |
 
 Compatibility engine names such as `manual_mention`, `mention_relay`, and
 `fanout_then_synthesis` map into these modes. They are not additional top-level
 product choices.
+
+## Auto Mode: The Full Automatic Chain
+
+The `auto` template reuses the multi_lens discussion machinery but replaces the
+three human gates with upfront delegation or automation:
+
+1. **Owner confirmation upfront**: approving the `channel-create-and-start`
+   Plan is the single authorization point. Consensus afterwards no longer
+   requires per-round human_confirmed; the full roster signature is the gate.
+2. **Automatic question resolution**: when open questions appear during the
+   phase2 relay, the channel-auto-chain resolver edge LLM turn resolves each
+   one (`resolved_by=owner:auto-resolver`) and posts a summary back to the
+   Channel.
+3. **Automatic PRD handoff**: once consensus is reached, the PRD is frozen and
+   readiness is ready, a handoff LLM turn derives the Task payload and Workflow
+   Plan from the canonical PRD; the `create-task` controlled action creates the
+   Task and publishes `workflow.request.proposed` in one step.
+
+The chain stops at Workflow Plan publication: it never approves or starts a
+Workflow. When readiness is needs_owner the chain fails with
+`channel.auto_chain.failed` and the Owner can take over. Implementation details:
+[Channel Auto Mode](channel-auto-mode.md).
 
 ## Create A Channel
 
@@ -149,5 +172,6 @@ it.
 ## Related
 
 - [Detailed Channel guide](../15-channel-collaboration.en.md)
+- [Channel Auto Mode](channel-auto-mode.md)
 - [Controlled Workflow start](controlled-workflow-start.en.md)
 - [Feishu AI-Native Bridge](../19-feishu-ai-native-direct-bridge.en.md)

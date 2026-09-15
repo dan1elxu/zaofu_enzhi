@@ -3,6 +3,7 @@
 [中文](README.md) · [Manual home](../00-index.en.md)
 
 - [Channel to PRD](channel-to-prd.en.md): natural conversation, optional multi-lens work, owner finalization, and controlled handoff.
+- [Channel Auto Mode](channel-auto-mode.md): the auto template's full-auto chain from discussion to frozen PRD to Task + Workflow Plan.
 - [Controlled Workflow start](controlled-workflow-start.en.md): route catalog, Plan, Approve, and Run freeze.
 - [Complete Quick Start](../01-quickstart.en.md): Kanban Agent, Research, and normal delivery routes.
 - [Plan, Task Map, and dispatch](../13-plan-task-map-orchestrator-dispatch.en.md): planning artifacts, admission, and Kernel dispatch.

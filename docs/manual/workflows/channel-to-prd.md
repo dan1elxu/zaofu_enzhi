@@ -27,9 +27,27 @@
 | `conversation` | 默认；自然讨论和定向 @mention | 用户或 Leader 决定谁继续回答，不自动 fanout |
 | `clarification` | 需求缺字段、边界或 owner 决策 | 围绕开放问题逐项澄清 |
 | `multi_lens` | 明确需要多个独立视角和综合 | 显式 Discuss 后执行有界 fanout/synthesis |
+| `auto` | 用户明确要求全程无人介入 | 批准 create-and-start Plan 后全自动讨论、冻结 PRD、生成 Task + Workflow Plan |
 
 底层兼容名如 `manual_mention`、`mention_relay`、`fanout_then_synthesis` 是 engine
 映射，不应作为三个并列的新产品模式展示。
+
+## Auto 模式：全自动链
+
+`auto` 模板复用 multi_lens 讨论机制，但把三个人工关卡改为前置或自动化：
+
+1. **Owner 确认前置**：批准 `channel-create-and-start` Plan 即完成唯一授权点，
+   之后 consensus 不再要求逐次 human_confirmed（以全 roster 签名为门）。
+2. **开放问题自动答复**：phase2 relay 中出现开放问题时，channel-auto-chain
+   的 resolver 边缘 LLM turn 自动逐条 resolve（`resolved_by=owner:auto-resolver`），
+   并在 Channel 中回帖说明。
+3. **PRD 交接自动化**：consensus 达成且 PRD 冻结、readiness 为 ready 后，
+   handoff LLM turn 按 canonical PRD 产出 Task payload 和 Workflow Plan，经
+   `create-task` 受控 action 一步完成 Task 创建与 `workflow.request.proposed`。
+
+终点到 Workflow Plan 发布为止：链不批准、不启动 Workflow。readiness 为
+needs_owner 时链失败并落 `channel.auto_chain.failed`，Owner 可人工接管。
+实现细节见 [Channel Auto 模式](channel-auto-mode.md)。
 
 ## 创建 Channel
 
@@ -142,5 +160,6 @@ Channel-to-PRD 完成只表示：Owner 已确认一个有 ref/digest/revision �
 ## 相关
 
 - [15 Channel 深度使用手册](../15-channel-collaboration.md)
+- [Channel Auto 模式](channel-auto-mode.md)
 - [受控 Workflow 启动](controlled-workflow-start.md)
 - [Feishu AI-Native Bridge](../19-feishu-ai-native-direct-bridge.md)

@@ -1540,6 +1540,32 @@ EVENT_PROBLEM_SPECS: dict[str, EventProblemSpec] = {
             dedupe_key_fields=("channel_id", "thread_id", "review_id"),
         ),
         EventProblemSpec(
+            # 2026-09-15: the auto channel chain (doc: channel auto mode)
+            # emits this after the bounded handoff retry is exhausted or a
+            # gate check fails. The frozen PRD stays canonical and a human
+            # can take over the PRD-to-Task handoff from the channel page;
+            # automated recovery would just re-drive the same edge LLM turn.
+            event_type="channel.auto_chain.failed",
+            event_class="expected_negative",
+            problem_class="contract",
+            failure_class="channel_auto_chain_failed",
+            source="channel_contract",
+            severity="medium",
+            title="Channel auto chain PRD handoff failed",
+            owner_route="run_manager",
+            action_policy="needs_diagnosis",
+            intervention_class="diagnose",
+            suggested_route="run_manager_recovery",
+            suggested_action_kind="diagnose_channel_auto_chain",
+            supervisor_attention="on_repeated",
+            autoresearch_eligible=False,
+            producer_kind="kernel",
+            required_scope_any=("channel_id", "thread_id"),
+            notification_policy="run_manager_first",
+            recovery_policy="human",
+            dedupe_key_fields=("channel_id", "thread_id"),
+        ),
+        EventProblemSpec(
             event_type="channel.result.receipt.failed",
             event_class="expected_negative",
             problem_class="external_side_effect",

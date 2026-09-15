@@ -263,6 +263,43 @@ CHANNEL_TEMPLATES: dict[str, dict[str, Any]] = {
             "synthesizer": "tech_leader",
         },
     },
+    "auto": {
+        "name": "Auto Deliberation",
+        "members": [
+            _member(
+                "product_pm",
+                permission_profile="project_writer",
+                skills=("zf-channel-discussion-participant",),
+            ),
+            _member("arch", skills=("zf-channel-discussion-participant",)),
+            _member(
+                "critic",
+                skills=("zf-channel-discussion-participant",),
+            ),
+            _member(
+                "synthesizer",
+                skills=(
+                    "zf-channel-discussion-participant",
+                    "zf-channel-discussion-synthesizer",
+                ),
+            ),
+            _member(
+                "security_reviewer",
+                skills=(
+                    "zf-channel-discussion-participant",
+                    "zf-channel-security-review",
+                ),
+                optional=True,
+            ),
+        ],
+        "writer_roles": ["product_pm"],
+        "writer_scope": ["docs/design/**", "docs/impl/**"],
+        "discussion": {
+            "mode": "multi_lens",
+            "synthesizer": "synthesizer",
+            "auto": True,
+        },
+    },
 }
 
 
@@ -292,11 +329,16 @@ def materialize_channel_template(
     result = deepcopy(CHANNEL_TEMPLATES[template_id])
     discussion_mode = str(override_map.get("discussion_mode") or "").strip()
     if discussion_mode:
-        if discussion_mode not in {"conversation", "clarification", "multi_lens"}:
+        if discussion_mode == "auto":
+            result.setdefault("discussion", {})["mode"] = "multi_lens"
+            result["discussion"]["auto"] = True
+        elif discussion_mode not in {"conversation", "clarification", "multi_lens"}:
             return None, (
-                "discussion_mode must be conversation, clarification, or multi_lens"
+                "discussion_mode must be conversation, clarification, "
+                "multi_lens, or auto"
             )
-        result.setdefault("discussion", {})["mode"] = discussion_mode
+        else:
+            result.setdefault("discussion", {})["mode"] = discussion_mode
     members = result["members"]
     by_role = {str(member["channel_role"]): member for member in members}
     backend = str(override_map.get("backend") or "codex").strip()
