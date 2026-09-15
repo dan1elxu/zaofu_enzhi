@@ -6,7 +6,10 @@ from typing import Any
 
 from zf.runtime.channel_contracts import discussion_engine_mode
 from zf.runtime.channel_profiles import channel_profile_selection_manifest
-from zf.runtime.channel_templates import materialize_channel_template
+from zf.runtime.channel_templates import (
+    channel_template_default_backend,
+    materialize_channel_template,
+)
 
 
 def normalize_channel_setup_submit_payload(
@@ -38,9 +41,18 @@ def normalize_channel_setup_submit_payload(
     )
     if override_error:
         return {}, {}, override_error
+    # Pin the resolved member backend into the persisted payload so the
+    # runtime action materializes the identical member set even if the
+    # env/config of the executing process differs from the web process.
+    if "backend" not in overrides:
+        overrides = {
+            **overrides,
+            "backend": channel_template_default_backend(config),
+        }
     materialized, error = materialize_channel_template(
         template_id,
         overrides=overrides,
+        default_backend=channel_template_default_backend(config),
     )
     if error or materialized is None:
         return {}, {}, error or "channel template preflight failed"

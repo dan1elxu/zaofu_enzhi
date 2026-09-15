@@ -24,7 +24,10 @@ from zf.runtime.channel_profiles import (
     write_channel_profile_snapshot,
 )
 from zf.runtime.channel_owner_authority import normalize_owner_delegates
-from zf.runtime.channel_templates import materialize_channel_template
+from zf.runtime.channel_templates import (
+    channel_template_default_backend,
+    materialize_channel_template,
+)
 from zf.runtime.control_actions_channel_admin import _materialize_channel_skill_refs
 from zf.runtime.control_actions_helpers import (
     _normal_channel_id,
@@ -48,6 +51,7 @@ class ChannelTemplateActionsMixin:
         materialized, error = materialize_channel_template(
             template_id,
             overrides=payload.get("overrides"),
+            default_backend=channel_template_default_backend(self.config),
         )
         if error or materialized is None:
             return self._failed(

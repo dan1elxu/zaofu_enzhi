@@ -7,6 +7,7 @@ from types import SimpleNamespace
 from zf.core.config.schema import (
     ChannelAgentProfileConfig,
     ChannelConfig,
+    OrchestratorConfig,
     ProjectConfig,
     ZfConfig,
 )
@@ -22,6 +23,7 @@ from zf.runtime.channel_synthesis_reactor import (
 )
 from zf.runtime.channel_templates import (
     TEMPLATE_VERSION,
+    channel_template_default_backend,
     materialize_channel_template,
     template_digest,
 )
@@ -1534,3 +1536,79 @@ def test_discussion_restart_closes_active_session_and_uses_fresh_trigger(
         "dev_reviewer",
         "qa_analyst",
     }
+def test_channel_template_default_backend_follows_env_config_and_fallback(
+    monkeypatch,
+) -> None:
+    monkeypatch.delenv("ZF_KANBAN_AGENT_BACKEND", raising=False)
+    claude_config = SimpleNamespace(
+        orchestrator=SimpleNamespace(backend="claude-code")
+    )
+    assert channel_template_default_backend(claude_config) == "claude-code"
+    assert channel_template_default_backend(None) == "codex"
+    bogus = SimpleNamespace(orchestrator=SimpleNamespace(backend="bogus"))
+    assert channel_template_default_backend(bogus) == "codex"
+    monkeypatch.setenv("ZF_KANBAN_AGENT_BACKEND", "codex")
+    assert channel_template_default_backend(claude_config) == "codex"
+
+
+def test_template_members_default_to_configured_backend(monkeypatch) -> None:
+    monkeypatch.delenv("ZF_KANBAN_AGENT_BACKEND", raising=False)
+    materialized, error = materialize_channel_template(
+        "prd-clarification",
+        default_backend="claude-code",
+    )
+
+    assert error == ""
+    assert materialized is not None
+    assert {
+        str(member.get("provider") or "")
+        for member in materialized["members"]
+    } == {"claude-code"}
+
+    explicit, explicit_error = materialize_channel_template(
+        "prd-clarification",
+        overrides={"backend": "codex"},
+        default_backend="claude-code",
+    )
+    assert explicit_error == ""
+    assert explicit is not None
+    assert {
+        str(member.get("provider") or "")
+        for member in explicit["members"]
+    } == {"codex"}
+
+
+def test_channel_setup_plan_pins_default_backend_and_action_matches(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.delenv("ZF_KANBAN_AGENT_BACKEND", raising=False)
+    config = ZfConfig(
+        project=ProjectConfig(name="channel-default-backend"),
+        orchestrator=OrchestratorConfig(backend="claude-code"),
+    )
+    submit_payload, details, error = normalize_channel_setup_submit_payload(
+        {
+            "template_id": "prd-clarification",
+            "mode": "multi_lens",
+        },
+        config=config,
+    )
+
+    assert error == ""
+    assert submit_payload["overrides"]["backend"] == "claude-code"
+    assert details["member_count"] == 5
+
+    state_dir, _, writer, service = _runtime(tmp_path, config=config)
+    created = _execute(
+        service,
+        writer,
+        "channel-create-from-template",
+        {**submit_payload, "channel_id": "ch-default-backend"},
+    )
+    assert created["ok"] is True
+    detail = project_channel(state_dir, "ch-default-backend") or {}
+    assert {
+        str(member.get("provider") or "")
+        for member in detail["members"]
+    } == {"claude-code"}

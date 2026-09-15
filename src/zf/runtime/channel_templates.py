@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 from copy import deepcopy
 from typing import Any
@@ -314,10 +315,27 @@ def template_digest(template_id: str) -> str:
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
+def channel_template_default_backend(config: object | None = None) -> str:
+    """Resolve the default member backend for template materialization.
+
+    Mirrors the web/Kanban agent backend selection order: explicit env
+    override first, then the configured orchestrator backend, then the
+    historical codex default.
+    """
+    raw = os.environ.get("ZF_KANBAN_AGENT_BACKEND", "")
+    if not raw.strip() and config is not None:
+        raw = str(
+            getattr(getattr(config, "orchestrator", None), "backend", "")
+            or ""
+        )
+    return normalize_provider(raw) or "codex"
+
+
 def materialize_channel_template(
     template_id: str,
     *,
     overrides: object = None,
+    default_backend: object = "codex",
 ) -> tuple[dict[str, Any] | None, str]:
     if template_id not in CHANNEL_TEMPLATES:
         return None, f"unknown channel template: {template_id}"
@@ -341,7 +359,7 @@ def materialize_channel_template(
             result.setdefault("discussion", {})["mode"] = discussion_mode
     members = result["members"]
     by_role = {str(member["channel_role"]): member for member in members}
-    backend = str(override_map.get("backend") or "codex").strip()
+    backend = str(override_map.get("backend") or default_backend or "codex").strip()
     provider = normalize_provider(backend)
     if not provider:
         return None, f"unsupported channel backend: {backend}"
@@ -559,6 +577,7 @@ def _phase_deadlines(value: object) -> tuple[dict[str, int], str]:
 __all__ = [
     "CHANNEL_TEMPLATES",
     "TEMPLATE_VERSION",
+    "channel_template_default_backend",
     "materialize_channel_template",
     "template_digest",
 ]
