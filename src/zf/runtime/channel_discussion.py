@@ -30,6 +30,7 @@ from zf.core.state.locks import locked_path
 from zf.runtime.channel_projection import project_channel, project_channels
 from zf.runtime.channel_contracts import (
     channel_discussion_auto_enabled,
+    channel_discussion_moderator_enabled,
     discussion_engine_mode,
     normalize_product_discussion_mode,
 )
@@ -492,57 +493,31 @@ def advance_discussion(
             writer, channel, actor=actor, source=source,
             channel_id=channel_id, thread_id=thread_id,
         ))
+        if channel_discussion_moderator_enabled(channel):
+            # Moderated discussion: round boundaries and the freeze decision
+            # route through the moderator verdict events; budgets, gates and
+            # fallbacks stay deterministic here and in channel_moderator.
+            from zf.runtime.channel_moderator import advance_moderator_round
+
+            emitted.extend(advance_moderator_round(
+                writer, channel, session,
+                actor=actor, source=source,
+                channel_id=channel_id, thread_id=thread_id,
+                state_dir=state_dir,
+            ))
+            if overdue and not emitted:
+                emitted.extend(_close_stalled(
+                    writer, actor=actor, source=source,
+                    channel_id=channel_id, thread_id=thread_id, phase=state,
+                ))
+            return emitted
         if _ledger_converged(channel, session, thread_id):
-            # The Web action and this tick can both observe the same ledger.
-            # Lock the observation-to-append interval to keep one request per
-            # synthesis generation.
-            with locked_path(
-                channel_synthesis_lock_path(state_dir, channel_id, thread_id)
-            ):
-                current = project_channel(Path(state_dir), channel_id) or channel
-                current_session = discussion_state(current, thread_id)
-                if (
-                    str(current_session.get("state") or "idle")
-                    != "phase2_relay"
-                    or not _ledger_converged(current, current_session, thread_id)
-                ):
-                    return emitted
-                synthesizer = str(current_session.get("synthesizer") or "")
-                request_id = _stable_synthesis_request_id(
-                    channel_id,
-                    thread_id,
-                    str(current_session.get("started_event_id") or ""),
-                    generation=_next_synthesis_generation(current, thread_id),
-                )
-                if not synthesis_request_in_flight(current, thread_id):
-                    writer.emit(
-                        "channel.synthesis.requested",
-                        actor=actor,
-                        correlation_id=channel_id,
-                        payload={
-                            "channel_id": channel_id,
-                            "thread_id": thread_id,
-                            "request_id": request_id,
-                            "target_member_id": synthesizer,
-                            "status": "requested",
-                            "reason": "ledger_converged",
-                            "source": source,
-                        },
-                    )
-                    emitted.append("channel.synthesis.requested")
-                writer.emit(
-                    "channel.discussion.phase.changed",
-                    actor=actor,
-                    correlation_id=channel_id,
-                    payload={
-                        "channel_id": channel_id,
-                        "thread_id": thread_id,
-                        "phase": "phase3_synthesis",
-                        "reason": "ledger_converged",
-                        "source": source,
-                    },
-                )
-                emitted.append("channel.discussion.phase.changed")
+            emitted.extend(request_synthesis_and_phase3(
+                writer, state_dir, channel, session,
+                actor=actor, source=source,
+                channel_id=channel_id, thread_id=thread_id,
+                reason="ledger_converged",
+            ))
             return emitted
         if overdue:
             emitted.extend(_close_stalled(
@@ -629,6 +604,82 @@ def advance_discussion(
             emitted.append("channel.discussion.closed")
         return emitted
 
+    return emitted
+
+
+def request_synthesis_and_phase3(
+    writer: EventWriter,
+    state_dir: Path,
+    channel: dict[str, Any],
+    session: dict[str, Any],
+    *,
+    actor: str,
+    source: str,
+    channel_id: str,
+    thread_id: str,
+    reason: str,
+    gate: Any | None = None,
+) -> list[str]:
+    """Emit synthesis.requested + phase3 transition under the synthesis lock.
+
+    Shared by the mechanical ``ledger_converged`` path and the moderator
+    conclude paths (reason ``moderator_concluded`` / ``budget_exhausted`` /
+    ``moderator_fallback``). ``gate`` re-checks convergence under the lock;
+    it defaults to ``_ledger_converged`` and the moderator passes its own
+    conclude gate (no open questions + completed cross-reviews).
+    """
+    converged = gate or _ledger_converged
+    emitted: list[str] = []
+    # The Web action and this tick can both observe the same ledger.
+    # Lock the observation-to-append interval to keep one request per
+    # synthesis generation.
+    with locked_path(
+        channel_synthesis_lock_path(state_dir, channel_id, thread_id)
+    ):
+        current = project_channel(Path(state_dir), channel_id) or channel
+        current_session = discussion_state(current, thread_id)
+        if (
+            str(current_session.get("state") or "idle")
+            != "phase2_relay"
+            or not converged(current, current_session, thread_id)
+        ):
+            return emitted
+        synthesizer = str(current_session.get("synthesizer") or "")
+        request_id = _stable_synthesis_request_id(
+            channel_id,
+            thread_id,
+            str(current_session.get("started_event_id") or ""),
+            generation=_next_synthesis_generation(current, thread_id),
+        )
+        if not synthesis_request_in_flight(current, thread_id):
+            writer.emit(
+                "channel.synthesis.requested",
+                actor=actor,
+                correlation_id=channel_id,
+                payload={
+                    "channel_id": channel_id,
+                    "thread_id": thread_id,
+                    "request_id": request_id,
+                    "target_member_id": synthesizer,
+                    "status": "requested",
+                    "reason": reason,
+                    "source": source,
+                },
+            )
+            emitted.append("channel.synthesis.requested")
+        writer.emit(
+            "channel.discussion.phase.changed",
+            actor=actor,
+            correlation_id=channel_id,
+            payload={
+                "channel_id": channel_id,
+                "thread_id": thread_id,
+                "phase": "phase3_synthesis",
+                "reason": reason,
+                "source": source,
+            },
+        )
+        emitted.append("channel.discussion.phase.changed")
     return emitted
 
 

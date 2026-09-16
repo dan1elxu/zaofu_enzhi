@@ -290,6 +290,11 @@ def normalize_plan_request(
                     or item.get("mode")
                     or ""
                 ).strip().lower()
+                # Providers naturally write "direct" for an executable option;
+                # the runtime vocab is apply/continue/propose (canonical alias,
+                # same spirit as canonical_action for action names).
+                if explicit_option_mode == "direct":
+                    explicit_option_mode = "apply"
                 # A provider often puts a no-op alternative next to a
                 # top-level action-bound Plan as ``effect: {mode: continue}``.
                 # That explicit continue must not inherit the request action;
@@ -786,7 +791,11 @@ def _subject_action_error(
         if mode == "continue" and not action:
             return ""
         if mode != "apply" or action != "channel-create-and-start":
-            return "channel_setup only allows direct channel-create-and-start"
+            return (
+                "channel_setup only allows channel-create-and-start with "
+                "option submit_mode=apply (vocab: apply, continue, propose); "
+                "a no-create alternative uses submit_mode=continue with no action"
+            )
     elif subject_type == "task_workflow":
         if mode == "continue" and not action:
             return ""

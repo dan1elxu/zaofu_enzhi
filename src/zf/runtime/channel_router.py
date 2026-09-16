@@ -16,6 +16,7 @@ from zf.runtime.channel_contracts import (
     MAX_CHANNEL_PARALLEL_REPLIES,
     active_channel_resolved_skill_refs,
     active_channel_skill_refs,
+    channel_discussion_budget_max_rounds,
     channel_max_parallel_replies,
     default_debate_max_rounds,
     discussion_engine_mode,
@@ -752,10 +753,14 @@ def _debate_round_guard_reason(
     # set max_rounds (or enforce_max_rounds). Agent relay chains are still
     # bounded by the G1 hop-depth guard, so removing the default budget does
     # not open an infinite loop.
+    budget = 0
     if not bool(discussion.get("max_rounds_explicit")) and not bool(
         speaker_policy.get("enforce_max_rounds")
     ):
-        return ""
+        # Moderator complexity budget counts as explicit max_rounds.
+        budget = channel_discussion_budget_max_rounds(channel, thread_id)
+        if budget <= 0:
+            return ""
     # doc 122 §5.1: the round budget is scoped to the ACTIVE discussion
     # session, not the thread's lifetime — counting all-time replies bricked
     # long-lived channels for agents too. No active session → no debate to
@@ -772,6 +777,8 @@ def _debate_round_guard_reason(
         max_rounds = int(discussion.get("max_rounds") or default_max_rounds)
     except Exception:
         max_rounds = default_max_rounds
+    if budget > 0:
+        max_rounds = budget
     if max_rounds <= 0:
         return "debate_round_limit_reached"
     replies = [

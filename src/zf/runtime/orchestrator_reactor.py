@@ -32,6 +32,7 @@ from zf.runtime.channel_synthesis_reactor import (
     react_channel_consensus_proposed,
     react_channel_cross_review_requested,
     react_channel_question_dedup_requested,
+    react_channel_synthesis_blocked,
     react_channel_synthesis_repair_requested,
     react_channel_synthesis_requested,
 )
@@ -177,6 +178,7 @@ _BUILTIN_HANDLER_METHODS: tuple[tuple[str, str], ...] = (
         "channel.synthesis.repair.requested",
         "_on_channel_synthesis_repair_requested",
     ),
+    ("channel.synthesis.blocked", "_on_channel_synthesis_blocked"),
     ("channel.agent.reply.completed", "_on_channel_discussion_event"),
     ("channel.agent.reply.failed", "_on_channel_discussion_event"),
     ("channel.question.opened", "_on_channel_discussion_event"),
@@ -192,6 +194,13 @@ _BUILTIN_HANDLER_METHODS: tuple[tuple[str, str], ...] = (
     ("channel.cross_review.completed", "_on_channel_discussion_event"),
     ("channel.cross_review.rejected", "_on_channel_discussion_event"),
     ("channel.questions.frozen", "_on_channel_discussion_event"),
+    (
+        "channel.discussion.complexity.decided",
+        "_on_channel_discussion_event",
+    ),
+    ("channel.discussion.round.opened", "_on_channel_discussion_event"),
+    ("channel.moderator.verdict.proposed", "_on_channel_discussion_event"),
+    ("channel.moderator.verdict.fallback", "_on_channel_discussion_event"),
     ("channel.consensus.proposed", "_on_channel_consensus_proposed"),
     ("channel.consensus.signed", "_on_channel_discussion_event"),
     ("channel.consensus.blocked", "_on_channel_discussion_event"),
@@ -400,13 +409,27 @@ class EventReactorMixin(OrchestratorAgentReactorMixin, DurableCallWorkflowMixin)
         return registry
 
     def _register_channel_auto_chain_handlers(self, registry) -> None:
-        """Auto Channel chain: question resolution + PRD handoff side cars."""
+        """Auto Channel chain + discussion moderator side cars.
+
+        Registration failures are logged, not swallowed: a previous silent
+        ``except: pass`` here hid a handler-signature bug for a full session
+        ("zf start 了也没用" — auto-e2e 2026-09-16).
+        """
+        import logging
+
+        _log = logging.getLogger(__name__)
         try:
             from zf.runtime.channel_auto_chain import register_auto_chain_handlers
 
-            register_auto_chain_handlers(registry)
+            register_auto_chain_handlers(registry, self)
         except Exception:
-            pass
+            _log.exception("channel auto-chain handler registration failed")
+        try:
+            from zf.runtime.channel_moderator import register_moderator_handlers
+
+            register_moderator_handlers(registry, self)
+        except Exception:
+            _log.exception("channel moderator handler registration failed")
 
     def _register_goal_rescan_handlers(self, registry) -> None:
         """B2(G1 消费侧):rescan → lane 微环 continuation,不新起 fanout。"""
@@ -5914,6 +5937,13 @@ class EventReactorMixin(OrchestratorAgentReactorMixin, DurableCallWorkflowMixin)
         event: ZfEvent,
     ) -> WorkflowRuntimeDecision | None:
         react_channel_synthesis_repair_requested(self, event)
+        return None
+
+    def _on_channel_synthesis_blocked(
+        self,
+        event: ZfEvent,
+    ) -> WorkflowRuntimeDecision | None:
+        react_channel_synthesis_blocked(self, event)
         return None
 
     def _on_channel_question_dedup_requested(

@@ -356,6 +356,40 @@ def channel_discussion_auto_enabled(channel: dict[str, Any] | None) -> bool:
     return discussion.get("auto") is True
 
 
+def channel_discussion_moderator_enabled(channel: dict[str, Any] | None) -> bool:
+    """Whether a Channel discussion runs with a moderator (主持人).
+
+    Opt-in discussion config flag (auto template sets it). When enabled,
+    phase2 round boundaries and the freeze decision route through the
+    moderator verdict events in ``channel_moderator``; the deterministic
+    state machine keeps owning budgets, gates and fallbacks.
+    """
+    discussion = (
+        (channel or {}).get("discussion")
+        if isinstance((channel or {}).get("discussion"), dict)
+        else {}
+    )
+    return discussion.get("moderator") is True
+
+
+def channel_discussion_budget_max_rounds(
+    channel: dict[str, Any] | None, thread_id: str,
+) -> int:
+    """Moderator complexity budget for a thread, 0 when undecided.
+
+    The moderator's complexity classification
+    (``channel.discussion.complexity.decided``) fixes max_rounds up front;
+    the router treats that cap as explicit so simple tasks cannot loop.
+    """
+    decided = ((channel or {}).get("complexity_decisions") or {}).get(thread_id)
+    if not isinstance(decided, dict):
+        return 0
+    try:
+        return max(0, int(decided.get("max_rounds") or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
 def validate_channel_member_contract(payload: dict[str, Any]) -> str:
     member_type_raw = str(payload.get("member_type") or "").strip()
     if member_type_raw and member_type_raw not in CHANNEL_MEMBER_TYPE_INPUTS:

@@ -797,6 +797,29 @@ def test_task_map_validation_rejects_prose_in_structured_validation_command() ->
     assert any("validation.command must be an executable command only" in error for error in result.errors)
 
 
+def test_task_map_validation_accepts_quoted_cjk_test_data_in_command() -> None:
+    # 2026-09-16 auto-e2e: CJK inside quoted string literals is executable
+    # test data, not prose; the unquoted-CJK gate case stays rejected above.
+    result = validate_task_map_payload({
+        "schema_version": "task-map.v1",
+        "tasks": [
+            {
+                "task_id": "TASK-CJK-A",
+                "title": "todo cli smoke",
+                "wave": 1,
+                "verification": (
+                    'tmpdir="$(mktemp -d)" && HOME="$tmpdir" '
+                    'python3 todo.py add "买牛奶" && '
+                    'HOME="$tmpdir" python3 todo.py list'
+                ),
+            },
+        ],
+    })
+
+    assert result.passed is True
+    assert result.errors == []
+
+
 def test_task_map_validation_can_accept_structural_candidate_map() -> None:
     result = validate_task_map_payload(
         {

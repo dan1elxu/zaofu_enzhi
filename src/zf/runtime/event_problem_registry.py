@@ -1566,6 +1566,33 @@ EVENT_PROBLEM_SPECS: dict[str, EventProblemSpec] = {
             dedupe_key_fields=("channel_id", "thread_id"),
         ),
         EventProblemSpec(
+            # 2026-09-16: moderator (主持人) verdict LLM turn failed its
+            # bounded attempts. The kernel already applied the deterministic
+            # fallback (continue within budget / conclude at budget), so this
+            # is an observable signal, not a stall; repeated fallback on the
+            # same thread means the moderation edge is systematically broken
+            # (e.g. provider down) and a human should take over the thread.
+            event_type="channel.moderator.verdict.fallback",
+            event_class="expected_negative",
+            problem_class="contract",
+            failure_class="channel_moderator_verdict_fallback",
+            source="channel_contract",
+            severity="low",
+            title="Channel moderator verdict fell back to the deterministic default",
+            owner_route="run_manager",
+            action_policy="informational",
+            intervention_class="none",
+            suggested_route="run_manager_recovery",
+            suggested_action_kind="diagnose_channel_auto_chain",
+            supervisor_attention="on_repeated",
+            autoresearch_eligible=False,
+            producer_kind="kernel",
+            required_scope_any=("channel_id", "thread_id"),
+            notification_policy="run_manager_first",
+            recovery_policy="self",
+            dedupe_key_fields=("channel_id", "thread_id", "round"),
+        ),
+        EventProblemSpec(
             event_type="channel.result.receipt.failed",
             event_class="expected_negative",
             problem_class="external_side_effect",

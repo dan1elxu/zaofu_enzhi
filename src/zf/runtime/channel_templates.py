@@ -299,6 +299,7 @@ CHANNEL_TEMPLATES: dict[str, dict[str, Any]] = {
             "mode": "multi_lens",
             "synthesizer": "synthesizer",
             "auto": True,
+            "moderator": True,
         },
     },
 }
@@ -350,6 +351,7 @@ def materialize_channel_template(
         if discussion_mode == "auto":
             result.setdefault("discussion", {})["mode"] = "multi_lens"
             result["discussion"]["auto"] = True
+            result["discussion"]["moderator"] = True
         elif discussion_mode not in {"conversation", "clarification", "multi_lens"}:
             return None, (
                 "discussion_mode must be conversation, clarification, "

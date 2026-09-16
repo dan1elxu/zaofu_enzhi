@@ -119,6 +119,11 @@ CHANNEL_EVENT_TYPES = {
     "channel.consensus.blocked",
     "channel.consensus.review.rejected",
     "channel.consensus.reached",
+    "channel.discussion.complexity.decided",
+    "channel.discussion.round.opened",
+    "channel.moderator.verdict.requested",
+    "channel.moderator.verdict.proposed",
+    "channel.moderator.verdict.fallback",
     "channel.message.posted",
     "channel.message.delivered",
     "channel.message.failed",
@@ -501,6 +506,12 @@ def _build(events: list[tuple[int, ZfEvent]], *, state_dir: Path | None = None) 
             _apply_discussion_phase(channel, event, payload)
         elif event.type == "channel.discussion.closed":
             _apply_discussion_closed(channel, event, payload)
+        elif event.type == "channel.discussion.complexity.decided":
+            _apply_complexity_decided(channel, event, payload)
+        elif event.type == "channel.discussion.round.opened":
+            _apply_moderator_round(channel, event, payload)
+        elif event.type.startswith("channel.moderator.verdict."):
+            _apply_moderator_verdict(channel, event, payload)
         elif event.type.startswith("channel.relay."):
             _apply_relay(channel, event, payload)
         elif event.type == "channel.question.resolve.rejected":
@@ -576,6 +587,9 @@ def _empty_channel(channel_id: str) -> dict[str, Any]:
         "syntheses": [],
         "synthesis_requests": [],
         "question_dedup_requests": [],
+        "complexity_decisions": {},
+        "moderator_rounds": [],
+        "moderator_verdicts": [],
         "contributions": {},
         "workflow_requests": [],
         "mentions_detected": [],
@@ -1042,6 +1056,9 @@ def _apply_history_cleared(channel: dict[str, Any], event: ZfEvent, payload: dic
     channel["state_updates"] = []
     channel["synthesis_requests"] = []
     channel["question_dedup_requests"] = []
+    channel["complexity_decisions"] = {}
+    channel["moderator_rounds"] = []
+    channel["moderator_verdicts"] = []
     channel["history_cleared_at"] = event.ts
     channel["history_clear_event_id"] = event.id
     channel["history_clear_reason"] = _payload_str(payload, "reason")
@@ -1672,6 +1689,8 @@ def _apply_discussion_mode(channel: dict[str, Any], event: ZfEvent, payload: dic
         discussion["phase_deadline_seconds"] = redact_obj(payload.get("phase_deadline_seconds"))
     if payload.get("auto") is not None:
         discussion["auto"] = payload.get("auto") is True
+    if payload.get("moderator") is not None:
+        discussion["moderator"] = payload.get("moderator") is True
     discussion["updated_at"] = event.ts
     discussion["event_id"] = event.id
 
@@ -1808,6 +1827,48 @@ def _apply_discussion_phase(channel: dict[str, Any], event: ZfEvent, payload: di
         consensus = channel["consensus"].get(thread_id)
         if isinstance(consensus, dict):
             consensus["reopened"] = True
+
+
+def _apply_complexity_decided(channel: dict[str, Any], event: ZfEvent, payload: dict[str, Any]) -> None:
+    thread_id = _payload_str(payload, "thread_id") or "main"
+    channel["complexity_decisions"][thread_id] = redact_obj({
+        "thread_id": thread_id,
+        "complexity": _payload_str(payload, "complexity"),
+        "max_rounds": _payload_int(payload.get("max_rounds"), 0),
+        "member_count": _payload_int(payload.get("member_count"), 0),
+        "source": _payload_str(payload, "source"),
+        "event_id": event.id,
+        "decided_at": event.ts,
+    })
+
+
+def _apply_moderator_round(channel: dict[str, Any], event: ZfEvent, payload: dict[str, Any]) -> None:
+    channel["moderator_rounds"].append(redact_obj({
+        "thread_id": _payload_str(payload, "thread_id") or "main",
+        "round": _payload_int(payload.get("round"), 0),
+        "speakers": _string_list(payload.get("speakers")),
+        "focus": _payload_str(payload, "focus"),
+        "fallback": payload.get("fallback") is True,
+        "event_id": event.id,
+        "opened_at": event.ts,
+    }))
+
+
+def _apply_moderator_verdict(channel: dict[str, Any], event: ZfEvent, payload: dict[str, Any]) -> None:
+    kind = event.type.rsplit(".", 1)[-1]  # requested | proposed | fallback
+    channel["moderator_verdicts"].append(redact_obj({
+        "thread_id": _payload_str(payload, "thread_id") or "main",
+        "round": _payload_int(payload.get("round"), 0),
+        "kind": kind,
+        "ledger_digest": _payload_str(payload, "ledger_digest"),
+        "action": _payload_str(payload, "action") or _payload_str(payload, "fallback_action"),
+        "speakers": _string_list(payload.get("speakers")),
+        "focus": _payload_str(payload, "focus"),
+        "fallback": kind == "fallback",
+        "reason": _payload_str(payload, "reason"),
+        "event_id": event.id,
+        "ts": event.ts,
+    }))
 
 
 def _apply_discussion_closed(channel: dict[str, Any], event: ZfEvent, payload: dict[str, Any]) -> None:
@@ -2716,6 +2777,9 @@ def _public_channel(
         "syntheses": channel["syntheses"],
         "synthesis_requests": channel["synthesis_requests"],
         "question_dedup_requests": channel["question_dedup_requests"],
+        "complexity_decisions": channel["complexity_decisions"],
+        "moderator_rounds": channel["moderator_rounds"],
+        "moderator_verdicts": channel["moderator_verdicts"],
         "workflow_requests": workflow_requests,
         "mentions_detected": channel["mentions_detected"],
         "routes": channel["routes"],

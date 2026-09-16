@@ -221,7 +221,11 @@ _OVERSIZED_FILE_CAPS = {
     # combined with origin/dev's task-map amendment and workflow-reader wiring.
     # Both parents stayed below the frozen cap and the behavior remains in
     # sibling modules; freeze the merged registration/call-site surface here.
-    "src/zf/runtime/orchestrator.py": 4944,
+    # +1 net (2026-09-16, auto-e2e dispatch fix): channel.discussion.started
+    # joins _KERNEL_LIVENESS_EVENTS so task-less channel events reach the
+    # builtin side-effect handlers under L2-active configs — a set-membership
+    # line plus a comment; the handler logic lives in channel_moderator.py.
+    "src/zf/runtime/orchestrator.py": 4945,
     # +14 (2026-06-20): PRD-product-stage branch in the fanout-child briefing
     # builder (emits prd_ref/artifact_refs/evidence_refs). It is one more
     # sibling branch of the same _write_*_fanout_briefing method that already
@@ -328,7 +332,17 @@ _OVERSIZED_FILE_CAPS = {
     # handlers delegate. The chain logic (question resolver + PRD handoff)
     # lives in the channel_auto_chain.py sibling; only the registry
     # composition point can sit here. Re-freeze at the new size.
-    "src/zf/runtime/orchestrator_reactor.py": 6987,
+    # +21 (2026-09-16, channel moderator): register_moderator_handlers
+    # composition call site + the 5 moderator event types in
+    # _BUILTIN_HANDLER_METHODS + exception logging in the auto-chain
+    # delegate. All handler logic lives in channel_moderator.py; only the
+    # registry composition point can sit here. Re-freeze at the new size.
+    # +9 (2026-09-16, synthesis blocked recovery): one dispatch-table row
+    # + one thin _on_channel_synthesis_blocked delegate; the recovery
+    # logic lives in channel_synthesis_reactor.py. The handler method must
+    # live on this mixin class (registry walks _BUILTIN_HANDLER_METHODS),
+    # so a sibling module cannot own it. Re-freeze at the new size.
+    "src/zf/runtime/orchestrator_reactor.py": 7018,
     # Merge 2026-06-22: dispatch recovery helpers crossed the previous cap.
     # Reconciliation 2026-07-03: RF-7B transition-only dispatch (+32) + prior
     # merges pushed to 4851. Freeze at clean dev size; next dispatch feature extracts.

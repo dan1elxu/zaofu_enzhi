@@ -895,11 +895,16 @@ def _verification_contains_prose(command: str) -> bool:
     text = str(command or "").strip()
     if not text:
         return False
-    if any("\u4e00" <= ch <= "\u9fff" for ch in text):
+    # Scan only the shell structure: CJK / full-width punctuation / prose
+    # markers inside quoted string literals are executable test DATA, not
+    # prose (2026-09-16 auto-e2e: `todo.py add "<CJK title>"` is a valid
+    # command). Unquoted prose stays rejected.
+    unquoted = re.sub(r"'[^']*'|\"[^\"]*\"", "", text)
+    if any("\u4e00" <= ch <= "\u9fff" for ch in unquoted):
         return True
-    if any(ch in text for ch in ("（", "）", "；")):
+    if any(ch in unquoted for ch in ("（", "）", "；")):
         return True
-    lowered = text.lower()
+    lowered = unquoted.lower()
     prose_markers = (
         "expected red",
         "red expected",

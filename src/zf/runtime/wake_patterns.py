@@ -79,6 +79,14 @@ WAKE_PATTERNS: tuple[str, ...] = (
     "channel.question.dedup.rejected",
     "channel.question.dedup.remediation.exhausted",
     "channel.cross_review.requested",
+    # Moderated discussions: the moderator verdict pipeline is reactor-handled
+    # (channel_moderator) and task-less — without wake entries the round
+    # boundary would wait for an unrelated event or the deadline sweep.
+    "channel.moderator.verdict.requested",
+    "channel.moderator.verdict.proposed",
+    "channel.moderator.verdict.fallback",
+    "channel.discussion.complexity.decided",
+    "channel.discussion.round.opened",
     "workflow.fragment.proposed",
     "workflow.reconcile.requested",
     "fanout.aggregate.rebuild.requested",

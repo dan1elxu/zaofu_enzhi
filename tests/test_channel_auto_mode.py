@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+from types import SimpleNamespace
 from pathlib import Path
 
 from zf.core.config.schema import (
@@ -14,6 +15,7 @@ from zf.core.config.schema import (
     ZfConfig,
 )
 from zf.core.events import EventLog, EventWriter
+from zf.core.reactor.registry import EventActionRegistry
 from zf.core.task.store import TaskStore
 from zf.runtime import channel_auto_chain
 from zf.runtime.channel_contract_artifacts import (
@@ -26,6 +28,7 @@ from zf.runtime.channel_discussion import advance_discussion
 from zf.runtime.channel_projection import project_channel
 from zf.runtime.channel_templates import materialize_channel_template
 from zf.runtime.control_actions import ControlledActionService
+from zf.runtime.orchestrator import _kernel_owns_liveness_event
 
 CH = "ch-auto"
 
@@ -186,6 +189,40 @@ def test_fold_records_auto_flag(tmp_path: Path) -> None:
     _auto_channel(writer, state_dir, tmp_path)
     channel = project_channel(state_dir, CH) or {}
     assert channel_discussion_auto_enabled(channel) is True
+
+
+def test_auto_chain_handlers_bind_the_orchestrator_host(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    """The event registry passes only ``event`` to side-effect handlers."""
+    state_dir, writer = _writer(tmp_path)
+    host = SimpleNamespace(state_dir=state_dir)
+    seen: list[tuple[object, str]] = []
+
+    def _record(received_host, event):
+        seen.append((received_host, event.type))
+
+    monkeypatch.setattr(channel_auto_chain, "react_channel_auto_question_event", _record)
+    monkeypatch.setattr(channel_auto_chain, "react_channel_consensus_reached", _record)
+    registry = EventActionRegistry()
+    channel_auto_chain.register_auto_chain_handlers(registry, host)
+
+    question = writer.emit("channel.question.opened", correlation_id=CH)
+    blocked = writer.emit("channel.consensus.blocked", correlation_id=CH)
+    consensus = writer.emit("channel.consensus.reached", correlation_id=CH)
+    registry.resolve("channel.question.opened")[0].handler(question)
+    registry.resolve("channel.consensus.blocked")[0].handler(blocked)
+    registry.resolve("channel.consensus.reached")[0].handler(consensus)
+
+    assert seen == [
+        (host, "channel.question.opened"),
+        (host, "channel.consensus.blocked"),
+        (host, "channel.consensus.reached"),
+    ]
+
+
+def test_auto_handoff_event_is_kernel_owned_even_with_layer2() -> None:
+    assert _kernel_owns_liveness_event(None, "channel.consensus.reached") is True
 
 
 # ---------------------------------------------------------------------------
@@ -604,6 +641,44 @@ def test_handoff_is_idempotent(tmp_path: Path, monkeypatch) -> None:
         if event.type == "channel.auto_chain.completed"
     ]
     assert len(completed) == 1
+
+
+def test_handoff_retries_once_with_gate_rejection_reason(tmp_path: Path, monkeypatch) -> None:
+    # 2026-09-16 auto-e2e: create-task rejected a parseable payload (workflow
+    # option missing executable parameters); the rejection reason must be fed
+    # back into one bounded re-turn instead of failing the chain outright.
+    state_dir, writer = _writer(tmp_path)
+    _ready_auto_prd(tmp_path, writer, state_dir)
+    config = _chain_config()
+    prompts: list[str] = []
+    turns = {"n": 0}
+
+    def _recording_turn(*, prompt, **kwargs):
+        prompts.append(prompt)
+        turns["n"] += 1
+        return _fake_handoff_turn()
+
+    attempts = {"n": 0}
+
+    def _flaky_execute_action(*, action, payload, **kwargs):
+        attempts["n"] += 1
+        if attempts["n"] == 1:
+            return {"ok": False, "reason": "missing executable parameter(s): target_root"}
+        return {"ok": True, "task_id": "task-retry-1", "workflow_plan_event_id": "evt-wfp-1"}
+
+    monkeypatch.setattr(channel_auto_chain, "_agent_json_turn", _recording_turn)
+    monkeypatch.setattr(channel_auto_chain, "_execute_action", _flaky_execute_action)
+    cause = _events(writer)[-1]
+    result = channel_auto_chain.run_auto_chain(
+        state_dir=state_dir, writer=writer, config=config,
+        project_root=tmp_path, channel_id=CH, thread_id="main",
+        cause_event_id=cause.id,
+    )
+    assert result["ok"] is True
+    assert turns["n"] == 2
+    assert "missing executable parameter(s): target_root" in prompts[1]
+    types = [event.type for event in _events(writer)]
+    assert "channel.auto_chain.completed" in types
 
 
 def test_handoff_fails_when_readiness_not_ready(tmp_path: Path, monkeypatch) -> None:

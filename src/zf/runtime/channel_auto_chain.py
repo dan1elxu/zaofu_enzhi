@@ -23,6 +23,7 @@ from __future__ import annotations
 import json
 import os
 import threading
+from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -46,20 +47,31 @@ AUTO_CHAIN_QUESTION_EVENT_TYPES = (
     "channel.questions.frozen",
     "channel.question.dedup.applied",
     "channel.question.opened",
+    # A blocked consensus causes the discussion driver to append a new
+    # blocker question and move the thread back to phase2 in the same tick.
+    # Observe the source event as well so the auto resolver cannot miss that
+    # internally-created question before the next external event arrives.
+    "channel.consensus.blocked",
 )
 
 
-def register_auto_chain_handlers(registry: Any) -> None:
-    """Wire auto-chain reactors into the orchestrator reactor registry."""
+def register_auto_chain_handlers(registry: Any, host: Any) -> None:
+    """Wire host-aware auto-chain reactors into the event registry.
+
+    ``EventActionRegistry`` invokes handlers with the event only.  Bind the
+    orchestrator host here instead of registering the two-argument reactor
+    functions directly (which would be swallowed as a side-effect TypeError).
+    """
+    question_handler = partial(react_channel_auto_question_event, host)
     registry.register(
         "channel.consensus.reached",
-        react_channel_consensus_reached,
+        partial(react_channel_consensus_reached, host),
         source="builtin",
     )
     for event_type in AUTO_CHAIN_QUESTION_EVENT_TYPES:
         registry.register(
             event_type,
-            react_channel_auto_question_event,
+            question_handler,
             source="builtin",
         )
 
@@ -185,54 +197,73 @@ def run_auto_chain(
         prd_text=prd_text or "(PRD artifact body unavailable; trust ref/digest only)",
         routes=routes,
     )
-    parsed, error = _agent_json_turn(
-        state_dir=state_dir,
-        project_root=project_root,
-        config=config,
-        thread_key=f"channel-auto-handoff:{channel_id}:{int(authority.get('prd_revision') or 0)}",
-        prompt=prompt,
-        repair_hint=(
-            "Return exactly one fenced JSON object with keys title, objective, "
-            "scope, acceptance_criteria, explicit_non_goals, skills_required, "
-            "workflow_plan (question plus two or three options with route_id, "
-            "label, description, recommended, parameters)."
-        ),
+    thread_key = f"channel-auto-handoff:{channel_id}:{int(authority.get('prd_revision') or 0)}"
+    json_repair_hint = (
+        "Return exactly one fenced JSON object with keys title, objective, "
+        "scope, acceptance_criteria, explicit_non_goals, skills_required, "
+        "workflow_plan (question plus two or three options with route_id, "
+        "label, description, recommended, parameters)."
     )
-    if parsed is None:
-        return _fail(writer, cause, channel_id, thread_id, "handoff_agent_failed", error)
 
     from zf.web.channel_task_plan import normalize_channel_task_submit_payload
 
-    payload, _, normalize_error = normalize_channel_task_submit_payload({
-        "title": parsed.get("title"),
-        "objective": parsed.get("objective"),
-        "scope": parsed.get("scope"),
-        "acceptance_criteria": parsed.get("acceptance_criteria"),
-        "explicit_non_goals": parsed.get("explicit_non_goals"),
-        "skills_required": parsed.get("skills_required"),
-        "priority": parsed.get("priority"),
-        "channel_authority": authority,
-        "workflow_plan": parsed.get("workflow_plan"),
-    })
-    if normalize_error:
-        return _fail(writer, cause, channel_id, thread_id, "handoff_payload_invalid", normalize_error)
-
-    result = _execute_action(
-        state_dir=state_dir,
-        writer=writer,
-        config=config,
-        project_root=project_root,
-        action="create-task",
-        payload=payload,
-        requested=cause,
-        correlation_id=channel_id,
-    )
-    if not bool(result.get("ok")):
-        return _fail(
-            writer, cause, channel_id, thread_id,
-            "create_task_failed",
-            str(result.get("reason") or result.get("status") or "unknown"),
+    # Bounded contract repair (2026-09-16 auto-e2e): the create-task gate may
+    # reject an otherwise parseable payload (verification command shape,
+    # workflow option parameters). Feed the rejection reason back into one
+    # re-turn before giving up; the kernel gate stays deterministic.
+    result: dict[str, Any] | None = None
+    fail_status = ""
+    fail_reason = ""
+    for attempt in (1, 2):
+        turn_prompt = prompt
+        if attempt == 2 and fail_reason:
+            turn_prompt = (
+                f"{prompt}\n\nYour previous answer was rejected by the kernel "
+                f"task-creation gate: {fail_reason}\n"
+                "Fix exactly that and return the full fenced JSON object again."
+            )
+        parsed, error = _agent_json_turn(
+            state_dir=state_dir,
+            project_root=project_root,
+            config=config,
+            thread_key=thread_key,
+            prompt=turn_prompt,
+            repair_hint=json_repair_hint,
         )
+        if parsed is None:
+            return _fail(writer, cause, channel_id, thread_id, "handoff_agent_failed", error)
+
+        payload, _, normalize_error = normalize_channel_task_submit_payload({
+            "title": parsed.get("title"),
+            "objective": parsed.get("objective"),
+            "scope": parsed.get("scope"),
+            "acceptance_criteria": parsed.get("acceptance_criteria"),
+            "explicit_non_goals": parsed.get("explicit_non_goals"),
+            "skills_required": parsed.get("skills_required"),
+            "priority": parsed.get("priority"),
+            "channel_authority": authority,
+            "workflow_plan": parsed.get("workflow_plan"),
+        })
+        if normalize_error:
+            return _fail(writer, cause, channel_id, thread_id, "handoff_payload_invalid", normalize_error)
+
+        result = _execute_action(
+            state_dir=state_dir,
+            writer=writer,
+            config=config,
+            project_root=project_root,
+            action="create-task",
+            payload=payload,
+            requested=cause,
+            correlation_id=channel_id,
+        )
+        if bool(result.get("ok")):
+            break
+        fail_status = "create_task_failed"
+        fail_reason = str(result.get("reason") or result.get("status") or "unknown")
+        result = None
+    if result is None:
+        return _fail(writer, cause, channel_id, thread_id, fail_status, fail_reason)
     writer.emit(
         "channel.auto_chain.completed",
         actor=AUTO_CHAIN_ACTOR,
@@ -430,6 +461,11 @@ def _agent_json_turn(
     return None, f"agent did not return one parseable JSON object: {last_reply[:300]}"
 
 
+# Public alias: channel_moderator reuses the same bounded headless-JSON turn
+# pattern without importing a private name across sibling modules.
+agent_json_turn = _agent_json_turn
+
+
 def _parse_single_fenced_json(text: str) -> dict[str, Any] | None:
     for candidate in text.split("```"):
         candidate = candidate.strip()
@@ -594,14 +630,28 @@ def _route_choices(config: Any | None) -> str:
         catalog = workflow_route_catalog(config)
     except Exception:
         return "(route catalog unavailable)"
-    rows = [
-        {
+    rows = []
+    for route in catalog.get("routes") or []:
+        if not isinstance(route, dict) or not str(route.get("route_id") or route.get("id") or ""):
+            continue
+        row: dict[str, Any] = {
             "route_id": str(route.get("route_id") or route.get("id") or ""),
             "default_tier": str(route.get("default_tier") or ""),
         }
-        for route in catalog.get("routes") or []
-        if isinstance(route, dict)
-    ]
+        if str(route.get("start_adapter") or "") in {
+            "delivery_request_submit",
+            "light_delivery_request_submit",
+            "registered_general",
+        }:
+            try:
+                from zf.core.workflow.request_policy import required_fields_for_kind
+
+                row["required_parameters"] = required_fields_for_kind(
+                    str(route.get("kind") or "workflow")
+                )
+            except Exception:
+                pass
+        rows.append(row)
     return json.dumps(rows, ensure_ascii=True)
 
 
@@ -694,7 +744,9 @@ with keys:
 - workflow_plan: {{"question": <short question>, "options": [2-3 of
   {{"route_id", "label", "description", "recommended", "parameters"}}]}};
   use only route_id values from this catalog: {routes}; mark exactly one
-  option "recommended": true.
+  option "recommended": true. Every option's "parameters" must include that
+  route's "required_parameters" from the catalog (repo-relative paths or
+  other concrete executable values, never prose).
 
 Do not invent route ids. Do not propose actions outside this JSON.
 

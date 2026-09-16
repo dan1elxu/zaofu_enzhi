@@ -181,12 +181,38 @@ _KERNEL_LIVENESS_EVENTS = frozenset({
     "channel.question.updated",
     "channel.question.resolved",
     "channel.question.merged",
+    # Auto Channel resolver trigger: dedup.applied is the event that fires
+    # right after the thread enters phase2_relay with frozen owner questions;
+    # in L2-active configs a task-less non-liveness event was forwarded to
+    # Layer 2 as "notify" only, so the auto-chain reactor never ran (auto-e2e
+    # 2026-09-16: discussion blew through phase2 into synthesis with 22 open
+    # owner questions). dedup.requested joins it so the dedup worker runs
+    # live instead of waiting for the deadline sweep.
+    "channel.question.dedup.requested",
+    "channel.question.dedup.applied",
     "channel.cross_review.completed",
     "channel.cross_review.rejected",
     "channel.questions.frozen",
     "channel.consensus.proposed",
     "channel.consensus.signed",
     "channel.consensus.blocked",
+    # Auto Channel handoff consumes the taskless consensus completion directly
+    # so an orchestrator role cannot divert it to Layer 2.
+    "channel.consensus.reached",
+    # Channel moderator (主持人): task-less round-boundary / verdict events
+    # must reach the deterministic advance tick and the moderator reactors;
+    # forwarding them to Layer 2 as "notify" only would silently stall every
+    # moderated discussion (same dispatch class as auto-e2e 2026-09-16).
+    "channel.discussion.complexity.decided",
+    "channel.discussion.round.opened",
+    "channel.moderator.verdict.requested",
+    "channel.moderator.verdict.proposed",
+    "channel.moderator.verdict.fallback",
+    # Moderated discussions start the classification turn from the
+    # task-less discussion.started event; without liveness membership the
+    # event is forwarded to Layer 2 as "notify" only and the budget is
+    # never decided (verdict requests would wait forever on it).
+    "channel.discussion.started",
 })
 
 
@@ -2699,6 +2725,18 @@ class WorkflowRuntimeCoordinator(
                         if decision:
                             decisions.append(decision)
                         self._processed_event_ids.add(event.id)
+                    elif idx > 0:
+                        # Builtin side-effect handlers (auto-chain resolver /
+                        # handoff, goal rescan, …) must also run for task-less
+                        # events. Without this branch only task-bearing events
+                        # reached them, so the Channel auto chain never fired
+                        # live: channel events are correlation-id-only
+                        # (auto-e2e 2026-09-16: dedup.applied landed with
+                        # task_id=None and the resolver was never scheduled).
+                        try:
+                            entry.handler(event)
+                        except Exception:
+                            pass
                 continue
             entries = self.event_registry.resolve(event.type)
             if entries:

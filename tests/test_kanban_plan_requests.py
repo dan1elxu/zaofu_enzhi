@@ -807,6 +807,24 @@ def test_channel_setup_plan_requires_explicit_mode_at_extract_and_apply() -> Non
     assert duplicate["status"] == "already_answered"
 
 
+def test_channel_setup_option_mode_direct_aliases_to_apply() -> None:
+    # 2026-09-16 web-panel session: the provider wrote option submit_mode
+    # "direct" (natural word for an executable option); the runtime vocab is
+    # apply/continue/propose, so "direct" canonicalizes to "apply".
+    answer = _channel_setup_answer().replace(
+        '"recommended": true,',
+        '"recommended": true,\n        "submit_mode": "direct",',
+        1,
+    )
+    request = extract_plan_request(answer)
+    assert request is not None and request["valid"] is True, (
+        request and request.get("validation_error")
+    )
+    option = request["questions"][0]["options"][0]
+    assert option["submit_mode"] == "apply"
+    assert option["submit_action"] == "channel-create-and-start"
+
+
 def test_channel_plan_defaults_missing_presentation_header() -> None:
     request = extract_plan_request(
         _channel_setup_answer().replace(
