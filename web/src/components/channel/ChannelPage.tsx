@@ -814,6 +814,10 @@ export function ChannelPage({
   const ownerReports = workspaceDetail?.owner_reports ?? [];
   const automationReports = workspaceDetail?.automation_reports ?? [];
   const resultReceipts = workspaceDetail?.result_receipts ?? [];
+  const latestReceiptTaskId = [...resultReceipts]
+    .reverse()
+    .map((receipt) => recordString(receipt, "task_id"))
+    .find((taskId) => Boolean(taskId)) ?? "";
   const discussionMode = recordString(workspaceDetail?.discussion ?? {}, "mode", "conversation");
   const latestThreadRequirement = [...messages]
     .reverse()
@@ -1607,18 +1611,18 @@ export function ChannelPage({
             })}
           >
             <Plus size={16} />
-            Plan Task + Workflow
+            Plan Task
           </button>
         </div>
         <details className="channel-workflow-existing-task">
-          <summary>Plan an existing Task</summary>
+          <summary>Plan Workflow for a Task (second step)</summary>
           <form
             className="channel-control-form-grid"
             onSubmit={(event) => {
               event.preventDefault();
               void runControl(async () => {
                 await onWorkflowRequest(
-                  workflowDraft.taskId.trim(),
+                  workflowDraft.taskId.trim() || latestReceiptTaskId,
                   workflowDraft.reason.trim() || "Execute the canonical Channel PRD.",
                   controlThreadId,
                 );
@@ -1631,7 +1635,7 @@ export function ChannelPage({
               <input
                 className="filter-input"
                 data-testid="channel-workflow-task"
-                placeholder="task id"
+                placeholder={latestReceiptTaskId || "task id"}
                 value={workflowDraft.taskId}
                 onChange={(event) => setWorkflowDraft({ ...workflowDraft, taskId: event.target.value })}
               />
@@ -1639,11 +1643,11 @@ export function ChannelPage({
             <button
               className="icon-button"
               data-testid="channel-plan-workflow"
-              disabled={!actionReady || controlsBusy || !canonicalPrd.ready || !workflowDraft.taskId.trim()}
+              disabled={!actionReady || controlsBusy || !canonicalPrd.ready || !(workflowDraft.taskId.trim() || latestReceiptTaskId)}
               type="submit"
             >
               <PlayCircle size={16} />
-              Plan existing Task
+              Plan Workflow
             </button>
           </form>
         </details>
