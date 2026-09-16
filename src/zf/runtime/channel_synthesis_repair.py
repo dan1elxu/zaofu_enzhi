@@ -246,7 +246,7 @@ def _request_synthesis_repair(
         return
 
     next_revision = synthesis_repair_revision + 1
-    repair_id = _synthesis_repair_id(
+    repair_id = synthesis_repair_id(
         channel_id,
         thread_id,
         synthesis_request_id,
@@ -310,7 +310,7 @@ def _has_synthesis_repair_request(writer: EventWriter, repair_id: str) -> bool:
     )
 
 
-def _synthesis_repair_id(
+def synthesis_repair_id(
     channel_id: str,
     thread_id: str,
     request_id: str,
@@ -335,4 +335,5 @@ __all__ = [
     "emit_invalid_contract_finding",
     "ignore_stale_synthesis_repair",
     "reject_synthesis_contract",
+    "synthesis_repair_id",
 ]

@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from zf.core.events import EventWriter
+from zf.runtime.channel_digest_key import digest_key
 from zf.runtime.channel_sidecar import hydrate_channel_message_text
 from zf.runtime.sidecar_refs import SidecarRefError
 
@@ -249,8 +250,8 @@ def validate_semantic_source_coverage(
         result["manifest_digest"] != expected_manifest_digest
     ):
         return result, "semantic_source_manifest_digest_mismatch"
-    required_digests = set(result["required_message_digests"])
-    consumed_digests = set(result["consumed_message_digests"])
+    required_digests = set(map(digest_key, result["required_message_digests"]))
+    consumed_digests = set(map(digest_key, result["consumed_message_digests"]))
     missing = sorted(required_digests - consumed_digests)
     unknown = sorted(consumed_digests - required_digests)
     if missing:

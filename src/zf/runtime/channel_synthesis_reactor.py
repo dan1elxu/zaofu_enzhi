@@ -10,6 +10,10 @@ from zf.runtime.channel_adaptive_round_reactor import (
 )
 from zf.runtime.channel_router import route_channel_message
 from zf.runtime.channel_sidecar import channel_message_event_payload
+from zf.runtime.channel_synthesis_repair import (
+    MAX_SYNTHESIS_REPAIR_ATTEMPTS,
+    synthesis_repair_id,
+)
 
 
 def react_channel_synthesis_requested(
@@ -182,6 +186,87 @@ def react_channel_synthesis_repair_requested(
         config=getattr(host, "config", None),
         openclaw_client=getattr(host, "openclaw_client", None),
         dispatch_inline=True,
+    )
+
+
+def react_channel_synthesis_blocked(
+    host,
+    event: ZfEvent,
+) -> None:
+    """Final recovery after the repair budget is exhausted.
+
+    Emits exactly one repair request beyond the normal budget so a
+    transcription/schema slip in the last attempt does not strand the
+    thread in phase3 forever. A rejection of this recovery reply re-emits
+    blocked (idempotency-guarded), so the loop stays bounded.
+    """
+    payload = event.payload if isinstance(event.payload, dict) else {}
+    channel_id = str(
+        payload.get("channel_id") or event.correlation_id or ""
+    )
+    thread_id = str(payload.get("thread_id") or "main")
+    synthesis_request_id = str(payload.get("request_id") or "")
+    target_member_id = str(payload.get("target_member_id") or "")
+    if not channel_id or not synthesis_request_id or not target_member_id:
+        return
+    recovery_revision = MAX_SYNTHESIS_REPAIR_ATTEMPTS + 1
+    recovery_id = synthesis_repair_id(
+        channel_id,
+        thread_id,
+        synthesis_request_id,
+        recovery_revision,
+    )
+    if _message_for_ref(
+        host,
+        key="synthesis_repair_id",
+        value=recovery_id,
+    ) is not None:
+        return
+    contract_error = str(payload.get("contract_error") or "").strip()
+    invalid_reply_ref = (
+        payload.get("invalid_reply_ref")
+        if isinstance(payload.get("invalid_reply_ref"), dict)
+        else {}
+    )
+    writer = host.event_writer
+    if any(
+        prior.type == "channel.synthesis.repair.requested"
+        and isinstance(prior.payload, dict)
+        and str(prior.payload.get("repair_id") or "") == recovery_id
+        for prior in writer.event_log.read_all()
+    ):
+        return
+    writer.emit(
+        "channel.synthesis.repair.requested",
+        actor="zf-kernel",
+        task_id=event.task_id,
+        causation_id=event.id,
+        correlation_id=channel_id,
+        payload={
+            "schema_version": "channel.synthesis.repair.v1",
+            "channel_id": channel_id,
+            "thread_id": thread_id,
+            "request_id": synthesis_request_id,
+            "repair_id": recovery_id,
+            "repair_revision": recovery_revision,
+            "max_repair_attempts": MAX_SYNTHESIS_REPAIR_ATTEMPTS,
+            "target_member_id": target_member_id,
+            "contract_status": str(
+                payload.get("contract_status") or ""
+            ),
+            "contract_error": contract_error,
+            "diagnostics": [{
+                "path": "channel_synthesis",
+                "code": str(payload.get("contract_status") or ""),
+                "message": contract_error,
+            }],
+            "invalid_reply_ref": invalid_reply_ref,
+            "source_reply_event_id": str(
+                payload.get("source_reply_event_id") or ""
+            ),
+            "source": "runtime",
+            "recovery": "blocked_final_repair",
+        },
     )
 
 
@@ -460,5 +545,6 @@ __all__ = [
     "react_channel_consensus_proposed",
     "react_channel_cross_review_requested",
     "react_channel_question_dedup_requested",
+    "react_channel_synthesis_blocked",
     "react_channel_synthesis_requested",
 ]

@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from zf.runtime.channel_context import channel_contribution_index
+from zf.runtime.channel_digest_key import digest_key
 
 
 def synthesis_contract_sources(
@@ -52,7 +53,8 @@ def contract_coverage_error(
         ),
         (
             "contribution_coverage_missing_digests:",
-            set(required_digests) - set(consumed_digests),
+            set(map(digest_key, required_digests))
+            - set(map(digest_key, consumed_digests)),
         ),
         (
             "contribution_coverage_unknown_refs:",
@@ -60,7 +62,8 @@ def contract_coverage_error(
         ),
         (
             "contribution_coverage_unknown_digests:",
-            set(consumed_digests) - set(required_digests),
+            set(map(digest_key, consumed_digests))
+            - set(map(digest_key, required_digests)),
         ),
     )
     for prefix, values in checks:
@@ -85,5 +88,6 @@ def _append_artifact_identity(
 
 __all__ = [
     "contract_coverage_error",
+    "digest_key",
     "synthesis_contract_sources",
 ]
