@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from zf.core.config.schema import (
@@ -144,6 +145,55 @@ def test_emit_autofills_completion_revisions_for_active_dispatch(
             "capsule_revision": "",
         },
     }
+
+
+def test_emit_autofill_prefers_dispatch_snapshot_after_contract_refresh(
+    tmp_path: Path,
+) -> None:
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    (state_dir / "kanban.json").write_text("[]\n", encoding="utf-8")
+    store = TaskStore(state_dir / "kanban.json")
+    store.add(Task(
+        id="TASK-1",
+        title="bound task",
+        status="in_progress",
+        assigned_to="critic",
+        active_dispatch_id="disp-1",
+        contract=TaskContract(
+            behavior="refreshed contract",
+            source_revision="source-new",
+            contract_revision="contract-new",
+            capsule_revision="capsule-new",
+        ),
+    ))
+    snapshot_dir = state_dir / "snapshots" / "TASK-1" / "disp-1"
+    snapshot_dir.mkdir(parents=True)
+    (snapshot_dir / "runtime-snapshot.json").write_text(json.dumps({
+        "task": {
+            "source_revision": "source-admitted",
+            "contract_revision": "contract-admitted",
+            "capsule_revision": "capsule-admitted",
+        },
+    }), encoding="utf-8")
+    payload = {
+        "dispatch_id": "disp-1",
+        "source_revision": "source-new",
+        "contract_revision": "contract-new",
+        "capsule_revision": "capsule-new",
+    }
+
+    _autofill_completion_revisions(
+        payload,
+        state_dir=state_dir,
+        event_type="design.critique.done",
+        task_id="TASK-1",
+        dispatch_id="disp-1",
+    )
+
+    assert payload["source_revision"] == "source-admitted"
+    assert payload["contract_revision"] == "contract-admitted"
+    assert payload["capsule_revision"] == "capsule-admitted"
 
 
 def test_completion_missing_capsule_revision_is_rejected(tmp_path: Path) -> None:

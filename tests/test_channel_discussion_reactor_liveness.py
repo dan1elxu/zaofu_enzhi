@@ -173,6 +173,7 @@ def _valid_contribution(
     request_id: str,
     reply_event_id: str,
     generation: int = 1,
+    questions_frozen: bool = True,
 ) -> None:
     log.append(ZfEvent(
         type="channel.finding.recorded",
@@ -188,7 +189,7 @@ def _valid_contribution(
             "message_id": TRIGGER,
             "run_generation": generation,
             "source_reply_event_id": reply_event_id,
-            "questions_frozen": True,
+            "questions_frozen": questions_frozen,
             "source": "test",
         },
         correlation_id=CHANNEL_ID,
@@ -828,3 +829,61 @@ def test_synthesis_replay_routes_message_left_before_reply_request(
         if event.type == "channel.synthesis.proposed"
         and event.payload.get("request_id") == "synth-replay-1"
     ]) == 1
+
+
+def test_freeze_false_member_still_completes_phase1(
+    state_dir: Path, config: ZfConfig, transport: TmuxTransport,
+) -> None:
+    """2026-09-18 test_dev5 deadlock: a member whose reply declares
+    freeze:false (own unresolved questions) previously stranded phase1
+    forever — nothing ever flipped their contribution back to frozen, and
+    the question-dedup flow that settles those questions only starts AFTER
+    phase1 completes. Phase1 completion must count a structured blind reply
+    regardless of the freeze flag; open questions live in the ledger and are
+    settled by the phase2 dedup/resolution flow.
+    """
+    log = EventLog(state_dir / "events.jsonl")
+    _seed_phase1_two_of_three_replied(log)
+    prior_completed = {
+        event.payload["target_member_id"]: event
+        for event in log.read_all()
+        if event.type == "channel.agent.reply.completed"
+    }
+    for member in ("pm-1", "arch-1"):
+        _valid_contribution(
+            log,
+            member_id=member,
+            request_id=f"reply-{member}",
+            reply_event_id=prior_completed[member].id,
+        )
+
+    orch = Orchestrator(state_dir, config, transport)
+
+    final = orch.event_writer.emit(
+        "channel.agent.reply.completed",
+        actor="critic-1",
+        payload={
+            "channel_id": CHANNEL_ID,
+            "thread_id": "main",
+            "request_id": "reply-critic-1",
+            "message_id": TRIGGER,
+            "target_member_id": "critic-1",
+            "source": "runtime",
+        },
+        correlation_id=CHANNEL_ID,
+    )
+    _valid_contribution(
+        log,
+        member_id="critic-1",
+        request_id="reply-critic-1",
+        reply_event_id=final.id,
+        questions_frozen=False,  # member declares unresolved own questions
+    )
+
+    orch.run_once(events=[final])
+
+    detail = project_channel(state_dir, CHANNEL_ID)
+    assert detail["discussions"]["main"]["state"] == "phase2_relay", (
+        "freeze:false must not strand phase1: dedup/resolution settles open "
+        f"questions after the transition; state={detail['discussions']['main']}"
+    )

@@ -1071,6 +1071,26 @@ def run(args: argparse.Namespace) -> int:
             )
             return 1
 
+        # 6b. PRD evaluation observer window (benchmark PRD §8): one extra
+        # window in the same workflow session runs `zf evaluation-watch`;
+        # the three Judges live beside orchestrator. Pure infrastructure —
+        # it must never block start, so failures only log.
+        try:
+            from zf.runtime.evaluation_tmux import (
+                evaluation_window_enabled,
+                spawn_evaluation_window,
+            )
+
+            if evaluation_window_enabled(config):
+                spawn_evaluation_window(
+                    tmux_session=session_name,
+                    state_dir=state_dir,
+                    project_root=project_root,
+                    dry_run=dry_run,
+                )
+        except Exception:
+            pass
+
         # 7. Spawn workers via SpawnCoordinator: allocate pane/process,
         #    launch agent CLI with --session-id / exec resume as needed,
         #    write instructions.

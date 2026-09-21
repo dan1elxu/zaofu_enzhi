@@ -17,6 +17,7 @@ this preflight — their tasks exist before stage ④ backlog runs.
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -29,6 +30,8 @@ from zf.core.config.schema import (
     WorkflowDagConfig,
     ZfConfig,
 )
+from zf.core.events.log import EventLog
+from zf.core.events.model import ZfEvent
 from zf.core.task.contract_validation import (
     validate_backlog_refs,
     validate_task_contract,
@@ -342,6 +345,40 @@ def test_arch_design_intake_skips_final_contract_preflight(tmp_path: Path):
     assert orch._strict_contract_preflight_errors(  # type: ignore[attr-defined]
         task,
         cfg.roles[0],
+    ) == []
+
+
+def test_critic_design_preflight_reads_arch_proposal_across_utc_rotation(
+    tmp_path: Path,
+):
+    """Long-running design workflows must retain their preflight exemption."""
+    state_dir = tmp_path / ".zf"
+    state_dir.mkdir()
+    (state_dir / "kanban.json").write_text("[]\n", encoding="utf-8")
+    (state_dir / "events.jsonl").write_text("", encoding="utf-8")
+    (state_dir / "memory").mkdir()
+    cfg = _config()
+    cfg.verification.contract.required = True
+    critic = cfg.roles[1]
+    critic.triggers = ["arch.proposal.done"]
+    EventLog(state_dir / "events.jsonl").append(ZfEvent(
+        type="arch.proposal.done",
+        actor="arch",
+        task_id="T-CRITIC",
+        ts=(datetime.now(timezone.utc) - timedelta(days=1)).isoformat(),
+    ))
+    task = Task(
+        id="T-CRITIC",
+        title="design critique",
+        status="in_progress",
+        assigned_to="critic",
+    )
+
+    orch = Orchestrator(state_dir, cfg, _NoopTransport())  # type: ignore[arg-type]
+
+    assert orch._strict_contract_preflight_errors(  # type: ignore[attr-defined]
+        task,
+        critic,
     ) == []
 
 

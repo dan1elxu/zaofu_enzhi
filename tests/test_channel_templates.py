@@ -1612,3 +1612,225 @@ def test_channel_setup_plan_pins_default_backend_and_action_matches(
         str(member.get("provider") or "")
         for member in detail["members"]
     } == {"claude-code"}
+
+
+# --------------------------------------------------------- member selection
+
+# Auto-template-only roster picking: the kanban agent chooses WHO discusses
+# via overrides.member_selection; every other template and override behaves
+# exactly as before.
+
+
+def test_auto_member_selection_picks_custom_roster() -> None:
+    materialized, error = materialize_channel_template(
+        "auto",
+        overrides={
+            "member_selection": {
+                "roles": ["arch", "critic", "synthesizer", "qa_analyst"],
+            }
+        },
+    )
+    assert error == ""
+    assert materialized is not None
+    roles = [str(member["channel_role"]) for member in materialized["members"]]
+    assert roles == ["arch", "critic", "synthesizer", "qa_analyst"]
+    # standard materialization pass applied: backend filled, member_type set
+    for member in materialized["members"]:
+        assert member["backend"]
+        assert member["member_type"] == "provider_agent"
+        assert member["permission_profile"] == "read_only"
+        assert member["permission_ceiling"] == "read_only"
+    # picked roster changes the materialization identity
+    default, _ = materialize_channel_template("auto")
+    assert (
+        materialized["materialization_digest"]
+        != default["materialization_digest"]
+    )
+
+
+def test_auto_member_selection_rejected_for_non_auto_template() -> None:
+    materialized, error = materialize_channel_template(
+        "prd-clarification",
+        overrides={
+            "member_selection": {"roles": ["arch", "synthesizer"]},
+        },
+    )
+    assert materialized is None
+    assert "only supported by the auto template" in error
+
+
+def test_auto_member_selection_requires_synthesizer() -> None:
+    materialized, error = materialize_channel_template(
+        "auto",
+        overrides={"member_selection": {"roles": ["arch", "critic"]}},
+    )
+    assert materialized is None
+    assert "must include synthesizer" in error
+
+
+def test_auto_member_selection_rejects_unknown_role() -> None:
+    materialized, error = materialize_channel_template(
+        "auto",
+        overrides={
+            "member_selection": {"roles": ["arch", "synthesizer", "wizard"]},
+        },
+    )
+    assert materialized is None
+    assert "unknown channel role" in error
+
+
+def test_auto_member_selection_caps_roster_size() -> None:
+    ten = [
+        "product_pm",
+        "arch",
+        "tech_leader",
+        "critic",
+        "facilitator",
+        "researcher",
+        "synthesizer",
+        "security_reviewer",
+        "qa_analyst",
+        "dev_reviewer",
+    ]
+    ok, ok_error = materialize_channel_template(
+        "auto",
+        overrides={"member_selection": {"roles": ten}},
+    )
+    assert ok_error == ""
+    assert ok is not None
+    assert len(ok["members"]) == 10
+
+    too_many = [*ten, "spine_reviewer", "automation_reporter"]
+    materialized, error = materialize_channel_template(
+        "auto",
+        overrides={"member_selection": {"roles": too_many}},
+    )
+    assert materialized is None
+    assert "at most" in error
+
+
+def test_auto_member_selection_forbids_owner_delegate() -> None:
+    materialized, error = materialize_channel_template(
+        "auto",
+        overrides={
+            "member_selection": {"roles": ["arch", "synthesizer", "owner_delegate"]},
+        },
+    )
+    assert materialized is None
+    assert "not allowed in member_selection" in error
+
+
+def test_auto_member_selection_leader_falls_back_to_synthesizer() -> None:
+    """Without product_pm the writer_roles filter empties and the existing
+    leader wiring (writer_role or synthesizer) gives propose_workflow to the
+    synthesizer — the picked roster must not silently lose its leader."""
+    materialized, error = materialize_channel_template(
+        "auto",
+        overrides={
+            "member_selection": {"roles": ["arch", "critic", "synthesizer"]},
+        },
+    )
+    assert error == ""
+    assert materialized is not None
+    by_role = {
+        str(member["channel_role"]): member
+        for member in materialized["members"]
+    }
+    leader_permissions = set(by_role["synthesizer"]["permissions"])
+    assert "propose_workflow" in leader_permissions
+    for role, member in by_role.items():
+        if role == "synthesizer":
+            continue
+        assert "propose_workflow" not in set(member["permissions"])
+
+
+def test_auto_member_selection_composes_with_role_overrides() -> None:
+    materialized, error = materialize_channel_template(
+        "auto",
+        overrides={
+            "member_selection": {
+                "roles": ["arch", "critic", "synthesizer", "security_reviewer"],
+            },
+            "role_overrides": {"arch": {"model": "k2-thinking"}},
+        },
+    )
+    assert error == ""
+    assert materialized is not None
+    by_role = {
+        str(member["channel_role"]): member
+        for member in materialized["members"]
+    }
+    assert by_role["arch"]["model"] == "k2-thinking"
+    # picked members are required (not optional): disabling one is rejected
+    blocked, blocked_error = materialize_channel_template(
+        "auto",
+        overrides={
+            "member_selection": {"roles": ["arch", "synthesizer"]},
+            "role_overrides": {"arch": {"enabled": False}},
+        },
+    )
+    assert blocked is None
+    assert "cannot be disabled" in blocked_error
+
+
+def test_auto_member_selection_flows_through_channel_setup_plan() -> None:
+    """The kanban agent's Plan submit_payload path passes member_selection
+    through unchanged and the owner sees the picked roster in details."""
+    submit_payload, details, error = normalize_channel_setup_submit_payload(
+        {
+            "template_id": "auto",
+            "mode": "multi_lens",
+            "overrides": {
+                "member_selection": {
+                    "roles": ["arch", "critic", "synthesizer"],
+                },
+            },
+        },
+    )
+    assert error == ""
+    assert submit_payload["overrides"]["member_selection"] == {
+        "roles": ["arch", "critic", "synthesizer"],
+    }
+    assert details["member_count"] == 3
+    assert {row["role"] for row in details["members"]} == {
+        "arch",
+        "critic",
+        "synthesizer",
+    }
+
+
+def test_auto_member_selection_creates_channel_with_picked_roster(
+    tmp_path: Path,
+) -> None:
+    """End to end: member_selection through the controlled action produces a
+    Channel whose projected members are exactly the picked roster."""
+    state_dir, log, writer, service = _runtime(tmp_path)
+    created = _execute(
+        service,
+        writer,
+        "channel-create-from-template",
+        {
+            "template_id": "auto",
+            "channel_id": "ch-picked",
+            "overrides": {
+                "member_selection": {
+                    "roles": ["arch", "critic", "qa_analyst", "synthesizer"],
+                },
+            },
+        },
+    )
+    assert created["ok"] is True
+    detail = project_channel(state_dir, "ch-picked") or {}
+    roster = [
+        str(member.get("channel_role") or "")
+        for member in detail["members"]
+    ]
+    assert roster == ["arch", "critic", "qa_analyst", "synthesizer"]
+    added = [
+        event
+        for event in log.read_all()
+        if event.type == "channel.member.invited"
+    ]
+    assert sorted(
+        str(event.payload.get("member_id") or "") for event in added
+    ) == ["arch", "critic", "qa_analyst", "synthesizer"]

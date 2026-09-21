@@ -215,3 +215,65 @@ def test_parallel_limit_caps_running_but_drains_every_target(
     detail = channel_adapter.project_channel(state_dir, CH)
     assert detail is not None
     assert {item["status"] for item in detail["reply_requests"]} == {"completed"}
+
+
+def test_headless_channel_turn_never_resumes_provider_thread(tmp_path: Path) -> None:
+    """2026-09-21 test_dev5: codex folds resumed thread history into literal
+    "[Pasted Content N chars]" placeholders that pollute the member's
+    context and leak into its reply. Channel turns carry their full context
+    in the prompt (context pack + recent messages + contract), so the
+    provider thread must ALWAYS be fresh — never resumed."""
+    from zf.web.headless_agent import HeadlessTurnResult
+
+    state_dir = tmp_path / ".zf"
+    state_dir.mkdir()
+    writer = EventWriter(EventLog(state_dir / "events.jsonl"))
+    writer.emit("channel.member.invited", actor="web", correlation_id=CH, payload={
+        "channel_id": CH, "member_id": "m-0", "member_type": "provider_agent",
+        "provider": "codex", "backend": "codex",
+        "permissions": ["read", "message", "summarize"],
+    })
+    writer.emit("channel.discussion.mode.set", actor="web", correlation_id=CH, payload={
+        "channel_id": CH, "mode": "conversation",
+    })
+    writer.emit("channel.message.posted", actor="web", correlation_id=CH, payload={
+        "channel_id": CH, "thread_id": "main", "message_id": "m-1",
+        "member_id": "operator", "role": "user", "text": "@m-0 go",
+    })
+    writer.emit("channel.agent.reply.requested", actor="web", correlation_id=CH, payload={
+        "channel_id": CH, "thread_id": "main", "request_id": "req-0",
+        "message_id": "m-1", "target_member_id": "m-0", "status": "pending",
+        "source": "web",
+    })
+
+    seen: dict[str, object] = {}
+
+    class _FakeAdapter:
+        backend_id = "codex-headless"
+
+        def available(self) -> bool:
+            return True
+
+        def run_turn(self, **kwargs: object) -> HeadlessTurnResult:
+            seen["provider_session_id"] = kwargs.get("provider_session_id")
+            return HeadlessTurnResult(
+                ok=True, status="completed", backend=self.backend_id,
+                thread_id=str(kwargs.get("thread_id") or ""),
+                provider_session_id="", reply="done", messages=[], usage={},
+            )
+
+    result = channel_adapter.dispatch_reply_request(
+        state_dir=state_dir,
+        writer=writer,
+        channel_id=CH,
+        request_id="req-0",
+        actor="test",
+        source="test",
+        project_root=tmp_path,
+        headless_backends={"codex-headless": _FakeAdapter()},
+    )
+    assert result.completed == ["req-0"]
+    assert seen["provider_session_id"] == "", (
+        f"channel turns must start a fresh provider thread, got "
+        f"provider_session_id={seen['provider_session_id']!r}"
+    )

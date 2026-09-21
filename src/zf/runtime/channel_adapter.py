@@ -720,7 +720,7 @@ def _run_headless_reply(
 
     with store.locked(thread_id):
         thread = store.load(scope="project", task_id="", thread_key=thread_key)
-        provider_session_id = store.provider_session_id(thread, backend=backend)
+        provider_session_id = ""  # self-contained turns; never resume (codex folds history into "[Pasted Content]", 2026-09-21)
         base_snapshot = build_provider_permission_snapshot(
             backend=backend,
             permission_profile=permission_profile,

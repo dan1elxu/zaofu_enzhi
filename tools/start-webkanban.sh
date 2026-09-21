@@ -385,6 +385,16 @@ launch_env=(
   ZF_KANBAN_AGENT_CODEX_HEADLESS_SANDBOX="$codex_headless_sandbox"
   ZF_KANBAN_AGENT_CODEX_HEADLESS_APPROVAL_POLICY="$codex_headless_approval_policy"
 )
+# Codex relay credential (e.g. CPA_API_KEY): the tmux SERVER's environment
+# predates any shell that exported it, and new-session inherits the server's
+# env — without pinning the key into runtime_env_file every headless codex
+# turn dies with "Missing environment variable: CPA_API_KEY".
+if [[ -z "${CPA_API_KEY:-}" && -f "$HOME/.config/cpa/client-key" ]]; then
+  CPA_API_KEY="$(cat "$HOME/.config/cpa/client-key" 2>/dev/null || true)"
+fi
+if [[ -n "${CPA_API_KEY:-}" ]]; then
+  launch_env+=("CPA_API_KEY=$CPA_API_KEY")
+fi
 for name in "${provider_token_names[@]}"; do
   if [[ -n "${!name:-}" ]]; then
     launch_env+=("$name=${!name}")

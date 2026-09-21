@@ -75,7 +75,14 @@ def _matches_current_reply(
         == int(request.get("run_generation") or 1)
         and str(item.get("source_reply_event_id") or "")
         == str(request.get("event_id") or "")
-        and item.get("questions_frozen") is True
+        # questions_frozen is intentionally NOT required here: a member who
+        # reports freeze:false (unresolved questions of their own) would
+        # otherwise strand phase1 forever — nothing in the runtime ever
+        # flips a recorded contribution back to frozen, and the question
+        # dedup flow that could settle those questions only starts AFTER
+        # phase1 completes (2026-09-18 test_dev5 deadlock: 4/8 stuck for
+        # hours). Open questions already live in the ledger and are settled
+        # by the phase2 dedup/resolution flow.
     )
 
 

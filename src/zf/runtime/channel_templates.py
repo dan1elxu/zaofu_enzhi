@@ -34,6 +34,20 @@ ALLOWED_OVERRIDE_KEYS = {
     "budget",
     "discussion_mode",
 }
+# ``member_selection`` is an auto-template-only extension (see
+# ``_resolve_member_selection``). It is popped from the overrides BEFORE the
+# ALLOWED_OVERRIDE_KEYS check so this whitelist and every other template's
+# behavior stay untouched; non-auto templates that receive it are rejected
+# explicitly inside materialization.
+AUTO_MEMBER_SELECTION_MAX = 10
+AUTO_MEMBER_SELECTION_FORBIDDEN = frozenset({"owner_delegate"})
+AUTO_MEMBER_WRITER_ROLES = frozenset({"product_pm"})
+_AUTO_MEMBER_EXTRA_SKILLS: dict[str, tuple[str, ...]] = {
+    "synthesizer": ("zf-channel-discussion-synthesizer",),
+    "security_reviewer": ("zf-channel-security-review",),
+    "researcher": ("zf-channel-research-participant",),
+}
+_BASE_MEMBER_SKILL = "zf-channel-discussion-participant"
 ALLOWED_ROLE_OVERRIDE_KEYS = {"backend", "model", "enabled", "profile_id"}
 ALLOWED_BUDGET_KEYS = {"max_rounds", "max_parallel_replies", "phase_deadline_seconds"}
 ALLOWED_DEADLINE_PHASES = {
@@ -332,6 +346,64 @@ def channel_template_default_backend(config: object | None = None) -> str:
     return normalize_provider(raw) or "codex"
 
 
+def _resolve_member_selection(
+    selection: object,
+) -> tuple[list[dict[str, Any]] | None, str]:
+    """Validate an auto-template ``member_selection`` override and build members.
+
+    ``selection`` is ``{"roles": [<channel_role>, ...]}``. Every role must be
+    a registered CHANNEL_ROLES entry; ``synthesizer`` is mandatory because
+    the auto discussion mode converges through it; ``owner_delegate`` is
+    excluded (owner authority in auto mode comes from the pre-approved
+    Plan, not from a channel member). Members keep the template permission
+    ceiling: ``read_only`` by default, ``project_writer`` only for
+    ``product_pm`` — the kanban agent chooses WHO discusses, never their
+    write reach.
+    """
+
+    if not isinstance(selection, dict):
+        return None, "member_selection must be a mapping"
+    roles = selection.get("roles")
+    if not isinstance(roles, list) or not roles:
+        return None, "member_selection.roles must be a non-empty role list"
+    normalized: list[str] = []
+    for raw in roles:
+        role = str(raw or "").strip()
+        if not role:
+            return None, "member_selection.roles entries must be non-empty strings"
+        if role not in CHANNEL_ROLES:
+            return None, f"unknown channel role in member_selection: {role}"
+        if role in AUTO_MEMBER_SELECTION_FORBIDDEN:
+            return None, f"role is not allowed in member_selection: {role}"
+        if role not in normalized:
+            normalized.append(role)
+    if len(normalized) > AUTO_MEMBER_SELECTION_MAX:
+        return None, (
+            f"member_selection supports at most "
+            f"{AUTO_MEMBER_SELECTION_MAX} roles"
+        )
+    if "synthesizer" not in normalized:
+        return None, (
+            "member_selection must include synthesizer "
+            "(required for PRD convergence)"
+        )
+    members: list[dict[str, Any]] = []
+    for role in normalized:
+        skills = [_BASE_MEMBER_SKILL, *_AUTO_MEMBER_EXTRA_SKILLS.get(role, ())]
+        members.append(
+            _member(
+                role,
+                permission_profile=(
+                    "project_writer"
+                    if role in AUTO_MEMBER_WRITER_ROLES
+                    else "read_only"
+                ),
+                skills=tuple(skills),
+            )
+        )
+    return members, ""
+
+
 def materialize_channel_template(
     template_id: str,
     *,
@@ -340,7 +412,8 @@ def materialize_channel_template(
 ) -> tuple[dict[str, Any] | None, str]:
     if template_id not in CHANNEL_TEMPLATES:
         return None, f"unknown channel template: {template_id}"
-    override_map = overrides if isinstance(overrides, dict) else {}
+    override_map = dict(overrides) if isinstance(overrides, dict) else {}
+    member_selection = override_map.pop("member_selection", None)
     unknown = sorted(set(override_map) - ALLOWED_OVERRIDE_KEYS)
     if unknown:
         return None, f"unsupported channel template override: {', '.join(unknown)}"
@@ -359,6 +432,34 @@ def materialize_channel_template(
             )
         else:
             result.setdefault("discussion", {})["mode"] = discussion_mode
+
+    if member_selection is not None:
+        # Auto-only: the kanban agent picks the roster itself. The picked
+        # member list replaces the template roster BEFORE the standard
+        # materialization pass, so backend filling, role overrides, leader
+        # wiring, budgets, and the materialization digest all apply to the
+        # picked roster unchanged.
+        if template_id != "auto":
+            return None, (
+                "member_selection is only supported by the auto template"
+            )
+        selected_members, selection_error = _resolve_member_selection(
+            member_selection
+        )
+        if selection_error:
+            return None, selection_error
+        result["members"] = selected_members
+        selected_roles = {
+            str(member["channel_role"]) for member in selected_members
+        }
+        # Keep writer_roles consistent with the picked roster: with no
+        # product_pm the leader wiring falls back to the synthesizer.
+        result["writer_roles"] = [
+            role
+            for role in result.get("writer_roles", [])
+            if role in selected_roles
+        ]
+
     members = result["members"]
     by_role = {str(member["channel_role"]): member for member in members}
     backend = str(override_map.get("backend") or default_backend or "codex").strip()

@@ -52,6 +52,14 @@ AUTO_CHAIN_QUESTION_EVENT_TYPES = (
     # Observe the source event as well so the auto resolver cannot miss that
     # internally-created question before the next external event arrives.
     "channel.consensus.blocked",
+    # Relay-liveness re-arm: question resolution defers while a member turn
+    # is in flight (2026-09-18 test_dev5: fresh questions were resolved 20
+    # seconds into a relay round, before the discussants could weigh in).
+    # A member turn completing or the moderator publishing a verdict are the
+    # round-boundary moments where no turn is active — those re-arm the
+    # deferred resolution.
+    "channel.agent.reply.completed",
+    "channel.moderator.verdict.proposed",
 )
 
 
@@ -300,6 +308,18 @@ def run_question_resolution(
     session = (channel.get("discussions") or {}).get(thread_id) or {}
     if str(session.get("state") or "") != "phase2_relay":
         return {"ok": True, "status": "skipped_not_relay"}
+    # Defer while any member turn is in flight. A resolution that lands
+    # mid-round answers the question before the discussants can weigh in
+    # (2026-09-18 test_dev5: questions opened during a relay round were
+    # resolved 20 seconds in, while the first discussant was still
+    # running). Round-boundary events (reply.completed / verdict.proposed)
+    # re-arm the deferred pass once no turn is active.
+    if any(
+        isinstance(request, dict)
+        and str(request.get("status") or "") in {"requested", "started"}
+        for request in channel.get("reply_requests") or []
+    ):
+        return {"ok": True, "status": "skipped_relay_in_flight"}
     if question_dedup_gate_state(channel, thread_id=thread_id) != "open":
         return {"ok": True, "status": "skipped_gate_closed"}
     questions = _open_questions(channel, thread_id)

@@ -834,6 +834,11 @@ KNOWN_EVENT_TYPES: frozenset[str] = frozenset({
     "role.suspended.circuit",        # per-role breaker opened
     # Human
     "human.escalate", "human.note", "human.resolved",
+    # PRD benchmark evaluation (kanban-channel-prd-evaluation.md §8.4):
+    # informational only — these never wake the workflow or change
+    # product state; they exist so runs carry durable eval verdicts.
+    "benchmark.evaluation.judge.completed",
+    "benchmark.evaluation.conclusion.completed",
     # Misc
     "handoff.generated", "event.malformed",
 })

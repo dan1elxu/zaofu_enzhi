@@ -289,6 +289,70 @@ def test_candidate_quality_required_rejects_partially_missing_contracts(
     assert source == "task_contract_missing"
 
 
+def test_candidate_quality_skips_base_equivalent_task_contracts(
+    tmp_path: Path,
+) -> None:
+    base_commit = _init_repo(tmp_path)
+    state_dir, config, log = _state(tmp_path)
+    config.workflow.candidate_quality_source = "task_contract_required"
+
+    _git(tmp_path, "branch", "worker/TASK-BASE", base_commit)
+    _record_task_ref(
+        tmp_path,
+        state_dir,
+        config,
+        task_id="TASK-BASE",
+        commit=base_commit,
+        branch="worker/TASK-BASE",
+        changed_files=[],
+    )
+    _add_task(
+        state_dir,
+        log,
+        task_id="TASK-BASE",
+        verification="false",
+    )
+    _approve(log, "TASK-BASE")
+
+    new_commit = _task_commit(
+        tmp_path,
+        branch="worker/TASK-NEW",
+        file_name="new.py",
+        content="VALUE = 'new'\n",
+        message="TASK-NEW",
+    )
+    _record_task_ref(
+        tmp_path,
+        state_dir,
+        config,
+        task_id="TASK-NEW",
+        commit=new_commit,
+        branch="worker/TASK-NEW",
+        changed_files=["new.py"],
+    )
+    _add_task(
+        state_dir,
+        log,
+        task_id="TASK-NEW",
+        verification="python -c \"import new; assert new.VALUE == 'new'\"",
+    )
+    _approve(log, "TASK-NEW")
+
+    result = _rebuilder(tmp_path, state_dir, config, log).rebuild(
+        "F-11111111",
+        event_writer=EventWriter(log),
+    )
+
+    assert result is not None
+    assert result.status == "updated", result.payload.get("quality")
+    assert result.payload["quality"]["gates_run"] == [
+        "task_contract:TASK-NEW:contract-verification",
+    ]
+    assert [item["task_id"] for item in result.payload["skipped_tasks"]] == [
+        "TASK-BASE",
+    ]
+
+
 def test_candidate_order_uses_task_map_when_present(tmp_path: Path):
     _init_repo(tmp_path)
     state_dir, config, log = _state(tmp_path)

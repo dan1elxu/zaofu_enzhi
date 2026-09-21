@@ -3,7 +3,7 @@
 > Generated from `src/zf/cli/main.py::build_parser()`; do not edit by hand.
 > Regenerate with `uv run python scripts/manual-docs.py generate`.
 
-The parser currently exposes **69** top-level families and **296** addressable command paths.
+The parser currently exposes **70** top-level families and **298** addressable command paths.
 Descriptions come directly from argparse help text.
 
 ## `zf agents`
@@ -135,6 +135,7 @@ Channel operations
 |---|---|
 | `zf channel` | Channel operations |
 | `zf channel say` | Post a message to a channel (gated; projected to Feishu) |
+| `zf channel status` | Show one channel's live discussion state (phase, who is running, question progress) |
 
 ## `zf chat`
 
@@ -222,6 +223,14 @@ Static evaluation of zaofu config
 |---|---|
 | `zf eval` | Static evaluation of zaofu config |
 | `zf eval preset` | Statically evaluate a zf.yaml preset |
+
+## `zf evaluation-watch`
+
+Run the Kanban->Channel->PRD evaluation observer loop (tmux window)
+
+| Command | Parser description |
+|---|---|
+| `zf evaluation-watch` | Run the Kanban->Channel->PRD evaluation observer loop (tmux window) |
 
 ## `zf events`
 

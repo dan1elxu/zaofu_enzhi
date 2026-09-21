@@ -360,12 +360,19 @@ def _truncate(obj: object, limit: int) -> str:
 def claude_session_path(project_root: str, session_uuid: str) -> Path:
     """Compute ~/.claude/projects/<escaped-cwd>/<session_uuid>.jsonl.
 
-    Claude escapes the project_root path by replacing '/' and '.' with '-'
-    and prepending '-'. Keep every Claude session consumer on this helper so
+    Claude escapes the project_root path by replacing '/', '.', and '_'
+    with '-' and prepending '-'. (The underscore rule was verified against
+    the live CLI on 2026-09-17: ``/home/uisee/projects/test_dev3`` is
+    written under ``-home-uisee-projects-test-dev3`` — consumers that
+    skipped it, like the evaluation judge poller, silently watched a
+    nonexistent path.) Keep every Claude session consumer on this helper so
     hidden runtime directories such as ``.zf`` resolve to the file Claude
     actually writes.
     """
-    escaped = "-" + project_root.lstrip("/").replace("/", "-").replace(".", "-")
+    escaped = (
+        "-" + project_root.lstrip("/").replace("/", "-").replace(".", "-")
+        .replace("_", "-")
+    )
     return Path.home() / ".claude" / "projects" / escaped / f"{session_uuid}.jsonl"
 
 

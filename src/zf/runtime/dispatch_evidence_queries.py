@@ -318,7 +318,9 @@ class DispatchEvidenceQueriesMixin:
         if task.status not in {"in_progress", "review"}:
             return False
         try:
-            events = self.event_log.read_days(1)
+            from zf.runtime.event_window import read_runtime_events
+
+            events = read_runtime_events(self.event_log, self.state_dir)
         except Exception:
             return False
         for event in reversed(events):
@@ -400,4 +402,3 @@ class DispatchEvidenceQueriesMixin:
             )
         except Exception:
             return False
-

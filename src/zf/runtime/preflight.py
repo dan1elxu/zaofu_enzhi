@@ -229,6 +229,39 @@ def _configured_provider_backends(config) -> set[str]:
     return backends
 
 
+def _codex_relay_authentication_ready() -> str:
+    """Ready-reason when codex uses a custom relay model_provider.
+
+    Relay setups (custom ``[model_providers.*]`` with ``env_key`` and
+    ``requires_openai_auth = false``) authenticate per-request via the API
+    key — ``codex login status`` stays "Not logged in" forever and must not
+    fail the preflight.
+    """
+    config_path = Path.home() / ".codex" / "config.toml"
+    try:
+        import tomllib
+        data = tomllib.loads(config_path.read_text(encoding="utf-8"))
+    except (OSError, ImportError):
+        return ""
+    except Exception:
+        return ""
+    provider_id = str(data.get("model_provider") or "").strip()
+    if not provider_id or provider_id == "openai":
+        return ""
+    providers = data.get("model_providers")
+    if not isinstance(providers, dict):
+        return ""
+    provider = providers.get(provider_id)
+    if not isinstance(provider, dict):
+        return ""
+    if provider.get("requires_openai_auth") is True:
+        return ""
+    env_key = str(provider.get("env_key") or "").strip()
+    if env_key and str(os.environ.get(env_key) or "").strip():
+        return f"relay provider {provider_id!r} credential configured via {env_key}"
+    return ""
+
+
 def _probe_provider_auth(backend: str) -> tuple[bool, str]:
     backend = canonical_backend_id(backend)
     probe_backend = {
@@ -250,6 +283,10 @@ def _probe_provider_auth(backend: str) -> tuple[bool, str]:
         for name in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN")
     ):
         return True, "API credential configured via environment"
+    if probe_backend == "codex":
+        relay_ready = _codex_relay_authentication_ready()
+        if relay_ready:
+            return True, relay_ready
     try:
         result = subprocess.run(
             command,

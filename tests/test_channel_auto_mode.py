@@ -716,3 +716,88 @@ def test_handoff_skips_non_auto_channel(tmp_path: Path, monkeypatch) -> None:
         cause_event_id=cause.id,
     )
     assert result == {"ok": False, "reason": "channel is not auto"}
+
+
+def test_resolver_defers_while_relay_turn_in_flight(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    """2026-09-18 test_dev5: resolutions raced the relay — fresh questions
+    were answered 20 seconds into a round, before discussants could weigh
+    in. Resolution must defer while any member turn is active."""
+    state_dir, writer = _writer(tmp_path)
+    _auto_channel(writer, state_dir, tmp_path)
+    _open_owner_question(writer)
+    # A relay turn currently in flight (moderator-routed reply request).
+    writer.emit(
+        "channel.agent.reply.requested",
+        actor="channel-moderator",
+        correlation_id=CH,
+        payload={
+            "channel_id": CH,
+            "thread_id": "main",
+            "request_id": "reply-relay-1",
+            "message_id": "msg-relay-1",
+            "target_member_id": "arch-1",
+            "status": "started",
+            "source": "runtime",
+        },
+    )
+    monkeypatch.setattr(
+        channel_auto_chain,
+        "_agent_json_turn",
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("no agent call")),
+    )
+    result = channel_auto_chain.run_question_resolution(
+        state_dir=state_dir,
+        writer=writer,
+        config=None,
+        project_root=tmp_path,
+        channel_id=CH,
+        thread_id="main",
+    )
+    assert result["status"] == "skipped_relay_in_flight"
+
+
+def test_resolver_runs_once_relay_turn_settles(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    """Once the in-flight turn completes, the same resolution pass runs."""
+    state_dir, writer = _writer(tmp_path)
+    _auto_channel(writer, state_dir, tmp_path)
+    _open_owner_question(writer)
+    writer.emit(
+        "channel.agent.reply.requested",
+        actor="channel-moderator",
+        correlation_id=CH,
+        payload={
+            "channel_id": CH,
+            "thread_id": "main",
+            "request_id": "reply-relay-1",
+            "message_id": "msg-relay-1",
+            "target_member_id": "arch-1",
+            "status": "completed",
+            "source": "runtime",
+        },
+    )
+
+    def _fake_turn(**_kwargs):
+        return {
+            "resolutions": [
+                {
+                    "question_id": "q-owner-1",
+                    "resolution": "answered",
+                    "answer": "fixed answer",
+                }
+            ]
+        }, ""
+
+    monkeypatch.setattr(channel_auto_chain, "_agent_json_turn", _fake_turn)
+    result = channel_auto_chain.run_question_resolution(
+        state_dir=state_dir,
+        writer=writer,
+        config=None,
+        project_root=tmp_path,
+        channel_id=CH,
+        thread_id="main",
+    )
+    assert result["ok"] is True

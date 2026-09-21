@@ -678,6 +678,7 @@ class CandidateRebuilder:
             self._prepare_worktree(pdd_id, base_ref)
             included_tasks: list[dict[str, Any]] = []
             skipped_tasks: list[dict[str, Any]] = []
+            quality_tasks: list[CandidateTask] = []
             commit_lineage: list[dict[str, str]] = []
             manifest_base["included_tasks"] = included_tasks
             manifest_base["skipped_tasks"] = skipped_tasks
@@ -702,6 +703,7 @@ class CandidateRebuilder:
                     seen_source_commits.update(skipped_commits)
                     continue
                 included_tasks.append(asdict(task))
+                quality_tasks.append(task)
                 duplicate_skipped_commits = [
                     commit for commit in task_commits if commit in seen_source_commits
                 ]
@@ -882,7 +884,7 @@ class CandidateRebuilder:
                 base_commit=base_commit,
                 commit=commit,
                 worktree=worktree,
-                tasks=tasks,
+                tasks=quality_tasks,
                 event_writer=event_writer,
                 causation_id=causation_id,
                 correlation_id=correlation_id,
@@ -908,7 +910,7 @@ class CandidateRebuilder:
                     base_commit=base_commit,
                     commit=commit,
                     worktree=worktree,
-                    tasks=tasks,
+                    tasks=quality_tasks,
                     event_writer=event_writer,
                     causation_id=causation_id,
                     correlation_id=correlation_id,

@@ -242,3 +242,48 @@ def test_real_environment_still_requires_docker(monkeypatch):
     assert len(diagnostics) == 1
     assert diagnostics[0]["severity"] == "STOP"
     assert diagnostics[0]["message"] == "缺少: docker"
+
+
+def test_codex_relay_model_provider_passes_auth_probe(tmp_path, monkeypatch):
+    """2026-09-21: relay setups (custom model_provider with env_key) have no
+    ChatGPT login by design — ``codex login status`` says "Not logged in"
+    forever. The probe must treat a configured relay credential as ready."""
+    codex_dir = tmp_path / ".codex"
+    codex_dir.mkdir()
+    (codex_dir / "config.toml").write_text(
+        'model_provider = "cpa_default"\n'
+        '[model_providers.cpa_default]\n'
+        'name = "CPA"\n'
+        'base_url = "http://relay.example/v1"\n'
+        'env_key = "CPA_API_KEY"\n'
+        'wire_api = "responses"\n'
+        'requires_openai_auth = false\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("CPA_API_KEY", "sk-relay-test")
+    monkeypatch.setattr("shutil.which", lambda _cmd: "/usr/bin/codex")
+
+    ok, detail = _probe_provider_auth("codex")
+    assert ok is True
+    assert "relay provider" in detail
+
+
+def test_codex_relay_without_env_key_falls_through(tmp_path, monkeypatch):
+    """Missing relay credential must NOT pass: fall through to the normal
+    login-status probe."""
+    codex_dir = tmp_path / ".codex"
+    codex_dir.mkdir()
+    (codex_dir / "config.toml").write_text(
+        'model_provider = "cpa_default"\n'
+        '[model_providers.cpa_default]\n'
+        'env_key = "CPA_API_KEY"\n'
+        'requires_openai_auth = false\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("CPA_API_KEY", raising=False)
+    monkeypatch.setattr("shutil.which", lambda _cmd: None)
+
+    ok, detail = _probe_provider_auth("codex")
+    assert ok is False

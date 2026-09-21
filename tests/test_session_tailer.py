@@ -42,6 +42,15 @@ class TestPathConstruction:
             "/-tmp-project--zf-workdirs-dev-project/abc-def.jsonl"
         )
 
+    def test_claude_session_path_escapes_underscores(self):
+        # Verified against the live CLI: /home/uisee/projects/test_dev3 is
+        # written under -home-uisee-projects-test-dev3. Missing this made
+        # the evaluation judge poller watch a nonexistent transcript.
+        p = claude_session_path("/home/uisee/projects/test_dev3", "abc-def")
+        assert str(p).endswith(
+            "/-home-uisee-projects-test-dev3/abc-def.jsonl"
+        )
+
 
 class TestAssistantMessageEvents:
     def _write(self, path: Path, lines: list[dict]):

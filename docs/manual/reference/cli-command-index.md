@@ -3,7 +3,7 @@
 > 本文件由 `src/zf/cli/main.py::build_parser()` 生成，禁止手工修改。
 > 重新生成：`uv run python scripts/manual-docs.py generate`。
 
-当前共 **69** 个顶层命令 family、**296** 条可寻址命令路径。
+当前共 **70** 个顶层命令 family、**298** 条可寻址命令路径。
 命令描述直接取自 argparse parser，因此描述语言以代码中的 help 为准。
 
 ## `zf agents`
@@ -135,6 +135,7 @@ Channel operations
 |---|---|
 | `zf channel` | Channel operations |
 | `zf channel say` | Post a message to a channel (gated; projected to Feishu) |
+| `zf channel status` | Show one channel's live discussion state (phase, who is running, question progress) |
 
 ## `zf chat`
 
@@ -222,6 +223,14 @@ Static evaluation of zaofu config
 |---|---|
 | `zf eval` | Static evaluation of zaofu config |
 | `zf eval preset` | Statically evaluate a zf.yaml preset |
+
+## `zf evaluation-watch`
+
+Run the Kanban->Channel->PRD evaluation observer loop (tmux window)
+
+| Command | Parser description |
+|---|---|
+| `zf evaluation-watch` | Run the Kanban->Channel->PRD evaluation observer loop (tmux window) |
 
 ## `zf events`
 
