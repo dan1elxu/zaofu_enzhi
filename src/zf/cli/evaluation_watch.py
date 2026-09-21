@@ -46,11 +46,19 @@ def run_evaluation_watch(args: argparse.Namespace) -> int:
     state_dir = Path(os.environ.get("ZF_STATE_DIR") or ctx.state_dir)
     interval = args.interval
     if interval is None:
-        interval = float(
-            os.environ.get(
-                "ZF_EVALUATION_WATCH_INTERVAL_S", DEFAULT_POLL_INTERVAL_S,
+        try:
+            interval = float(
+                os.environ.get(
+                    "ZF_EVALUATION_WATCH_INTERVAL_S", DEFAULT_POLL_INTERVAL_S,
+                )
             )
-        )
+        except (TypeError, ValueError):
+            print(
+                "Warning: invalid ZF_EVALUATION_WATCH_INTERVAL_S; "
+                f"falling back to {DEFAULT_POLL_INTERVAL_S}",
+                file=sys.stderr,
+            )
+            interval = DEFAULT_POLL_INTERVAL_S
     if args.once:
         stats = observe_once(
             state_dir=state_dir, project_root=ctx.project_root, config=config,

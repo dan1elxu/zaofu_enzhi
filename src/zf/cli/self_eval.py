@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import subprocess
 from pathlib import Path
 
 from zf.core.config.loader import ConfigError
@@ -48,6 +49,9 @@ def _help(parser: argparse.ArgumentParser):
 def _validate(args) -> int:
     try:
         contract = load_self_eval_contract(args.contract)
+    except OSError as exc:
+        print(f"ERROR: cannot read contract: {exc}")
+        return 1
     except SelfEvalContractError as exc:
         for error in exc.errors:
             print(f"ERROR: {error}")
@@ -66,6 +70,9 @@ def _run(args) -> int:
         for error in exc.errors:
             print(f"ERROR: {error}")
         return 1
+    except (OSError, subprocess.SubprocessError) as exc:
+        print(f"ERROR: self-eval run failed: {exc}")
+        return 2
     print(
         f"Self-eval {result.status}: score="
         f"{result.score if result.score is not None else 'n/a'} "

@@ -8,6 +8,7 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
+from zf.core.state.atomic_io import atomic_write_text
 from zf.core.self_eval.contract import (
     SelfEvalCommand,
     SelfEvalContract,
@@ -15,6 +16,10 @@ from zf.core.self_eval.contract import (
     load_self_eval_contract,
     split_local_command,
 )
+
+# Hard ceiling for a single self-eval command, even when the contract author
+# forgets to wrap with `timeout`. Mirrors the contract's timeout wrapper.
+COMMAND_TIMEOUT_S = 900
 
 
 @dataclass(frozen=True)
@@ -108,15 +113,28 @@ def _run_command(command: SelfEvalCommand, *, cwd: Path | None) -> CommandResult
     env_overrides, argv = split_local_command(command.command)
     env = os.environ.copy()
     env.update(env_overrides)
-    completed = subprocess.run(
-        argv,
-        cwd=str(cwd) if cwd is not None else None,
-        env=env,
-        text=True,
-        capture_output=True,
-        shell=False,
-        check=False,
-    )
+    try:
+        completed = subprocess.run(
+            argv,
+            cwd=str(cwd) if cwd is not None else None,
+            env=env,
+            text=True,
+            capture_output=True,
+            shell=False,
+            check=False,
+            timeout=COMMAND_TIMEOUT_S,
+        )
+    except subprocess.TimeoutExpired as exc:
+        return CommandResult(
+            name=command.name,
+            command=command.command,
+            exit_code=124,
+            stdout=_clip(exc.stdout or ""),
+            stderr=(
+                _clip(exc.stderr or "")
+                + f"\n[zf-self-eval] command timed out after {COMMAND_TIMEOUT_S}s"
+            ),
+        )
     return CommandResult(
         name=command.name,
         command=command.command,
@@ -158,10 +176,10 @@ def _write_outputs(
     command_results: list[CommandResult],
 ) -> None:
     score_text = "" if score is None else str(score)
-    iterations_path.write_text(
+    atomic_write_text(
+        iterations_path,
         "iteration\tscore\tguard\tstatus\tdescription\n"
         f"1\t{score_text}\t{guard_status}\t{status}\t{_tsv(reason)}\n",
-        encoding="utf-8",
     )
     lines = [
         "# Self-Eval Summary",
@@ -192,7 +210,7 @@ def _write_outputs(
             _clip(result.stderr),
             "```",
         ])
-    summary_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    atomic_write_text(summary_path, "\n".join(lines) + "\n")
 
 
 def _clip(text: str, limit: int = 4000) -> str:

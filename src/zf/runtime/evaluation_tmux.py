@@ -35,6 +35,8 @@ import time
 from pathlib import Path
 from typing import Any
 
+from zf.core.state.atomic_io import atomic_write_text
+
 EVALUATION_WINDOW_NAME = "evaluation"
 JUDGES_WINDOW_NAME = "judges"
 JUDGE_ROLE_NAME = "judge"
@@ -491,9 +493,9 @@ def ensure_workspace_trusted(cwd: Path) -> None:
     entry.setdefault("hasClaudeMdExternalIncludesWarningShown", True)
     projects[target] = entry
     try:
-        claude_config.write_text(
+        atomic_write_text(
+            claude_config,
             json.dumps(data, indent=2, ensure_ascii=False) + "\n",
-            encoding="utf-8",
         )
     except OSError:
         return

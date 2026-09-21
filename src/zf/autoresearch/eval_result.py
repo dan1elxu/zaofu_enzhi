@@ -6,6 +6,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from zf.core.state.atomic_io import atomic_write_text
+
 SCHEMA_VERSION = "eval-result.v1"
 
 DEFAULT_SCORE_WEIGHTS: dict[str, float] = {
@@ -229,10 +231,9 @@ class EvalResult:
     def write(self, path: Path) -> None:
         import json
 
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(
+        atomic_write_text(
+            path,
             json.dumps(self.to_dict(), ensure_ascii=False, indent=2) + "\n",
-            encoding="utf-8",
         )
 
 

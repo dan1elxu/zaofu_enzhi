@@ -183,3 +183,53 @@ def test_self_eval_pass_does_not_write_backlog_task(tmp_path: Path):
     ]) == 0
 
     assert not (state_dir / "kanban.json").exists()
+
+
+def test_self_eval_backlog_event_carries_evidence_digest(tmp_path: Path):
+    contract = _write_contract(tmp_path, verify="python3 -c 'print(\"no metric\")'")
+    state_dir = tmp_path / ".zf"
+
+    assert main([
+        "self-eval",
+        "run",
+        "--contract",
+        str(contract),
+        "--state-dir",
+        str(state_dir),
+        "--backlog-on-failure",
+    ]) == 1
+
+    events = [
+        json.loads(line)
+        for line in (state_dir / "events.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    digest = events[-1]["payload"].get("evidence_digest")
+    assert isinstance(digest, str) and len(digest) == 64
+
+
+def test_self_eval_backlog_mints_fresh_key_after_terminal_task(tmp_path: Path):
+    contract = _write_contract(tmp_path, verify="python3 -c 'print(\"no metric\")'")
+    state_dir = tmp_path / ".zf"
+    args = [
+        "self-eval",
+        "run",
+        "--contract",
+        str(contract),
+        "--state-dir",
+        str(state_dir),
+        "--backlog-on-failure",
+    ]
+
+    assert main(args) == 1
+    kanban_path = state_dir / "kanban.json"
+    kanban = json.loads(kanban_path.read_text(encoding="utf-8"))
+    kanban[0]["status"] = "done"
+    kanban_path.write_text(json.dumps(kanban), encoding="utf-8")
+
+    assert main(args) == 1
+
+    kanban = json.loads(kanban_path.read_text(encoding="utf-8"))
+    assert len(kanban) == 2
+    assert kanban[0]["status"] == "done"
+    assert kanban[1]["status"] == "backlog"
+    assert kanban[1]["key"] == f"{kanban[0]['key']}:2"

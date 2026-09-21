@@ -13,7 +13,7 @@ from zf.core.events.factory import event_log_from_project
 from zf.core.self_eval.contract import load_self_eval_contract
 from zf.core.self_eval.runner import SelfEvalRunResult
 from zf.core.task.schema import Task, TaskContract, TaskEvidence
-from zf.core.task.store import TaskStore
+from zf.core.task.store import TERMINAL_STATES, TaskStore
 
 
 @dataclass(frozen=True)
@@ -45,6 +45,13 @@ def write_failure_backlog(
     title = _title(contract.goal)
     store = TaskStore(state_dir / "kanban.json")
     existing = _active_task_by_key(store, key)
+    if existing is None and _has_task_with_key(store, key):
+        # A done/cancelled task already owns this key; mint a fresh key so the
+        # new backlog item never silently overwrites terminal history.
+        suffix = 2
+        while _has_task_with_key(store, f"{key}:{suffix}"):
+            suffix += 1
+        key = f"{key}:{suffix}"
 
     task_contract = TaskContract(
         behavior=_behavior(contract.goal, result.reason, contract.metric.name),
@@ -96,9 +103,13 @@ def write_failure_backlog(
 
 def _active_task_by_key(store: TaskStore, key: str) -> Task | None:
     for task in store.list_all():
-        if task.key == key:
+        if task.key == key and task.status not in TERMINAL_STATES:
             return task
     return None
+
+
+def _has_task_with_key(store: TaskStore, key: str) -> bool:
+    return any(task.key == key for task in store.list_all())
 
 
 def _backlog_key(contract_path: Path, goal: str, metric_name: str) -> str:
@@ -148,6 +159,7 @@ def _emit_projection_event(
 ) -> None:
     event_type = "task.updated" if action == "updated" else "task.created"
     log = event_log_from_project(state_dir, config=config)
+    evidence_digest = _evidence_digest(result)
     EventWriter(log).append(ZfEvent(
         type=event_type,
         actor=actor,
@@ -164,5 +176,18 @@ def _emit_projection_event(
             "score": result.score,
             "metric": metric_name,
             "reason": result.reason,
+            "evidence_digest": evidence_digest,
         },
     ))
+
+
+def _evidence_digest(result: SelfEvalRunResult) -> str | None:
+    hasher = hashlib.sha256()
+    found = False
+    for path in (result.iterations_path, result.summary_path):
+        try:
+            hasher.update(path.read_bytes())
+            found = True
+        except OSError:
+            continue
+    return hasher.hexdigest() if found else None

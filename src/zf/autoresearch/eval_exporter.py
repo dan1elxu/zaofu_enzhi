@@ -16,6 +16,32 @@ from zf.core.events.log import EventLog
 
 SUCCESS_STATUSES = {"passed", "done", "converged", "success"}
 
+# Centralized scoring weights for the state_dir-derivation scorer. Tune here
+# only; the formulas below read every constant from this table.
+_SCORE_WEIGHTS: dict[str, float] = {
+    "correctness_passed": 100.0,
+    "correctness_failed": 35.0,
+    "correctness_empty": 0.0,
+    "stability_base": 95.0,
+    "stability_fatal_penalty": 25.0,
+    "stability_stuck_penalty": 10.0,
+    "recovery_base": 70.0,
+    "recovery_per_recovered": 10.0,
+    "recovery_recovered_cap": 3.0,
+    "recovery_fatal_penalty": 20.0,
+    "regression_base": 90.0,
+    "regression_fatal_penalty": 25.0,
+    "context_safety_base": 85.0,
+    "context_safety_stuck_penalty": 10.0,
+    "coordination_base": 80.0,
+    "coordination_fanout_bonus": 15.0,
+    "coordination_cancel_penalty": 40.0,
+    "coordination_dangling_penalty": 20.0,
+    "learning_base": 40.0,
+    "learning_per_loop_request": 20.0,
+    "learning_per_reflection": 20.0,
+}
+
 
 def _clamp(value: float) -> float:
     if value < 0:
@@ -304,18 +330,35 @@ def export_state_dir_eval_result(
         f"fanout_started={fanout_started}; fanout_completed={fanout_completed}; "
         f"fanout_cancelled={fanout_cancelled}; fatal={fatal}"
     )
-    correctness_base = 100.0 if passed else 35.0
-    if terminal_done == 0 and candidate_ready == 0 and fanout_completed == 0:
-        correctness_base = 0.0
-    stability = _clamp(95.0 - fatal * 25.0 - max(stuck - recovered, 0) * 10.0)
-    recovery = _clamp(70.0 + min(recovered, 3) * 10.0 - fatal * 20.0)
-    coordination = _clamp(
-        80.0
-        + min(fanout_completed, 1) * 15.0
-        - fanout_cancelled * 40.0
-        - max(fanout_started - fanout_completed - fanout_cancelled, 0) * 20.0
+    weights = _SCORE_WEIGHTS
+    correctness_base = (
+        weights["correctness_passed"] if passed else weights["correctness_failed"]
     )
-    learning = _clamp(40.0 + loop_requests * 20.0 + reflections * 20.0)
+    if terminal_done == 0 and candidate_ready == 0 and fanout_completed == 0:
+        correctness_base = weights["correctness_empty"]
+    stability = _clamp(
+        weights["stability_base"]
+        - fatal * weights["stability_fatal_penalty"]
+        - max(stuck - recovered, 0) * weights["stability_stuck_penalty"]
+    )
+    recovery = _clamp(
+        weights["recovery_base"]
+        + min(recovered, weights["recovery_recovered_cap"])
+        * weights["recovery_per_recovered"]
+        - fatal * weights["recovery_fatal_penalty"]
+    )
+    coordination = _clamp(
+        weights["coordination_base"]
+        + min(fanout_completed, 1) * weights["coordination_fanout_bonus"]
+        - fanout_cancelled * weights["coordination_cancel_penalty"]
+        - max(fanout_started - fanout_completed - fanout_cancelled, 0)
+        * weights["coordination_dangling_penalty"]
+    )
+    learning = _clamp(
+        weights["learning_base"]
+        + loop_requests * weights["learning_per_loop_request"]
+        + reflections * weights["learning_per_reflection"]
+    )
     return EvalResult(
         result_id=result_id,
         scenario_id=scenario_id,
@@ -330,10 +373,17 @@ def export_state_dir_eval_result(
         ],
         scores={
             "correctness": _clamp(correctness_base),
-            "regression": _clamp(90.0 - fatal * 25.0),
+            "regression": _clamp(
+                weights["regression_base"]
+                - fatal * weights["regression_fatal_penalty"]
+            ),
             "stability": stability,
             "harness_recovery": recovery,
-            "context_safety": _clamp(85.0 - max(stuck - recovered, 0) * 10.0),
+            "context_safety": _clamp(
+                weights["context_safety_base"]
+                - max(stuck - recovered, 0)
+                * weights["context_safety_stuck_penalty"]
+            ),
             "coordination": coordination,
             "cost_efficiency": _usage_cost_score(events),
             "learning_value": learning,

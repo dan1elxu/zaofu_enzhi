@@ -66,7 +66,7 @@ _COMPLETED_JUDGE_STATUSES = frozenset({
     "abstain",
     "invalid",
 })
-_COMPLETED_CONCLUSION_STATUSES = frozenset({"complete", "invalid"})
+_COMPLETED_CONCLUSION_STATUSES = frozenset({"complete", "invalid", "incomplete"})
 
 
 def is_completed_judge_record(record: dict[str, Any] | None) -> bool:
