@@ -21,7 +21,7 @@ def register(subparsers: argparse._SubParsersAction) -> None:
     parser.add_argument(
         "--once",
         action="store_true",
-        help="run one observer pass and exit (diagnostics/dry runs)",
+        help="discover and persist queued evaluations once, without starting providers",
     )
     parser.set_defaults(func=run_evaluation_watch)
 
@@ -62,6 +62,7 @@ def run_evaluation_watch(args: argparse.Namespace) -> int:
     if args.once:
         stats = observe_once(
             state_dir=state_dir, project_root=ctx.project_root, config=config,
+            dispatch=False,
         )
         print(stats)
         return 0 if not stats["errors"] else 1

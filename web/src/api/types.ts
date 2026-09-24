@@ -1972,6 +1972,19 @@ export interface ChannelSummary {
   discussion?: Record<string, unknown>;
   pending_reply_count?: number;
   unread_count?: number;
+  evaluation?: {
+    workflow_run_id?: string;
+    stages?: Array<Record<string, unknown>>;
+  };
+  auto_chain?: Array<{
+    thread_id: string;
+    purpose: string;
+    operation_id: string;
+    status: string;
+    attempt: number;
+    max_attempts: number;
+    reason?: string;
+  }>;
 }
 
 export interface ExecutionPatternProjection {

@@ -6,16 +6,11 @@ role layout registry: it is plain infrastructure (like the run-manager
 resident), it dies with the session on ``zf stop``, and respawning is
 idempotent so repeated ``zf start`` runs never stack duplicate windows.
 
-Judge runs are deliberately NOT one transient window per request. All judge
-turns execute sequentially in a single persistent ``judges`` window in the
-same session — that window is the visible "judge page". The agent is
-spawned the same way the orchestrator spawns its workers: argv built by
-the configured project's provider adapter with ``permission_mode="bypass"``
-(for example ``--dangerously-skip-permissions`` for Claude), the evaluator
-persona, TUI readiness proven by the adapter's ready pattern before the
-packet is pasted (two-phase send-keys), and the provider transcript polled
-for the final reply. Between judges the previous provider exits; the pane
-returns to a shell ready for the next turn.
+Judge turns use a bounded set of persistent ``judges-slot-N`` windows.
+Each launch gets an independent provider session. Pane operations are scoped
+to that slot; transcript identity and liveness live in evaluation_turns.
+The provider adapter builds the bypass command and proves TUI readiness
+before the packet reference is sent.
 
 Historical note (2026-09-16): the first implementation waited for the
 provider transcript file BEFORE pasting the prompt. Interactive claude
@@ -32,10 +27,13 @@ import re
 import shlex
 import subprocess
 import time
+import uuid
 from pathlib import Path
+from threading import Event
 from typing import Any
 
 from zf.core.state.atomic_io import atomic_write_text
+from zf.runtime.evaluation_turns import EvaluationCancelled, JudgeTurnObservation, read_judge_reply
 
 EVALUATION_WINDOW_NAME = "evaluation"
 JUDGES_WINDOW_NAME = "judges"
@@ -44,6 +42,12 @@ _EVALUATION_SESSION_MARKER = "evaluation.tmux.json"
 
 _READY_POLL_S = 0.5
 _SHELL_NAMES = {"bash", "sh", "zsh", "fish"}
+
+
+def judge_window_name(slot_id: int | str | None = None) -> str:
+    """Return the stable tmux window name for a bounded Judge slot."""
+
+    return f"{JUDGES_WINDOW_NAME}-slot-{int(slot_id or 0)}"
 
 
 def evaluation_window_enabled(config: Any | None) -> bool:
@@ -119,9 +123,8 @@ def judge_session_uuid(
 ) -> str:
     """Deterministic request id; Claude uses it as its session id.
 
-    Codex creates its own rollout id on first interactive spawn, so the
-    runner uses this value only as the request identity and finds the new
-    project-matched rollout by its creation time.
+    Legacy request identity helper. Live launches use fresh UUIDs and bind
+    the provider's actual session/rollout/turn through a request marker.
     """
 
     import uuid
@@ -206,14 +209,21 @@ def build_judge_argv(
     return argv
 
 
-def ensure_judges_window(tmux_session: str, project_root: Path) -> bool:
-    """Create the persistent ``judges`` window (shell) once; return presence."""
+def ensure_judges_window(
+    tmux_session: str,
+    project_root: Path,
+    *,
+    slot_id: int | str | None = None,
+    window_name: str | None = None,
+) -> bool:
+    """Create the persistent window for one Judge slot."""
 
     if not tmux_session:
         return False
-    if _window_exists(tmux_session, JUDGES_WINDOW_NAME):
+    target_window = window_name or judge_window_name(slot_id)
+    if _window_exists(tmux_session, target_window):
         return True
-    return _spawn_window(tmux_session, JUDGES_WINDOW_NAME, project_root)
+    return _spawn_window(tmux_session, target_window, project_root)
 
 
 def _pane_current_command(tmux_session: str, window_name: str) -> str:
@@ -274,7 +284,12 @@ def _pane_process_tree_has_executable(
     return False
 
 
-def _pane_provider_alive(tmux_session: str, backend: str) -> bool:
+def _pane_provider_alive(
+    tmux_session: str,
+    backend: str,
+    *,
+    window_name: str | None = None,
+) -> bool:
     """Judge-provider liveness for ``wait_judge_ready``/``stop_judge_agent``.
 
     Mirrors TmuxTransport._agent_process_liveness: the pane leaf matches the
@@ -287,12 +302,13 @@ def _pane_provider_alive(tmux_session: str, backend: str) -> bool:
 
     backend = _interactive_backend(backend)
     provider_command = "codex" if backend == "codex" else "claude"
-    leaf = _pane_current_command(tmux_session, JUDGES_WINDOW_NAME).rsplit("/", 1)[-1]
+    target_window = window_name or judge_window_name()
+    leaf = _pane_current_command(tmux_session, target_window).rsplit("/", 1)[-1]
     if leaf == provider_command:
         return True
     if backend == "codex" and leaf == "node":
         return _pane_process_tree_has_executable(
-            tmux_session, JUDGES_WINDOW_NAME, "codex",
+            tmux_session, target_window, "codex",
         )
     return False
 
@@ -371,13 +387,14 @@ def _send_line(
             time.sleep(settle_s)
         subprocess.run(["tmux", "send-keys", "-t", target, "Enter"], check=True)
         return
+    buffer_name = f"zf-judge-{uuid.uuid4().hex}"
     subprocess.run(
-        ["tmux", "load-buffer", "-b", "zf-judge-paste", "-"],
+        ["tmux", "load-buffer", "-b", buffer_name, "-"],
         input=text, text=True, check=True,
     )
     try:
         subprocess.run(
-            ["tmux", "paste-buffer", "-b", "zf-judge-paste", "-t", target],
+            ["tmux", "paste-buffer", "-b", buffer_name, "-t", target],
             check=True,
         )
         _wait_pane_quiet(tmux_session, window_name)
@@ -386,7 +403,7 @@ def _send_line(
         subprocess.run(["tmux", "send-keys", "-t", target, "Enter"], check=True)
     finally:
         subprocess.run(
-            ["tmux", "delete-buffer", "-b", "zf-judge-paste"], check=False,
+            ["tmux", "delete-buffer", "-b", buffer_name], check=False,
         )
 
 
@@ -395,6 +412,8 @@ def stop_judge_agent(
     *,
     backend: str = "claude-code",
     timeout_s: float = 10.0,
+    slot_id: int | str | None = None,
+    window_name: str | None = None,
 ) -> None:
     """Terminate a live Judge provider; guarantee a clean shell afterwards.
 
@@ -411,9 +430,13 @@ def stop_judge_agent(
 
     backend = _interactive_backend(backend)
     provider_command = "codex" if backend == "codex" else "claude"
-    if not _pane_provider_alive(tmux_session, backend):
+    target_window = window_name or judge_window_name(slot_id)
+    provider_alive = _pane_provider_alive(
+        tmux_session, backend, window_name=target_window,
+    )
+    if not provider_alive:
         return
-    target = f"{tmux_session}:{JUDGES_WINDOW_NAME}"
+    target = f"{tmux_session}:{target_window}"
     subprocess.run(
         ["tmux", "send-keys", "-t", target, "C-c"], check=False,
     )
@@ -427,12 +450,15 @@ def stop_judge_agent(
     # continuation, and the next spawn's launch command would then be
     # swallowed as continuation text (2026-09-18 test_dev5 retry loop).
     if backend == "codex":
-        _reset_judges_pane(tmux_session)
+        _reset_judges_pane(tmux_session, window_name=target_window)
         return
-    _send_line(tmux_session, JUDGES_WINDOW_NAME, "/exit")
+    _send_line(tmux_session, target_window, "/exit")
     deadline = time.monotonic() + timeout_s
     while time.monotonic() < deadline:
-        if not _pane_provider_alive(tmux_session, backend):
+        provider_alive = _pane_provider_alive(
+            tmux_session, backend, window_name=target_window,
+        )
+        if not provider_alive:
             return
         time.sleep(_READY_POLL_S)
     subprocess.run(
@@ -440,18 +466,22 @@ def stop_judge_agent(
     )
     time.sleep(1.0)
     if (
-        _pane_current_command(tmux_session, JUDGES_WINDOW_NAME).rsplit("/", 1)[-1]
+        _pane_current_command(tmux_session, target_window).rsplit("/", 1)[-1]
         != provider_command
     ):
         return
-    _reset_judges_pane(tmux_session)
+    _reset_judges_pane(tmux_session, window_name=target_window)
 
 
-def _reset_judges_pane(tmux_session: str) -> None:
+def _reset_judges_pane(
+    tmux_session: str,
+    *,
+    window_name: str,
+) -> None:
     """Hard-reset the judges pane: kill everything inside, clear queued input."""
 
     subprocess.run(
-        ["tmux", "respawn-pane", "-k", "-t", f"{tmux_session}:{JUDGES_WINDOW_NAME}"],
+        ["tmux", "respawn-pane", "-k", "-t", f"{tmux_session}:{window_name}"],
         check=False,
     )
     time.sleep(_READY_POLL_S)
@@ -506,6 +536,9 @@ def wait_judge_ready(
     *,
     backend: str = "claude-code",
     timeout_s: float = 120.0,
+    slot_id: int | str | None = None,
+    window_name: str | None = None,
+    stop_event: Event | None = None,
 ) -> tuple[bool, str]:
     """Wait for the configured Judge provider prompt; return (ready, blocker).
 
@@ -520,6 +553,7 @@ def wait_judge_ready(
     )
 
     backend = _interactive_backend(backend)
+    target_window = window_name or judge_window_name(slot_id)
     provider_command = "codex" if backend == "codex" else "claude"
     try:
         ready_pattern = get_adapter(backend).ready_pattern
@@ -530,11 +564,13 @@ def wait_judge_ready(
     grace_deadline = min(deadline, time.monotonic() + 5.0)
     provider_seen = False
     while time.monotonic() < deadline:
-        command_leaf = _pane_current_command(tmux_session, JUDGES_WINDOW_NAME)
+        if stop_event is not None and stop_event.is_set():
+            raise EvaluationCancelled("evaluation observer stopped")
+        command_leaf = _pane_current_command(tmux_session, target_window)
         command_leaf = command_leaf.rsplit("/", 1)[-1].lower()
-        if _pane_provider_alive(tmux_session, backend):
+        if _pane_provider_alive(tmux_session, backend, window_name=target_window):
             provider_seen = True
-            screen = _capture_pane(tmux_session, JUDGES_WINDOW_NAME)
+            screen = _capture_pane(tmux_session, target_window)
             blocker = provider_interactive_prompt_marker(screen)
             if blocker:
                 return False, blocker
@@ -561,6 +597,10 @@ def start_judge_agent(
     system_prompt: str,
     backend: str = "claude-code",
     ready_timeout_s: float = 120.0,
+    slot_id: int | str | None = None,
+    window_name: str | None = None,
+    codex_home: Path | None = None,
+    stop_event: Event | None = None,
 ) -> tuple[bool, str]:
     """(Re)start the configured Judge provider; prove readiness.
 
@@ -569,11 +609,19 @@ def start_judge_agent(
     """
 
     backend = _interactive_backend(backend)
+    target_window = window_name or judge_window_name(slot_id)
     if backend not in {"claude-code", "codex"}:
         return False, f"unsupported_judge_backend:{backend}"
-    if not ensure_judges_window(tmux_session, project_root):
+    window_ready = ensure_judges_window(
+        tmux_session, project_root, window_name=target_window,
+    )
+    if not window_ready:
         return False, "judges window unavailable"
-    stop_judge_agent(tmux_session, backend=backend)
+    stop_judge_agent(
+        tmux_session, backend=backend, window_name=target_window,
+    )
+    # Clear any shell continuation left by a failed launch in this slot.
+    _reset_judges_pane(tmux_session, window_name=target_window)
     if backend == "claude-code":
         ensure_workspace_trusted(project_root)
     argv = build_judge_argv(
@@ -581,39 +629,39 @@ def start_judge_agent(
         system_prompt=system_prompt,
         backend=backend,
     )
-    command = "cd {} && {}".format(
-        shlex.quote(str(project_root)),
-        " ".join(shlex.quote(arg) for arg in argv),
+    if backend == "codex" and codex_home is not None:
+        Path(codex_home).mkdir(parents=True, exist_ok=True)
+        argv = ["env", f"CODEX_HOME={codex_home}", *argv]
+    command = f"cd {shlex.quote(str(project_root))} && {shlex.join(argv)}"
+    try:
+        _send_line(tmux_session, target_window, command, backend=backend)
+    except subprocess.SubprocessError as exc:
+        return False, f"failed to launch judge agent: {exc}"
+    ready, blocker = wait_judge_ready(
+        tmux_session, backend=backend, timeout_s=ready_timeout_s,
+        window_name=target_window,
+        stop_event=stop_event,
     )
-    last_error = ""
-    for attempt in (1, 2):
-        # Claude binds the deterministic id on first spawn; Codex creates its
-        # own rollout id and therefore has no matching process argument.
-        if backend == "claude-code":
-            subprocess.run(["pkill", "-f", session_uuid], check=False)
-        try:
-            _send_line(tmux_session, JUDGES_WINDOW_NAME, command)
-        except subprocess.SubprocessError as exc:
-            return False, f"failed to launch judge agent: {exc}"
-        ready, blocker = wait_judge_ready(
-            tmux_session, backend=backend, timeout_s=ready_timeout_s,
-        )
-        if ready:
-            return True, ""
-        last_error = f"judge agent not ready: {blocker}"
-        if blocker != "provider_launch_not_submitted":
-            return False, last_error
-        # claude exited immediately (stale session lock or garbled shell
-        # input): hard-reset the pane and retry once after a short grace.
-        _reset_judges_pane(tmux_session)
-        time.sleep(2.0)
-    return False, last_error
+    # The runner owns the durable transport retry budget, including startup.
+    return ready, "" if ready else f"judge agent not ready: {blocker}"
 
 
-def send_prompt_to_window(tmux_session: str, prompt: str, *, backend: str = "claude-code") -> None:
+def send_prompt_to_window(
+    tmux_session: str,
+    prompt: str,
+    *,
+    backend: str = "claude-code",
+    slot_id: int | str | None = None,
+    window_name: str | None = None,
+) -> None:
     """Paste the rendered packet into the judge agent and submit."""
 
-    _send_line(tmux_session, JUDGES_WINDOW_NAME, prompt, backend=backend)
+    _send_line(
+        tmux_session,
+        window_name or judge_window_name(slot_id),
+        prompt,
+        backend=backend,
+    )
 
 
 def _extract_codex_reply(session_path: Path) -> str:
@@ -692,76 +740,11 @@ def extract_assistant_reply(
     return reply
 
 
-def read_judge_reply(
-    project_root: Path,
-    session_uuid: str,
-    *,
-    timeout_s: float,
-    poll_s: float = 5.0,
-    log: Any | None = None,
-    backend: str = "claude-code",
-    started_at: float | None = None,
-) -> str:
-    """Poll the selected provider transcript until the judge turn completes."""
-
-    from zf.runtime.session_tailer import claude_session_path, codex_session_path
-    from zf.runtime.backend_session_reader import CodexSessionReader
-
-    backend = _interactive_backend(backend)
-    log = log or (lambda message: None)
-    path: Path | None = (
-        claude_session_path(str(project_root), session_uuid)
-        if backend == "claude-code" else None
-    )
-    codex_reader = CodexSessionReader() if backend == "codex" else None
-
-    def resolve_path() -> Path | None:
-        nonlocal path
-        if path is not None and path.exists():
-            return path
-        if backend != "codex":
-            return path
-        candidate = codex_session_path(session_uuid)
-        if candidate is None and codex_reader is not None:
-            candidate = codex_reader.session_path(str(project_root), "")
-        if candidate is None:
-            return None
-        if started_at is not None:
-            try:
-                if candidate.stat().st_mtime < started_at:
-                    return None
-            except OSError:
-                return None
-        path = candidate
-        return path
-
-    deadline = time.monotonic() + max(timeout_s, 0.0)
-    next_heartbeat = time.monotonic() + 60.0
-    while time.monotonic() < deadline:
-        current_path = resolve_path()
-        reply = (
-            extract_assistant_reply(current_path, backend=backend)
-            if current_path is not None else ""
-        )
-        if reply.strip():
-            return reply
-        if time.monotonic() >= next_heartbeat:
-            remaining = int(deadline - time.monotonic())
-            path_name = current_path.name if current_path is not None else "no transcript"
-            log(f"judge still running ({path_name}), {remaining}s left")
-            next_heartbeat = time.monotonic() + 60.0
-        time.sleep(max(poll_s, 0.5))
-    current_path = resolve_path()
-    return (
-        extract_assistant_reply(current_path, backend=backend)
-        if current_path is not None else ""
-    )
-
-
 __all__ = [
     "EVALUATION_WINDOW_NAME",
     "JUDGES_WINDOW_NAME",
     "JUDGE_ROLE_NAME",
+    "JudgeTurnObservation",
     "build_judge_argv",
     "build_judge_role",
     "ensure_judges_window",
@@ -769,6 +752,7 @@ __all__ = [
     "evaluation_window_enabled",
     "extract_assistant_reply",
     "judge_session_uuid",
+    "judge_window_name",
     "resolve_judge_backend",
     "read_judge_reply",
     "send_prompt_to_window",

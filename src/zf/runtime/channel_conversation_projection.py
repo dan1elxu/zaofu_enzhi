@@ -179,6 +179,8 @@ def project_channel_conversation(
         "unread_count": detail.get("unread_count") or 0,
         "pinned_message_ids": detail.get("pinned_message_ids") or [],
         "attention": detail.get("attention") or [],
+        "evaluation": detail.get("evaluation") or {},
+        "auto_chain": detail.get("auto_chain") or [],
         "messages": public_messages,
         "message_count": detail.get("message_count") or len(messages),
         "page": {

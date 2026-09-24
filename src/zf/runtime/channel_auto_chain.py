@@ -22,7 +22,6 @@ from __future__ import annotations
 
 import json
 import os
-import threading
 from functools import partial
 from pathlib import Path
 from typing import Any
@@ -39,9 +38,6 @@ AUTO_CHAIN_ACTOR = "channel-auto-chain"
 AUTO_RESOLVER_REF = "owner:auto-resolver"
 _RESOLUTION_KINDS = {"answered", "assumption", "out_of_scope", "evidence"}
 _OWNER_QUESTION_KINDS = {"owner_decision", "tradeoff", "clarification"}
-
-# (channel_id, thread_id, purpose) tuples with a running worker thread.
-_IN_FLIGHT: set[str] = set()
 
 AUTO_CHAIN_QUESTION_EVENT_TYPES = (
     "channel.questions.frozen",
@@ -82,88 +78,41 @@ def register_auto_chain_handlers(registry: Any, host: Any) -> None:
             question_handler,
             source="builtin",
         )
+    registry.register(
+        "channel.auto_chain.retry.requested",
+        partial(react_channel_auto_retry_requested, host),
+        source="builtin",
+    )
 
 
 def react_channel_consensus_reached(host: Any, event: Any) -> None:
-    """Kernel reactor entry: schedule the PRD handoff chain."""
+    from zf.runtime.channel_auto_recovery import schedule_auto_step
+
     payload = event.payload if isinstance(event.payload, dict) else {}
-    channel_id = str(payload.get("channel_id") or event.correlation_id or "")
-    if not channel_id:
-        return None
-    channel = project_channel(host.state_dir, channel_id) or {}
-    if not channel_discussion_auto_enabled(channel):
-        return None
-    thread_id = str(payload.get("thread_id") or "main")
-    key = f"{channel_id}:{thread_id}:handoff"
-    if key in _IN_FLIGHT:
-        return None
-    _IN_FLIGHT.add(key)
-    threading.Thread(
-        target=_run_handoff_guarded,
-        args=(host, channel_id, thread_id, event.id, key),
-        daemon=True,
-    ).start()
-    return None
+    schedule_auto_step(
+        host, str(payload.get("channel_id") or event.correlation_id or ""),
+        str(payload.get("thread_id") or "main"), "handoff",
+    )
 
 
 def react_channel_auto_question_event(host: Any, event: Any) -> None:
-    """Kernel reactor entry: schedule an owner-question resolution pass."""
+    from zf.runtime.channel_auto_recovery import schedule_auto_step
+
     payload = event.payload if isinstance(event.payload, dict) else {}
-    channel_id = str(payload.get("channel_id") or event.correlation_id or "")
-    if not channel_id:
-        return None
-    channel = project_channel(host.state_dir, channel_id) or {}
-    if not channel_discussion_auto_enabled(channel):
-        return None
-    thread_id = str(payload.get("thread_id") or "main")
-    key = f"{channel_id}:{thread_id}:resolve"
-    if key in _IN_FLIGHT:
-        return None
-    session = (channel.get("discussions") or {}).get(thread_id) or {}
-    if str(session.get("state") or "") != "phase2_relay":
-        return None
-    if question_dedup_gate_state(channel, thread_id=thread_id) != "open":
-        return None
-    if not _open_questions(channel, thread_id):
-        return None
-    _IN_FLIGHT.add(key)
-    threading.Thread(
-        target=_run_resolve_guarded,
-        args=(host, channel_id, thread_id, key),
-        daemon=True,
-    ).start()
-    return None
+    schedule_auto_step(
+        host, str(payload.get("channel_id") or event.correlation_id or ""),
+        str(payload.get("thread_id") or "main"), "resolve",
+    )
 
 
-def _run_handoff_guarded(
-    host: Any, channel_id: str, thread_id: str, cause_event_id: str, key: str
-) -> None:
-    try:
-        run_auto_chain(
-            state_dir=Path(host.state_dir),
-            writer=host.event_writer,
-            config=getattr(host, "config", None),
-            project_root=Path(host.project_root) if getattr(host, "project_root", None) else None,
-            channel_id=channel_id,
-            thread_id=thread_id,
-            cause_event_id=cause_event_id,
-        )
-    finally:
-        _IN_FLIGHT.discard(key)
+def react_channel_auto_retry_requested(host: Any, event: Any) -> None:
+    from zf.runtime.channel_auto_recovery import schedule_auto_step
 
-
-def _run_resolve_guarded(host: Any, channel_id: str, thread_id: str, key: str) -> None:
-    try:
-        run_question_resolution(
-            state_dir=Path(host.state_dir),
-            writer=host.event_writer,
-            config=getattr(host, "config", None),
-            project_root=Path(host.project_root) if getattr(host, "project_root", None) else None,
-            channel_id=channel_id,
-            thread_id=thread_id,
-        )
-    finally:
-        _IN_FLIGHT.discard(key)
+    payload = event.payload if isinstance(event.payload, dict) else {}
+    schedule_auto_step(
+        host, str(payload.get("channel_id") or ""),
+        str(payload.get("thread_id") or "main"), str(payload.get("purpose") or ""),
+    )
 
 
 def run_auto_chain(
@@ -175,6 +124,7 @@ def run_auto_chain(
     channel_id: str,
     thread_id: str,
     cause_event_id: str,
+    report_failure: bool = True,
 ) -> dict[str, Any]:
     """Create the Task + publish the Workflow Plan for one frozen auto PRD."""
     cause = _event_by_id(writer, cause_event_id)
@@ -189,6 +139,7 @@ def run_auto_chain(
             writer, cause, channel_id, thread_id,
             "channel_prd_not_planning_authorized",
             "canonical PRD is missing or readiness does not authorize planning",
+            report_failure=report_failure,
         )
     source_digest = str(authority.get("source_digest") or "")
     if _handoff_already_recorded(writer, channel_id, source_digest):
@@ -239,7 +190,8 @@ def run_auto_chain(
             repair_hint=json_repair_hint,
         )
         if parsed is None:
-            return _fail(writer, cause, channel_id, thread_id, "handoff_agent_failed", error)
+            return _fail(writer, cause, channel_id, thread_id, "handoff_agent_failed", error,
+                         report_failure=report_failure)
 
         payload, _, normalize_error = normalize_channel_task_submit_payload({
             "title": parsed.get("title"),
@@ -253,7 +205,8 @@ def run_auto_chain(
             "workflow_plan": parsed.get("workflow_plan"),
         })
         if normalize_error:
-            return _fail(writer, cause, channel_id, thread_id, "handoff_payload_invalid", normalize_error)
+            return _fail(writer, cause, channel_id, thread_id, "handoff_payload_invalid", normalize_error,
+                         report_failure=report_failure)
 
         result = _execute_action(
             state_dir=state_dir,
@@ -271,7 +224,8 @@ def run_auto_chain(
         fail_reason = str(result.get("reason") or result.get("status") or "unknown")
         result = None
     if result is None:
-        return _fail(writer, cause, channel_id, thread_id, fail_status, fail_reason)
+        return _fail(writer, cause, channel_id, thread_id, fail_status, fail_reason,
+                     report_failure=report_failure)
     writer.emit(
         "channel.auto_chain.completed",
         actor=AUTO_CHAIN_ACTOR,
@@ -300,6 +254,7 @@ def run_question_resolution(
     project_root: Path | None,
     channel_id: str,
     thread_id: str,
+    report_failure: bool = True,
 ) -> dict[str, Any]:
     """Resolve open phase-2 questions from the discussion, then inform the Channel."""
     channel = project_channel(state_dir, channel_id) or {}
@@ -316,7 +271,8 @@ def run_question_resolution(
     # re-arm the deferred pass once no turn is active.
     if any(
         isinstance(request, dict)
-        and str(request.get("status") or "") in {"requested", "started"}
+        and str(request.get("thread_id") or "main") == thread_id
+        and str(request.get("status") or "") in {"requested", "started", "pending", "running"}
         for request in channel.get("reply_requests") or []
     ):
         return {"ok": True, "status": "skipped_relay_in_flight"}
@@ -345,16 +301,18 @@ def run_question_resolution(
         ),
     )
     if parsed is None:
-        _emit_failed(
-            writer, channel_id, thread_id, "question_resolver_failed", error
+        return _fail(
+            writer, None, channel_id, thread_id, "question_resolver_failed", error,
+            report_failure=report_failure,
         )
-        return {"ok": False, "reason": error}
 
     raw_resolutions = parsed.get("resolutions")
     if not isinstance(raw_resolutions, list):
-        return {"ok": True, "status": "no_resolutions"}
+        return _fail(writer, None, channel_id, thread_id, "question_resolver_failed",
+                     "自动答题返回缺少 resolutions 列表", report_failure=report_failure)
 
     resolved: list[dict[str, str]] = []
+    rejected: list[str] = []
     cause = None
     for raw in raw_resolutions:
         if not isinstance(raw, dict):
@@ -405,12 +363,18 @@ def run_question_resolution(
                 "resolution": resolution,
                 "answer": answer,
             })
+        else:
+            rejected.append(str(result.get("reason") or result.get("status") or "解答被拒绝"))
 
     if resolved:
         _post_resolver_summary(
             writer, channel_id, thread_id, resolved,
             config=config, project_root=project_root,
         )
+    if _open_questions(project_channel(state_dir, channel_id) or {}, thread_id):
+        reason = "; ".join(rejected) or "自动答题未解决全部待答问题"
+        return _fail(writer, None, channel_id, thread_id, "question_resolver_failed", reason,
+                     report_failure=report_failure)
     return {"ok": True, "resolved": len(resolved)}
 
 
@@ -452,6 +416,8 @@ def _agent_json_turn(
 ) -> tuple[dict[str, Any] | None, str]:
     """Run one headless agent turn and parse its single fenced JSON object."""
     from zf.web.headless_agent import (
+        ClaudeHeadlessBackend,
+        CodexHeadlessBackend,
         KanbanHeadlessAgent,
         canonical_headless_backend,
     )
@@ -462,7 +428,17 @@ def _agent_json_turn(
     )
     if not backend:
         backend = "claude-headless"
-    agent = KanbanHeadlessAgent(state_dir=state_dir, project_root=project_root)
+    auto_step = thread_key.startswith(("channel-auto-resolve:", "channel-auto-handoff:"))
+    options: dict[str, Any] = {}
+    if auto_step:
+        # These short read-only turns must fail on stream silence, including
+        # a silent tool. Other Kanban/provider timeout policies are unchanged.
+        timeout_s = max(1.0, float(os.environ.get("ZF_CHANNEL_AUTO_IDLE_TIMEOUT_S", "300")))
+        options = {"timeout_s": timeout_s, "backends": {
+            "claude-headless": ClaudeHeadlessBackend(),
+            "codex-headless": CodexHeadlessBackend(tool_timeout_s=timeout_s),
+        }}
+    agent = KanbanHeadlessAgent(state_dir=state_dir, project_root=project_root or state_dir.parent, **options)
     last_reply = ""
     for attempt in (1, 2):
         message = prompt if attempt == 1 else f"{prompt}\n\n{repair_hint}"
@@ -473,7 +449,10 @@ def _agent_json_turn(
             thread_key=thread_key,
             context={"conversation_id": thread_key},
             permission_profile="read_only",
+            retry_transport=not auto_step,
         )
+        if not result.ok or result.incomplete:
+            return None, f"{result.status}: {result.error or result.completion_reason or 'provider 未返回完整结果'}"
         last_reply = str(getattr(result, "reply", "") or "").strip()
         parsed = _parse_single_fenced_json(last_reply)
         if parsed is not None:
@@ -717,8 +696,11 @@ def _fail(
     thread_id: str,
     status: str,
     reason: str,
+    *,
+    report_failure: bool = True,
 ) -> dict[str, Any]:
-    _emit_failed(writer, channel_id, thread_id, status, reason, cause_id=getattr(cause, "id", ""))
+    if report_failure:
+        _emit_failed(writer, channel_id, thread_id, status, reason, cause_id=getattr(cause, "id", ""))
     return {"ok": False, "reason": reason}
 
 

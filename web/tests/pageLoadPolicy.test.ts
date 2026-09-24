@@ -12,6 +12,11 @@ import {
   snapshotLoadKindForPage,
 } from "../src/app/pageLoadPolicy.js";
 
+for (const type of ["benchmark.evaluation.progress", "benchmark.evaluation.conclusion.completed"]) {
+  const refresh = channelEventRefreshPlan(type);
+  if (!refresh.conversation || !refresh.summary) throw new Error(`${type} must refresh Channel evaluation`);
+}
+
 function assert(condition: unknown, message: string): void {
   if (!condition) throw new Error(message);
 }

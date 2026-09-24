@@ -51,6 +51,7 @@ KANBAN_AGENT_ALLOWED_ACTIONS = (
     "channel-remove-member",
     "channel-pin-message",
     "channel-question-resolve",
+    "channel-auto-retry",
     "channel-consensus-confirm",
     "channel-consensus-block",
     "start-operator-session",

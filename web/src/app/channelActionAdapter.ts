@@ -160,6 +160,14 @@ export function createChannelActionAdapter(args: ChannelActionAdapterArgs) {
     }
   }
 
+  async function retryAutoStep(threadId: string, purpose: string, operationId: string) {
+    const result = await args.submitAction("channel-auto-retry", {
+      channel_id: channelId(), thread_id: threadId, purpose, operation_id: operationId,
+    });
+    if (!result.ok) throw new Error(result.reason || result.status || "重试未能入队");
+    await args.refreshChannelDetail();
+  }
+
   async function decideConsensus(
     decision: "confirm" | "block",
     threadId: string,
@@ -285,6 +293,7 @@ export function createChannelActionAdapter(args: ChannelActionAdapterArgs) {
     generateOwnerReport,
     requestSynthesis,
     resolveQuestion,
+    retryAutoStep,
     setDiscussionMode,
     startDiscussion,
     submitWorkflowRequest,

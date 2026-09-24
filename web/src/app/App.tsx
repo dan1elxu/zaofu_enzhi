@@ -241,6 +241,7 @@ const REFRESH_EVENT_PREFIXES = [
   "candidate.",
   "fanout.",
   "channel.",
+  "benchmark.evaluation.",
   "workflow.invoke.",
   "run.",
   "ship.",
@@ -2268,6 +2269,7 @@ export function App() {
                 )}
                 onSearchHistory={(query, threadId) => runChannelHistorySearch(query, threadId)}
                 onRequestSynthesis={(threadId, targetMemberId) => channelActions.requestSynthesis(threadId, targetMemberId)}
+                onRetryAutoStep={(threadId, purpose, operationId) => channelActions.retryAutoStep(threadId, purpose, operationId)}
                 onResolveQuestion={channelActions.resolveQuestion}
                 onSetDiscussionMode={(threadId, mode, defaultResponderId) => channelActions.setDiscussionMode(threadId, mode, defaultResponderId)}
                 onStartDiscussion={(threadId, message, messageId, mode, restart) => channelActions.startDiscussion(threadId, message, messageId, mode, restart)}

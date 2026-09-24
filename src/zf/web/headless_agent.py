@@ -920,6 +920,7 @@ class KanbanHeadlessAgent:
         on_message: MessageCallback | None = None,
         thinking_level: str = "",
         permission_profile: str = "read_only",
+        retry_transport: bool = True,
     ) -> HeadlessTurnResult:
         backend = canonical_headless_backend(backend)
         permission_profile = normalize_permission_profile(permission_profile)
@@ -1024,7 +1025,7 @@ class KanbanHeadlessAgent:
                 conversation_id=str(context.get("conversation_id") or ""),
                 permission_profile=permission_profile,
             )
-            if result.status != "cancelled" and not result.ok and provider_session_id and not result.provider_session_id:
+            if retry_transport and result.status != "cancelled" and not result.ok and provider_session_id and not result.provider_session_id:
                 fallback_reason = result.fallback_reason or "resume failed; retried fresh"
                 retry = adapter.run_turn(
                     prompt=prompt,

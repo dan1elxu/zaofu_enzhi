@@ -259,3 +259,10 @@ assert(
 );
 
 console.log("channelActionAdapter tests passed");
+
+await adapter.retryAutoStep("feature/api", "resolve", "failed-operation-1");
+const autoRetry = submitted.at(-1)!;
+assert(autoRetry.action === "channel-auto-retry", "auto retry uses controlled action");
+assert(autoRetry.payload.channel_id === "ch-handoff", "retry stays in selected channel");
+assert(autoRetry.payload.thread_id === "feature/api", "retry stays in selected thread");
+assert(autoRetry.payload.operation_id === "failed-operation-1", "retry binds the displayed failed operation");

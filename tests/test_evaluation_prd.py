@@ -619,10 +619,12 @@ def test_run_judge_dedups_on_identity(tmp_path: Path) -> None:
     assert len(events) == 1  # dedup also means no duplicate event
 
 
-def test_run_judge_transport_error_is_timeout_not_invalid(tmp_path: Path) -> None:
+def test_run_judge_transport_error_exhausts_bounded_retry(tmp_path: Path) -> None:
     writer = EventWriter(EventLog(tmp_path / "events.jsonl"))
+    calls = []
 
     def backend(**kwargs: object) -> tuple[str, str]:
+        calls.append(kwargs["attempt"])
         return "", "provider exploded"
 
     record = evaluation_runner.run_judge(
@@ -636,7 +638,10 @@ def test_run_judge_transport_error_is_timeout_not_invalid(tmp_path: Path) -> Non
         packet=_packet(),
         backend=backend,
     )
-    assert record["status"] == "judge_timeout"
+    assert record["status"] == "inconclusive"
+    assert calls == [1, 2]
+    assert record["attempt"] == record["max_attempts"] == 2
+    assert record["retryable"] is False
 
 
 def test_run_judge_garbage_json_marks_invalid(tmp_path: Path) -> None:
@@ -828,10 +833,12 @@ def test_judge_backend_follows_orchestrator_then_provider_role() -> None:
     assert resolve_judge_backend(fallback) == "claude-code"
 
 
-def test_visible_judge_passes_project_backend_to_tmux(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_visible_judge_passes_project_backend_to_tmux(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     from types import SimpleNamespace
 
     from zf.runtime import evaluation_runner, evaluation_tmux
+    from zf.runtime.evaluation_turns import JudgeTurnObservation
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "source-home"))
 
     calls: dict[str, object] = {}
     monkeypatch.setattr(
@@ -844,14 +851,15 @@ def test_visible_judge_passes_project_backend_to_tmux(monkeypatch: pytest.Monkey
     )
     monkeypatch.setattr(
         evaluation_tmux, "read_judge_reply",
-        lambda *args, **kwargs: calls.update(read=kwargs) or '{"ok":true}',
+        lambda *args, **kwargs: calls.update(read=kwargs) or JudgeTurnObservation(status="completed", reply='{"ok":true}'),
     )
     config = SimpleNamespace(
         session=SimpleNamespace(tmux_session="zf-test"),
         orchestrator=SimpleNamespace(backend="codex"),
         roles=[],
     )
-    reply, error = evaluation_runner._visible_tmux_backend(
+    observed = evaluation_runner._visible_tmux_backend(
+        state_dir=tmp_path,
         project_root=Path("/tmp/project"),
         config=config,
         workflow_run_id="wf",
@@ -860,14 +868,17 @@ def test_visible_judge_passes_project_backend_to_tmux(monkeypatch: pytest.Monkey
         system_prompt="PERSONA",
         prompt="PACKET",
     )
-    assert (reply, error) == ('{"ok":true}', "")
+    assert (observed.reply, observed.error) == ('{"ok":true}', "")
     assert calls["start"]["backend"] == "codex"
     # codex quirks (2026-09-21): multi-line drafts never submit on plain
     # Enter, and >~1000 chars gets folded into a "[Pasted Content]"
     # placeholder — so the turn prompt is ONE SHORT LINE with the compact
     # persona, not the caller's (possibly long) system prompt.
     from zf.runtime.evaluation_runner import _CODEX_COMPACT_PERSONA
-    assert calls["prompt"] == f"{_CODEX_COMPACT_PERSONA} PACKET"
+    assert calls["prompt"].endswith(f"{_CODEX_COMPACT_PERSONA} PACKET")
+    assert calls["prompt"].startswith("evaluation-turn:")
+    assert calls["read"]["request_marker"] in calls["prompt"]
+    assert calls["read"]["codex_sessions_root"] == calls["start"]["codex_home"] / "sessions"
     assert calls["send"]["backend"] == "codex"
     assert calls["read"]["backend"] == "codex"
 
@@ -1003,16 +1014,14 @@ def test_stop_judge_agent_escalates_to_pane_reset(
     assert any("respawn-pane" in cmd and "-k" in cmd for cmd in ran)
 
 
-def test_start_judge_agent_retries_after_immediate_exit(
+def test_start_judge_agent_leaves_startup_retry_to_runner(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
 ) -> None:
-    """2026-09-17 regression: claude exiting immediately ("Session ID is
-    already in use" from a stale lock) must reset the pane and retry once,
-    not fail the whole judge turn."""
+    """Startup failure consumes a durable runner attempt, without hidden retries."""
     from zf.runtime import evaluation_tmux
 
     monkeypatch.setattr(
-        evaluation_tmux, "ensure_judges_window", lambda s, p: True,
+        evaluation_tmux, "ensure_judges_window", lambda s, p, **k: True,
     )
     monkeypatch.setattr(
         evaluation_tmux, "stop_judge_agent", lambda s, **k: None,
@@ -1023,7 +1032,7 @@ def test_start_judge_agent_retries_after_immediate_exit(
     sent: list[str] = []
     monkeypatch.setattr(
         evaluation_tmux, "_send_line",
-        lambda s, w, text: sent.append(text),
+        lambda s, w, text, **k: sent.append(text),
     )
     monkeypatch.setattr(evaluation_tmux.time, "sleep", lambda _s: None)
     monkeypatch.setattr(evaluation_tmux.subprocess, "run", lambda *a, **k: None)
@@ -1038,8 +1047,8 @@ def test_start_judge_agent_retries_after_immediate_exit(
     ok, error = evaluation_tmux.start_judge_agent(
         "sess", tmp_path, session_uuid="u-1", system_prompt="S",
     )
-    assert ok and error == ""
-    assert len(sent) == 2  # launched twice
+    assert not ok and "provider_launch_not_submitted" in error
+    assert len(sent) == 1
 
 
 def test_start_judge_agent_fails_closed_without_tmux(
@@ -1617,7 +1626,7 @@ def test_stop_judge_agent_codex_resets_pane_without_slash_exit(
     from zf.runtime import evaluation_tmux
 
     monkeypatch.setattr(
-        evaluation_tmux, "_pane_provider_alive", lambda s, b: True,
+        evaluation_tmux, "_pane_provider_alive", lambda s, b, **k: True,
     )
     sent: list[str] = []
     monkeypatch.setattr(
@@ -1627,9 +1636,9 @@ def test_stop_judge_agent_codex_resets_pane_without_slash_exit(
     monkeypatch.setattr(evaluation_tmux.time, "sleep", lambda _s: None)
     resets: list[str] = []
     monkeypatch.setattr(
-        evaluation_tmux, "_reset_judges_pane", lambda s: resets.append(s),
+        evaluation_tmux, "_reset_judges_pane", lambda s, **k: resets.append(k["window_name"]),
     )
     monkeypatch.setattr(evaluation_tmux.subprocess, "run", lambda *a, **k: None)
     evaluation_tmux.stop_judge_agent("sess", backend="codex", timeout_s=0.2)
     assert "/exit" not in sent
-    assert resets == ["sess"]
+    assert resets == ["judges-slot-0"]

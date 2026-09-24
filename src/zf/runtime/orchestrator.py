@@ -198,7 +198,7 @@ _KERNEL_LIVENESS_EVENTS = frozenset({
     "channel.consensus.blocked",
     # Auto Channel handoff consumes the taskless consensus completion directly
     # so an orchestrator role cannot divert it to Layer 2.
-    "channel.consensus.reached",
+    "channel.consensus.reached", "channel.auto_chain.retry.requested",
     # Channel moderator (主持人): task-less round-boundary / verdict events
     # must reach the deterministic advance tick and the moderator reactors;
     # forwarding them to Layer 2 as "notify" only would silently stall every

@@ -965,10 +965,14 @@ def _sweep_channel_discussions(
 ) -> int:
     try:
         from zf.runtime.channel_discussion import sweep_discussion_deadlines
+        from zf.runtime.channel_auto_recovery import reconcile_auto_chain
 
+        recovered = reconcile_auto_chain(
+            state_dir=state_dir, writer=writer, config=config, project_root=project_root,
+        )
         return sweep_discussion_deadlines(
             Path(state_dir), writer, config=config, project_root=project_root,
-        )
+        ) + recovered
     except Exception:
         return 0
 

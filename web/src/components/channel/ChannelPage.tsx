@@ -1,4 +1,6 @@
 // ChannelPage + exclusive closure, extracted verbatim from App.tsx (P1 split).
+import { ChannelEvaluationStatus } from "./ChannelEvaluationStatus";
+import { ChannelAutoStatus } from "./ChannelAutoStatus";
 import { search } from "../../api/client";
 import type { ActionResponse, ChannelDetail, ChannelDiscussionAttention, ChannelHistorySearchResult, ChannelSummary, RecentEvent, Task } from "../../api/types";
 import { AgentSessionTimeline } from "../../components/agent-session/AgentSessionTimeline";
@@ -440,6 +442,7 @@ export function ChannelPage({
   onResearchAdopt,
   onRequestSynthesis,
   onResolveQuestion,
+  onRetryAutoStep,
   onSetMemberPermission,
   onSearchHistory,
   onSetDiscussionMode,
@@ -482,6 +485,7 @@ export function ChannelPage({
   onResearchAdopt: (payload: Record<string, unknown>) => Promise<void>;
   onRequestSynthesis: (threadId: string, targetMemberId?: string) => Promise<void>;
   onResolveQuestion: (questionId: string, threadId: string, resolution: string, answer: string) => Promise<void>;
+  onRetryAutoStep: (threadId: string, purpose: string, operationId: string) => Promise<void>;
   onSetMemberPermission: (memberId: string, permissionProfile: ChannelPermissionProfile) => Promise<void>;
   onSearchHistory: (query: string, threadId?: string) => Promise<ChannelHistorySearchResult>;
   onSetDiscussionMode: (threadId: string, mode: string, defaultResponderId?: string) => Promise<void>;
@@ -1974,6 +1978,7 @@ export function ChannelPage({
       </section>
     );
   }
+
   function renderWorkspaceDiagnostics() {
     const linkedEventCount = workspaceDetail?.linked_events?.length
       ?? Number(detail?.diagnostics_summary?.linked_event_count || 0);
@@ -2644,6 +2649,7 @@ export function ChannelPage({
         || actionResult?.action === "channel-clear-history"
         || actionResult?.action === "channel-post-message"
         || actionResult?.action === "channel-question-resolve"
+        || actionResult?.action === "channel-auto-retry"
         || actionResult?.action === "channel-consensus-confirm"
         || actionResult?.action === "channel-consensus-block"
         || actionResult?.action === "chat-orchestrator"
@@ -2656,6 +2662,9 @@ export function ChannelPage({
       ) : null}
       <div className={`channel-shell ${drawer ? "has-drawer" : ""}`}>
         <main className="channel-main">
+          <ChannelEvaluationStatus evaluation={detail?.evaluation ?? workspaceDetail?.evaluation} />
+          <ChannelAutoStatus rows={detail?.auto_chain ?? workspaceDetail?.auto_chain}
+            actionReady={actionReady} onRetry={onRetryAutoStep} />
           {activeTab === "chat" ? (
             <>
               {renderHistorySearchPanel()}

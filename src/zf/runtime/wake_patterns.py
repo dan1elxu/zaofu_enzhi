@@ -233,6 +233,7 @@ WAKE_PATTERNS: tuple[str, ...] = (
     "channel.consensus.blocked",
     "channel.consensus.review.rejected",
     "channel.consensus.reached",
+    "channel.auto_chain.retry.requested",
     # α-3 (2026-05-17): worker.probe.silent wakes run_once so
     # downstream consumers (web UI badges, follow-up reaction) see the
     # signal in real time.

@@ -66,6 +66,12 @@ function discussionNeedsConvergence(
  */
 export function channelNeedsLiveConvergence(detail: ChannelDetail | null): boolean {
   if (!detail) return false;
+  if ((detail.auto_chain ?? []).some((row) => (
+    ["queued", "running", "retrying", "interrupted"].includes(row.status)
+  ))) return true;
+  if ((detail.evaluation?.stages ?? []).some((row) => (
+    ["queued", "running", "retryable_failure"].includes(text(row.status))
+  ))) return true;
   if (positive(detail.pending_reply_count)) return true;
   if ((detail.running_replies?.length ?? 0) > 0) return true;
   if ((detail.queued_replies?.length ?? 0) > 0) return true;

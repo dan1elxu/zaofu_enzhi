@@ -290,6 +290,13 @@ class JudgeRecord:
     error: str
     result: dict[str, Any] = field(default_factory=dict)
     evidence_refs: list[str] = field(default_factory=list)
+    attempt: int = 1
+    max_attempts: int = 2
+    retry_of: str = ""
+    retryable: bool = False
+    inconclusive_after: int | None = None
+    turn_id: str = ""
+    transcript_ref: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -319,6 +326,16 @@ class JudgeRecord:
             error=str(value.get("error") or ""),
             result=value.get("result") or {},
             evidence_refs=_string_list(value.get("evidence_refs")),
+            attempt=int(value.get("attempt") or 1),
+            max_attempts=int(value.get("max_attempts") or 2),
+            retry_of=str(value.get("retry_of") or ""),
+            retryable=bool(value.get("retryable")),
+            inconclusive_after=(
+                int(value.get("inconclusive_after"))
+                if value.get("inconclusive_after") is not None else None
+            ),
+            turn_id=str(value.get("turn_id") or ""),
+            transcript_ref=str(value.get("transcript_ref") or ""),
         )
 
 

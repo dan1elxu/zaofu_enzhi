@@ -329,6 +329,11 @@ class ControlledActionService(
                 requested_action=requested_action,
                 payload=payload,
             )
+        if action == "channel-auto-retry":
+            from zf.runtime.channel_auto_recovery import request_auto_retry
+
+            return request_auto_retry(self, requested=requested, action=action,
+                                      requested_action=requested_action, payload=payload)
         if action in {
             "channel-consensus-confirm",
             "channel-consensus-block",

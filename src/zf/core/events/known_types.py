@@ -476,6 +476,7 @@ KNOWN_EVENT_TYPES: frozenset[str] = frozenset({
     "channel.auto_chain.step",
     "channel.auto_chain.completed",
     "channel.auto_chain.failed",
+    "channel.auto_chain.retry.requested",
     "channel.discussion.complexity.decided",
     "channel.discussion.round.opened",
     "channel.moderator.verdict.requested",
@@ -839,6 +840,7 @@ KNOWN_EVENT_TYPES: frozenset[str] = frozenset({
     # product state; they exist so runs carry durable eval verdicts.
     "benchmark.evaluation.judge.completed",
     "benchmark.evaluation.conclusion.completed",
+    "benchmark.evaluation.progress",
     # Misc
     "handoff.generated", "event.malformed",
 })

@@ -172,6 +172,9 @@ export function projectionNeedsFresh(projection: ProjectionFreshness): boolean {
 }
 
 export function channelEventRefreshPlan(eventType: string): ChannelEventRefreshPlan {
+  if (eventType.startsWith("benchmark.evaluation.")) {
+    return { conversation: true, summary: true };
+  }
   if (!eventType.startsWith("channel.")) {
     return { conversation: false, summary: false };
   }

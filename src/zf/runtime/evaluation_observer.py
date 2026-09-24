@@ -2,8 +2,8 @@
 
 Watches ``events.jsonl`` for the PRD §8.1 trigger conditions, assembles
 immutable packets from the channel projection, dedups by the §8.2 identity
-(so restarts and rescans never re-submit), runs judges strictly one at a
-time, and refreshes the ``report.md`` reading projection after every change.
+(so restarts and rescans never re-submit), enqueues ordered stages on bounded
+independent slots, and refreshes the ``report.md`` reading projection after every change.
 """
 
 from __future__ import annotations
@@ -11,10 +11,15 @@ from __future__ import annotations
 import json
 import time
 from pathlib import Path
+from threading import Event
 from typing import Any
 
 from zf.core.events import EventLog, EventWriter
+from zf.core.state.atomic_io import atomic_write_text
+from zf.runtime.evaluation_scheduler import EvaluationQueueEntry, scheduler_for_state
+from zf.runtime.evaluation_types import EvaluationPacket
 from zf.runtime.evaluation_packets import (
+    EVALUATION_ARTIFACT_ROOT,
     build_packet,
     evaluation_run_id,
     message_evidence_ref,
@@ -22,11 +27,9 @@ from zf.runtime.evaluation_packets import (
     write_immutable_packet,
 )
 from zf.runtime.evaluation_runner import (
-    TERMINAL_JUDGE_STATUSES,
     is_completed_judge_record,
     read_conclusion_result,
     read_judge_result,
-    report_path,
     run_conclusion,
     run_judge,
     write_report,
@@ -57,37 +60,37 @@ def observe_once(
     writer: EventWriter | None = None,
     backend: Any | None = None,
     log: Any | None = None,
+    scheduler: Any | None = None,
+    dispatch: bool = True,
 ) -> dict[str, Any]:
-    """One observer pass: scan triggers, run at most the pending judges."""
+    """Discover/queue frozen inputs; production provider turns run in workers."""
 
     state_dir = Path(state_dir)
     writer = writer or EventWriter(EventLog(state_dir / "events.jsonl"))
     log = log or (lambda message: None)
     events = list(writer.event_log.read_all())
-
     freeze_points = _freeze_points(events)
     bound_workflows = _bound_workflows(events)
-    stats = {"judges_run": 0, "channels_seen": 0, "errors": []}
-
+    scheduler = scheduler or scheduler_for_state(state_dir, inline=backend is not None)
+    stats = {"judges_run": 0, "channels_seen": len(freeze_points), "queued": 0, "errors": []}
     for channel_id, freeze in freeze_points.items():
-        stats["channels_seen"] += 1
         try:
-            ran = _evaluate_channel(
-                state_dir=state_dir,
-                project_root=project_root,
-                config=config,
-                writer=writer,
-                backend=backend,
-                events=events,
-                channel_id=channel_id,
-                freeze=freeze,
-                bound_workflows=bound_workflows.get(channel_id) or [],
-                log=log,
+            context = _prepare_channel(
+                state_dir=state_dir, events=events, channel_id=channel_id,
+                freeze=freeze, bound_workflows=bound_workflows.get(channel_id) or [],
             )
-            stats["judges_run"] += ran
-        except Exception as exc:  # one bad channel must not kill the observer
+            if context is not None:
+                stats["queued"] += _enqueue_channel(state_dir, scheduler, context)
+        except Exception as exc:
             stats["errors"].append(f"{channel_id}: {exc}")
-            log(f"evaluation pass failed for {channel_id}: {exc}")
+            log(f"evaluation discovery failed for {channel_id}: {exc}")
+    if dispatch:
+        results = scheduler.tick(lambda entry, slot_id: _evaluate_stage(
+            state_dir=state_dir, project_root=project_root, config=config,
+            entry=entry, slot_id=slot_id, backend=backend, log=log, stop_event=scheduler.stop_event,
+        ))
+        stats["judges_run"] = sum(int(item.get("judges_run") or 0) for item in results)
+        stats["errors"].extend(str(item["error"]) for item in results if item.get("error"))
     return stats
 
 
@@ -105,47 +108,49 @@ def observe_loop(
     log = log or (lambda message: print(message, flush=True))
     state_dir = Path(state_dir)
     log(f"evaluation observer watching {state_dir}")
-    while True:
-        try:
-            stats = observe_once(
-                state_dir=state_dir,
-                project_root=project_root,
-                config=config,
-                backend=backend,
-                log=log,
-            )
-            if stats["judges_run"] or stats["errors"]:
-                log(
-                    "evaluation pass: "
-                    f"judges_run={stats['judges_run']} "
-                    f"channels={stats['channels_seen']} "
-                    f"errors={len(stats['errors'])}"
+    scheduler = scheduler_for_state(state_dir, inline=backend is not None)
+    try:
+        while True:
+            try:
+                stats = observe_once(
+                    state_dir=state_dir,
+                    project_root=project_root,
+                    config=config,
+                    backend=backend, scheduler=scheduler,
+                    log=log,
                 )
-        except Exception as exc:
-            log(f"evaluation observer tick failed: {exc}")
-        time.sleep(max(5.0, float(poll_interval_s)))
+                if stats["judges_run"] or stats["errors"]:
+                    log(
+                        "evaluation pass: "
+                        f"judges_run={stats['judges_run']} "
+                        f"channels={stats['channels_seen']} "
+                        f"errors={len(stats['errors'])}"
+                    )
+            except Exception as exc:
+                log(f"evaluation observer tick failed: {exc}")
+            time.sleep(max(5.0, float(poll_interval_s)))
+    finally:
+        scheduler.close()
 
 
-def _evaluate_channel(
-    *,
-    state_dir: Path,
-    project_root: Path | None,
-    config: Any | None,
-    writer: EventWriter,
-    backend: Any | None,
-    events: list[Any],
-    channel_id: str,
-    freeze: dict[str, Any],
-    bound_workflows: list[dict[str, Any]],
-    log: Any,
-) -> int:
-    """Run all pending judge stages for one frozen channel; returns run count."""
+def _prepare_channel(
+    *, state_dir: Path, events: list[Any], channel_id: str,
+    freeze: dict[str, Any], bound_workflows: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    """Capture immutable inputs before any asynchronous provider work."""
 
     from zf.runtime.channel_projection import project_channel
     from zf.runtime.channel_prd_render import channel_requirement_text
     from zf.runtime.channel_sidecar import hydrate_channel_message_text
 
-    channel = project_channel(state_dir, channel_id) or {}
+    # Bind the projection to the freeze ledger occurrence, not live messages,
+    # member presence or later discussion changes.
+    frozen_events = []
+    for event in events:
+        frozen_events.append(event)
+        if event.id == freeze.get("event_id"):
+            break
+    channel = project_channel(state_dir, channel_id, events=frozen_events) or {}
     thread_id = str(freeze.get("thread_id") or "main")
     prd_revision = int(freeze.get("prd_revision") or 0)
     workflow_run_id = evaluation_run_id(
@@ -157,12 +162,12 @@ def _evaluate_channel(
         hydrate=lambda message: hydrate_channel_message_text(state_dir, message),
     )
     if not messages:
-        return 0
+        return None
 
     prd_body = _read_json_artifact(state_dir, str(freeze.get("prd_ref") or ""))
     readiness = _read_json_artifact(state_dir, str(freeze.get("readiness_ref") or ""))
     if prd_body is None:
-        return 0  # PRD §8.1: frozen PRD must be readable or we do not trigger
+        return None  # PRD §8.1: frozen PRD must be readable or we do not trigger
 
     frozen_prd = {
         "prd_ref": str(freeze.get("prd_ref") or ""),
@@ -212,108 +217,118 @@ def _evaluate_channel(
     bound_digest = stable_digest(bound_prd or {})
     trial_id = source_snapshot_digest[:16]
 
-    ran = 0
-    judge_records: dict[str, dict[str, Any]] = {}
+    packets = {}
     for judge_type in ("milestone", "communication", "prd_result"):
-        # PRD evaluation is freeze-triggered: prd_result scores the original
-        # requirement vs the channel PRD as soon as the PRD freezes; the
-        # channel_to_workflow dimension stays unscored until a workflow
-        # binds (2026-09-17 operator decision: do not wait for workflow).
-        judge_digest = source_snapshot_digest
-        if judge_type == "prd_result":
-            judge_digest = stable_digest({
-                "source": source_snapshot_digest,
-                "bound": bound_digest,
-            })
-        judge_trial = judge_digest[:16]
-        packet = build_packet(
-            stage=judge_type,
-            run_id=workflow_run_id,
-            workflow_run_id=workflow_run_id,
-            trial_id=judge_trial,
-            source_snapshot_digest=judge_digest,
-            task=task,
-            task_details=task_details,
-            agent_profiles=profiles,
-            agent_relationships=[],
-            iteration_summary=iteration_summary,
-            channel_messages=messages,
-            channel_frozen_prd=frozen_prd,
-            workflow_bound_prd=bound_prd or {},
-            prior_judges=[
-                {"judge_type": key, "result": (record.get("result") or {})}
-                for key, record in judge_records.items()
-            ],
-        )
-        packet_path, _ = write_immutable_packet(state_dir, packet)
-        # Pre-check identity must match what run_judge persists:
-        # (workflow_run_id, judge_trial, judge_type, judge_digest) — prd_result's
-        # judge_trial/judge_digest differ from the report-level trial_id.
-        request_id = _request_id(
-            workflow_run_id, judge_trial, judge_type, judge_digest,
-        )
-        existing_record = read_judge_result(
-            state_dir, workflow_run_id=workflow_run_id,
-            judge_type=judge_type, request_id=request_id,
-        )
-        if is_completed_judge_record(existing_record):
-            judge_records[judge_type] = existing_record or {}
-            continue
-        log(f"running {judge_type} judge for {workflow_run_id} (packet {packet_path.name})")
-        record = run_judge(
-            state_dir=state_dir,
-            project_root=project_root,
-            config=config,
-            writer=writer,
-            workflow_run_id=workflow_run_id,
-            trial_id=judge_trial,
-            judge_type=judge_type,
-            packet=packet,
-            backend=backend,
-            log=log,
-        )
-        judge_records[judge_type] = record
-        ran += 1
-        log(
-            f"{judge_type} judge completed: "
-            f"status={record.get('status') or 'unknown'} "
-            f"(request {request_id})"
-        )
+        digest = source_snapshot_digest if judge_type != "prd_result" else stable_digest({
+            "source": source_snapshot_digest, "bound": bound_digest,
+        })
+        packets[judge_type] = build_packet(
+            stage=judge_type, run_id=workflow_run_id, workflow_run_id=workflow_run_id,
+            trial_id=digest[:16], source_snapshot_digest=digest, task=task,
+            task_details=task_details, agent_profiles=profiles, agent_relationships=[],
+            iteration_summary=iteration_summary, channel_messages=messages,
+            channel_frozen_prd=frozen_prd, workflow_bound_prd=bound_prd or {},
+        ).to_dict()
+    return {
+        "channel_id": channel_id, "workflow_run_id": workflow_run_id,
+        "trial_id": trial_id, "freeze": freeze, "packets": packets,
+        "source_snapshot_digest": packets["prd_result"]["source_snapshot_digest"],
+    }
 
-    _refresh_report(
-        state_dir, workflow_run_id=workflow_run_id,
-        trial_id=trial_id, channel_id=channel_id,
-        freeze=freeze, judges=judge_records,
-    )
-    # Conclusion runs once every judge reached a terminal state (prd_result
-    # now always runs at freeze; its channel_to_workflow dimension simply
-    # stays unscored until a workflow binds, keeping overall None/incomplete
-    # until then — on bind, prd_result's digest changes, so the judges-map
-    # digest changes and a new conclusion request reruns with the full set).
-    if judge_records and all(
-        str(record.get("status") or "") in TERMINAL_JUDGE_STATUSES
-        for record in judge_records.values()
-    ):
-        conclusion, conclusion_ran = _pending_or_run_conclusion(
-            state_dir=state_dir, project_root=project_root, config=config,
-            writer=writer, backend=backend, log=log,
-            workflow_run_id=workflow_run_id, trial_id=trial_id,
-            judges=judge_records,
-        )
-        if conclusion is not None:
-            ran += 1 if conclusion_ran else 0
-            if conclusion_ran:
-                log(
-                    f"conclusion completed: "
-                    f"status={conclusion.get('status') or 'unknown'} "
-                    f"(run {workflow_run_id})"
-                )
-            _refresh_report(
-                state_dir, workflow_run_id=workflow_run_id,
-                trial_id=trial_id, channel_id=channel_id,
-                freeze=freeze, judges=judge_records, conclusion=conclusion,
+
+def _enqueue_channel(state_dir: Path, scheduler: Any, context: dict[str, Any]) -> int:
+    input_path = state_dir / EVALUATION_ARTIFACT_ROOT / "queue-inputs" / f"{stable_digest(context)}.json"
+    if not input_path.exists():
+        atomic_write_text(input_path, json.dumps(context, ensure_ascii=False, indent=2) + "\n")
+    run_id = context["workflow_run_id"]
+    deps: list[str] = []
+    queued = 0
+    repair_conclusion = False
+    for stage in ("milestone", "communication", "prd_result", "conclusion"):
+        packet = context["packets"].get(stage) or context
+        digest, trial = packet["source_snapshot_digest"], packet["trial_id"]
+        job_id = _request_id(run_id, trial, stage, digest)
+        stage_repair = False
+        if stage != "conclusion":
+            existing = read_judge_result(state_dir, workflow_run_id=run_id,
+                                         judge_type=stage, request_id=job_id)
+            old_entry = scheduler.entries.get(job_id)
+            stage_repair = bool(
+                old_entry and old_entry.status == "completed"
+                and not is_completed_judge_record(existing)
             )
-    return ran
+            repair_conclusion = repair_conclusion or stage_repair
+        else:
+            stage_repair = repair_conclusion
+        queued += int(scheduler.enqueue(EvaluationQueueEntry(
+            job_id=job_id, channel_id=context["channel_id"], workflow_run_id=run_id,
+            trial_id=trial, judge_type=stage, source_snapshot_digest=digest,
+            input_ref=str(input_path.relative_to(state_dir)), depends_on=list(deps),
+        ), repair=stage_repair))
+        deps.append(job_id)
+    return queued
+
+
+def _evaluate_stage(
+    *, state_dir: Path, project_root: Path | None, config: Any | None,
+    entry: EvaluationQueueEntry, slot_id: int, backend: Any | None, log: Any,
+    stop_event: Event | None = None,
+) -> dict[str, Any]:
+    context = json.loads((state_dir / entry.input_ref).read_text(encoding="utf-8"))
+    run_id, stage = entry.workflow_run_id, entry.judge_type
+    writer = EventWriter(EventLog(state_dir / "events.jsonl"))
+    judges = {}
+    for judge_type, packet in context["packets"].items():
+        request_id = _request_id(run_id, packet["trial_id"], judge_type,
+                                 packet["source_snapshot_digest"])
+        record = read_judge_result(state_dir, workflow_run_id=run_id,
+                                  judge_type=judge_type, request_id=request_id)
+        if record is not None:
+            judges[judge_type] = record
+    conclusion = None
+    if stage == "conclusion":
+        # An exhausted queue callback can have no verdict sidecar. Treat its
+        # absence mechanically, never ask a provider to invent the missing score.
+        for judge_type in context["packets"]:
+            judges.setdefault(judge_type, {"status": "inconclusive", "result": {},
+                                           "error": "Judge 未产出结果"})
+        conclusion, ran = _pending_or_run_conclusion(
+            state_dir=state_dir, project_root=project_root, config=config,
+            writer=writer, backend=backend, log=log, workflow_run_id=run_id,
+            trial_id=context["trial_id"], judges=judges, slot_id=slot_id,
+            channel_id=entry.channel_id, stop_event=stop_event,
+        )
+        record = conclusion or {}
+    else:
+        packet = dict(context["packets"][stage])
+        stages = ("milestone", "communication", "prd_result")
+        packet["prior_judges"] = [
+            {"judge_type": key, "result": (judges[key].get("result") or {})}
+            for key in stages[:stages.index(stage)] if key in judges
+        ]
+        packet_path, _ = write_immutable_packet(state_dir, EvaluationPacket.from_dict(packet))
+        ran = not is_completed_judge_record(judges.get(stage))
+        if ran:
+            log(f"running {stage} judge for {run_id} (slot {slot_id}, packet {packet_path.name})")
+        record = run_judge(
+            state_dir=state_dir, project_root=project_root, config=config,
+            writer=writer, workflow_run_id=run_id, trial_id=entry.trial_id,
+            judge_type=stage, packet=packet, backend=backend, log=log,
+            slot_id=slot_id, channel_id=entry.channel_id, stop_event=stop_event,
+        )
+        judges[stage] = record
+    # A completed report must never be replaced by an intermediate rescan.
+    if ran or conclusion:
+        _refresh_report(
+            state_dir, workflow_run_id=run_id, trial_id=context["trial_id"],
+            channel_id=entry.channel_id, freeze=context["freeze"], judges=judges,
+            conclusion=conclusion, source_snapshot_digest=context["source_snapshot_digest"],
+        )
+    record_status = str(record.get("status") or "")
+    return {"judges_run": int(ran), "status": (
+        "inconclusive" if record_status == "inconclusive"
+        else "completed"
+    ), "error": str(record.get("error") or "")}
 
 
 def render_report(
@@ -419,6 +434,7 @@ def _refresh_report(
     freeze: dict[str, Any],
     judges: dict[str, dict[str, Any]],
     conclusion: dict[str, Any] | None = None,
+    source_snapshot_digest: str = "",
 ) -> None:
     from zf.runtime.evaluation_prompts import EVALUATION_PROMPT_VERSION
 
@@ -430,6 +446,8 @@ def _refresh_report(
             judges=judges, conclusion=conclusion,
         ),
         prompt_version=EVALUATION_PROMPT_VERSION,
+        trial_id=trial_id, source_snapshot_digest=source_snapshot_digest,
+        final=conclusion is not None,
     )
 
 
@@ -595,6 +613,9 @@ def _pending_or_run_conclusion(
     trial_id: str,
     judges: dict[str, dict[str, Any]],
     log: Any | None = None,
+    slot_id: int | None = None,
+    channel_id: str = "",
+    stop_event: Event | None = None,
 ) -> tuple[dict[str, Any] | None, bool]:
     """Return (record, ran). An EXISTING conclusion record is returned too
     (ran=False) so the caller refreshes the report WITH the conclusion —
@@ -617,7 +638,9 @@ def _pending_or_run_conclusion(
         source_snapshot_digest=snapshot,
     )
     existing = read_conclusion_result(state_dir, workflow_run_id, request_id)
-    if existing is not None:
+    if existing is not None and existing.get("status") in {
+        "complete", "incomplete", "inconclusive", "invalid",
+    }:
         return existing, False
     return run_conclusion(
         state_dir=state_dir,
@@ -628,7 +651,7 @@ def _pending_or_run_conclusion(
         trial_id=trial_id,
         judges=judges,
         backend=backend,
-        log=log,
+        log=log, slot_id=slot_id, channel_id=channel_id, stop_event=stop_event,
     ), True
 
 
@@ -654,7 +677,7 @@ def _collect_missing(judges: dict[str, dict[str, Any]]) -> list[dict[str, str]]:
                 "required": str(ref),
                 "reason": f"{judge_type} judge reported missing evidence",
             })
-        if str(record.get("status") or "") == "judge_timeout":
+        if str(record.get("status") or "") in {"judge_timeout", "inconclusive"}:
             missing.append({
                 "required": judge_type,
                 "reason": str(record.get("error") or "judge timed out"),

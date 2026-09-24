@@ -40,9 +40,13 @@ from zf.runtime.channel_run_owner import (
 )
 from zf.runtime.channel_sidecar import hydrate_channel_context_pack_payload
 from zf.runtime.provider_usage import sum_turn_usage
+from zf.runtime.evaluation_projection import EVALUATION_EVENTS, fold_evaluation, public_evaluation
 
 
 CHANNEL_EVENT_TYPES = {
+    *EVALUATION_EVENTS,
+    "channel.auto_chain.step",
+    "channel.auto_chain.retry.requested",
     "channel.created",
     "channel.archived",
     "channel.member.added",
@@ -395,6 +399,8 @@ def _build(events: list[tuple[int, ZfEvent]], *, state_dir: Path | None = None) 
         if event.type not in CHANNEL_EVENT_TYPES:
             continue
         payload = event.payload if isinstance(event.payload, dict) else {}
+        if event.type in EVALUATION_EVENTS and not payload.get("channel_id"):
+            continue  # Historical judge events did not carry channel scope.
         channel_id = _payload_str(payload, "channel_id") or _channel_from_event(event)
         if not channel_id:
             continue
@@ -407,7 +413,13 @@ def _build(events: list[tuple[int, ZfEvent]], *, state_dir: Path | None = None) 
         # materialize and redact only the bounded rows they actually expose;
         # eagerly redacting every historical event dominated Channel reads.
         channel["linked_events"].append((seq, event))
-        if event.type == "channel.created":
+        if event.type in EVALUATION_EVENTS:
+            fold_evaluation(channel, payload, event_type=event.type, ts=event.ts)
+        elif event.type in {"channel.auto_chain.step", "channel.auto_chain.retry.requested"}:
+            if payload.get("operation_id") and payload.get("purpose") in {"resolve", "handoff"}:
+                key = f"{payload.get('thread_id') or 'main'}:{payload['purpose']}"
+                channel.setdefault("auto_chain", {})[key] = {**payload, "updated_at": event.ts}
+        elif event.type == "channel.created":
             channel["status"] = "open"
             channel["created_by_event"] = True
             channel["created_at"] = channel["created_at"] or event.ts
@@ -2835,6 +2847,8 @@ def _public_channel(
             1 for item in workflow_requests if str(item.get("status") or "") == "requested"
         ),
         "summary": channel["summary"],
+        "evaluation": redact_obj(public_evaluation(channel)),
+        "auto_chain": redact_obj(list((channel.get("auto_chain") or {}).values())),
         "history_cleared_at": channel["history_cleared_at"],
         "history_clear_event_id": channel["history_clear_event_id"],
         "history_clear_reason": channel["history_clear_reason"],

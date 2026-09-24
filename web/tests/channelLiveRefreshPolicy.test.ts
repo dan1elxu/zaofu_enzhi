@@ -98,3 +98,16 @@ assert(
 );
 
 console.log("channelLiveRefreshPolicy tests passed");
+
+for (const status of ["queued", "running", "retryable_failure"]) {
+  assert(channelNeedsLiveConvergence({ ...settled, evaluation: { stages: [{ status }] } }),
+    `evaluation ${status} needs convergence`);
+}
+assert(!channelNeedsLiveConvergence({ ...settled, evaluation: { stages: [{ status: "inconclusive" }] } }),
+  "an inconclusive evaluation must not poll forever");
+
+for (const status of ["queued", "running", "retrying", "interrupted", "failed", "completed"]) {
+  assert(channelNeedsLiveConvergence({ ...settled, auto_chain: [{
+    purpose: "resolve", thread_id: "main", operation_id: "auto-1", status, attempt: 1, max_attempts: 3,
+  }] }) === !["failed", "completed"].includes(status), `auto ${status} convergence`);
+}
