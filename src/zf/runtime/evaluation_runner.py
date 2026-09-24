@@ -11,7 +11,9 @@ projection (§9).
 from __future__ import annotations
 
 import json
+import math
 import os
+import re
 import time
 import uuid
 import shutil
@@ -53,6 +55,7 @@ TERMINAL_JUDGE_STATUSES = frozenset({
     "scored",
     "evidence_missing",
     "abstain",
+    "conflict",
     "invalid",
     "judge_timeout",
     "inconclusive",
@@ -69,6 +72,7 @@ _COMPLETED_JUDGE_STATUSES = frozenset({
     "scored",
     "evidence_missing",
     "abstain",
+    "conflict",
     "invalid",
 })
 _COMPLETED_CONCLUSION_STATUSES = frozenset({"complete", "invalid", "incomplete", "inconclusive"})
@@ -290,13 +294,25 @@ def run_judge(
     )
     prompt_ref = _prompt_file_reference(packet_path, judge_type=judge_type)
 
-    result = _run_request_turns(
-        state_dir=state_dir, project_root=project_root, config=config, writer=writer,
-        workflow_run_id=workflow_run_id, trial_id=trial_id, judge_type=judge_type,
-        request_id=request_id, packet=packet, prompt_ref=prompt_ref, existing=existing,
-        backend=backend or _visible_tmux_backend, log=log,
-        slot_id=slot_id, channel_id=channel_id, stop_event=stop_event,
-    )
+    missing = _missing_prd_inputs(packet) if judge_type == "prd_result" else []
+    if missing:
+        result = _judge_record(
+            judge_type=judge_type, workflow_run_id=workflow_run_id, trial_id=trial_id,
+            request_id=request_id, packet=packet, status="evidence_missing",
+            result={"schema_version": SCHEMA_VERSIONS[judge_type], "judge_type": judge_type,
+                    "status": "evidence_missing", "dimensions": [], "prd_result_score": None,
+                    "missing_evidence": missing}, error="missing evaluation input: " + ", ".join(missing),
+            provider="deterministic", model="",
+        )
+        result["attempt"] = 0
+    else:
+        result = _run_request_turns(
+            state_dir=state_dir, project_root=project_root, config=config, writer=writer,
+            workflow_run_id=workflow_run_id, trial_id=trial_id, judge_type=judge_type,
+            request_id=request_id, packet=packet, prompt_ref=prompt_ref, existing=existing,
+            backend=backend or _visible_tmux_backend, log=log,
+            slot_id=slot_id, channel_id=channel_id, stop_event=stop_event,
+        )
     status, error = result["status"], result["error"]
     path = write_judge_result(
         state_dir, workflow_run_id=workflow_run_id,
@@ -325,6 +341,28 @@ def run_judge(
         },
     )
     return result
+
+
+def _missing_prd_inputs(packet: Any) -> list[str]:
+    def has_body(value: Any) -> bool:
+        # Markdown and scalar JSON artifacts are wrapped by the observer.
+        while isinstance(value, dict) and set(value) == {"body"}:
+            value = value["body"]
+        if isinstance(value, str):
+            return bool(value.strip())
+        return isinstance(value, (dict, list)) and bool(value)
+
+    missing = []
+    statement = ((packet.get("task_details") or {}).get("statement")
+                 or (packet.get("task") or {}).get("statement"))
+    if not isinstance(statement, str) or not statement.strip():
+        missing.append("task.statement")
+    if not has_body((packet.get("channel_frozen_prd") or {}).get("body")):
+        missing.append("channel_frozen_prd.body")
+    bound = packet.get("workflow_bound_prd")
+    if bound and not has_body(bound.get("body")):
+        missing.append("workflow_bound_prd.body")
+    return missing
 
 
 def run_conclusion(
@@ -378,15 +416,22 @@ def run_conclusion(
         "prd_result": prd,
     }
     failed = {key: judges.get(key) or {} for key in ("milestone", "communication", "prd_result")
-              if (judges.get(key) or {}).get("status") not in _COMPLETED_JUDGE_STATUSES
-              or (judges.get(key) or {}).get("status") == "inconclusive"}
+              if (judges.get(key) or {}).get("status") != "scored"}
+    if det_comm is None:
+        failed.setdefault("communication", comm)
+    if det_prd is None:
+        failed.setdefault("prd_result", prd)
     if failed:
         error = "; ".join(f"{key}: {value.get('error') or value.get('status')}"
                           for key, value in failed.items())
+        status = "inconclusive" if any(
+            value.get("status") not in _COMPLETED_JUDGE_STATUSES
+            or value.get("status") == "inconclusive" for value in failed.values()
+        ) else "incomplete"
         result = _judge_record(
             judge_type="conclusion", workflow_run_id=workflow_run_id,
             trial_id=trial_id, request_id=request_id, packet=packet,
-            status="inconclusive", result={}, error=error, provider="deterministic", model="",
+            status=status, result={}, error=error, provider="deterministic", model="",
         )
     else:
         rendered = STAGE_PROMPTS["conclusion"].format(
@@ -408,12 +453,26 @@ def run_conclusion(
         )
     status, error = result["status"], result["error"]
     raw = result["result"]
-    if status == "inconclusive":
+    if failed or status != "complete":
         det_overall = None
+    if failed or status == "inconclusive":
         raw.update(schema_version="conclusion_result.v1", judge_type="conclusion",
-                   status="inconclusive", conclusion_zh="Judge 评估未完成，无法形成确定性结论。",
-                   next_actions=["排查 provider 失败原因；重新测评时保留旧报告。"])
+                   status=status, conclusion_zh="Judge 结果未全部通过评分门禁，暂不形成总分。",
+                   team_findings={"discussion_meaningful": False, "discussion_progressed": False,
+                                  "prd_ready_for_next_stage": False, "problems": [error],
+                                  "underperformed_roles": [], "unnecessary_roles": []},
+                   next_actions=["检查失败状态和缺失证据；修复后重新测评，保留旧报告。"])
     if raw:
+        milestone = judges.get("milestone") or {}
+        findings = (milestone.get("result") or {}).get("agent_findings") or []
+        raw["agent_scores"] = [{"agent_id": item.get("agent_id"), "score": (
+            item.get("score") if milestone.get("status") == "scored" and item.get("status") == "scored" else None
+        )} for item in findings]
+        raw["judge_refs"] = [value["request_id"] for value in judges.values() if value.get("request_id")]
+        raw["evidence_refs"] = sorted({ref for value in judges.values()
+            for item in ((value.get("result") or {}).get("dimensions") or [])
+                        + ((value.get("result") or {}).get("agent_findings") or [])
+            for ref in item.get("evidence_refs") or [] if item.get("status") == "scored"})
         raw.update(communication_score=det_comm, prd_result_score=det_prd,
                    overall_score=det_overall)
         if status == "complete" and det_overall is None:
@@ -704,15 +763,23 @@ def _run_request_turns(
                               retryable=attempt < max_attempts)
                 break
             parsed = _parse_json_object(observed.reply)
+            profiles = packet.get("agent_profiles") or []
+            participants = [item.get("agent_id") for item in profiles if item.get("agent_id")]
+            if not profiles:
+                participants = sorted({item["member_id"] for item in packet.get("channel_messages") or []
+                                       if item.get("member_id")})
             normalized, error = (normalize_judge_output(
                 judge_type=judge_type, raw=parsed,
                 allowed_evidence_refs=list(packet.get("allowed_evidence_refs") or []),
+                expected_agent_ids=participants if judge_type == "milestone" else None,
+                workflow_bound=bool(packet.get("workflow_bound_prd")),
             ) if parsed is not None else (None, f"judge returned no single JSON object: {observed.reply[:240]}"))
             record.update(status="invalid", error=error)
             if normalized is not None:
-                record.update(result=normalized.to_dict(), error="",
-                              status="complete" if judge_type == "conclusion" else str(normalized.status or "scored"))
-                break
+                record.update(result=normalized.to_dict(), status=normalized.status,
+                              error="invalid evidence references" if normalized.status == "invalid" else "")
+                if normalized.status != "invalid":
+                    break
         archive = path.parent / "attempts" / f"{request_id}-attempt-{attempt}.json"
         if not archive.exists():
             atomic_write_text(archive, _canonical(record))
@@ -731,22 +798,31 @@ def _run_request_turns(
 
 def _parse_json_object(text: str) -> dict[str, Any] | None:
     stripped = text.strip()
-    candidates = [stripped] if stripped.startswith("{") else []
-    candidates.extend(
-        block.strip()[4:].strip()
-        for block in stripped.split("```")
-        if block.strip().lower().startswith("json")
-    )
-    for candidate in candidates:
-        if not candidate.startswith("{"):
-            continue
-        try:
-            parsed = json.loads(candidate)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(parsed, dict):
-            return parsed
-    return None
+    fence = re.fullmatch(r"```(?:json)?\s*(.*?)\s*```", stripped, re.DOTALL | re.IGNORECASE)
+    if fence:
+        stripped = fence.group(1)
+
+    def unique_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        result = dict(pairs)
+        if len(result) != len(pairs):
+            raise ValueError("duplicate JSON key")
+        return result
+
+    def invalid_constant(value: str) -> Any:
+        raise ValueError(f"non-finite JSON number: {value}")
+
+    def finite_float(value: str) -> float:
+        parsed = float(value)
+        if not math.isfinite(parsed):
+            raise ValueError(f"non-finite JSON number: {value}")
+        return parsed
+
+    try:
+        parsed = json.loads(stripped, object_pairs_hook=unique_keys,
+                            parse_constant=invalid_constant, parse_float=finite_float)
+    except (ValueError, TypeError):
+        return None
+    return parsed if isinstance(parsed, dict) else None
 
 
 def _judge_record(

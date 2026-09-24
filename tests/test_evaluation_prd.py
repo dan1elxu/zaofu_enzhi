@@ -36,6 +36,12 @@ from zf.runtime.evaluation_schemas import (
 ALLOWED = ["channel/message/evt-1", "artifact/prd/channel-frozen.json"]
 
 
+def _team_findings() -> dict:
+    return {"discussion_meaningful": True, "discussion_progressed": True,
+            "prd_ready_for_next_stage": True, "problems": [],
+            "underperformed_roles": [], "unnecessary_roles": []}
+
+
 # ---------------------------------------------------------------- packets
 
 
@@ -124,7 +130,8 @@ def test_write_immutable_packet_never_overwrites(tmp_path: Path) -> None:
 
 def _dims(ids: list[str], scores: list[float]) -> list[dict]:
     return [
-        {"dimension_id": dim_id, "score": score, "status": "scored"}
+        {"dimension_id": dim_id, "score": score, "status": "scored",
+         "evidence_refs": ALLOWED[:1], "rationale": "具体证据支持该分数", "confidence": 0.9}
         for dim_id, score in zip(ids, scores)
     ]
 
@@ -172,6 +179,7 @@ def test_normalize_milestone_accepts_agent_reports_alias() -> None:
                 "what_it_did": "drove the design",
                 "evidence_refs": [ALLOWED[0]],
                 "confidence": 0.9,
+                "rationale": "明确提出并推动了设计决策。",
             }
         ],
         "missing_evidence": [],
@@ -212,11 +220,12 @@ def test_normalize_communication_accepts_dimension_scores_alias() -> None:
     assert normalized.communication_score == 4.0
 
 
-def test_normalize_prd_result_null_second_dim_is_not_missing_before_bind() -> None:
-    """v3 prompt told judges to return channel_to_workflow_prd with
-    score=null before a workflow binds; that must not downgrade the whole
-    result to evidence_missing — the scored original_to_channel_prd must
-    surface (status scored, score usable)."""
+def test_normalize_prd_result_unbound_accepts_original_dimension_only() -> None:
+    """Before a workflow binds, the judge must omit the workflow boundary.
+
+    A second null dimension is ambiguous and cannot silently turn a partial
+    result into a valid score.
+    """
     raw = {
         "schema_version": "prd_result.v1",
         "judge_type": "prd_result",
@@ -228,13 +237,6 @@ def test_normalize_prd_result_null_second_dim_is_not_missing_before_bind() -> No
                 "evidence_refs": ["artifact/prd/channel-frozen.json"],
                 "rationale": "requirements preserved",
             },
-            {
-                "dimension_id": "channel_to_workflow_prd",
-                "score": None,
-                "confidence": 0.9,
-                "evidence_refs": [],
-                "rationale": "no workflow bound yet",
-            },
         ],
         "missing_evidence": [],
     }
@@ -244,18 +246,28 @@ def test_normalize_prd_result_null_second_dim_is_not_missing_before_bind() -> No
     )
     assert error == ""
     assert normalized is not None
-    assert normalized.status == "scored"
-    assert normalized.prd_result_score == 4.0
+    assert normalized.status == "scored" and normalized.prd_result_score == 4.0
 
-    # Workflow bound: the same null dimension IS a real evidence failure.
+    # Workflow bound: both dimensions are required.
+    raw["dimensions"].append({
+        "dimension_id": "channel_to_workflow_prd",
+        "score": None,
+        "confidence": 0.9,
+        "evidence_refs": [],
+        "rationale": "workflow evidence unavailable",
+    })
+    extra, extra_error = normalize_judge_output(
+        judge_type="prd_result", raw=raw, allowed_evidence_refs=ALLOWED,
+    )
+    assert extra is None and extra_error
     normalized_bound, error_bound = normalize_judge_output(
         judge_type="prd_result",
         raw=raw,
         allowed_evidence_refs=ALLOWED + ["artifact/prd/workflow-bound.json"],
     )
-    assert error_bound == ""
-    assert normalized_bound is not None
+    assert not error_bound and normalized_bound is not None
     assert normalized_bound.status == "evidence_missing"
+    assert normalized_bound.prd_result_score is None
 
 
 def test_overall_score_applies_prd_weights() -> None:
@@ -322,7 +334,7 @@ def test_normalize_all_abstain_is_abstain_not_conflict() -> None:
 
 def test_normalize_missing_evidence_marks_result() -> None:
     raw = _communication_raw()
-    raw["missing_evidence"] = ["channel/message/evt-missing"]
+    raw["missing_evidence"] = [ALLOWED[0]]
     normalized, _ = normalize_judge_output(
         judge_type="communication", raw=raw, allowed_evidence_refs=ALLOWED,
     )
@@ -330,14 +342,13 @@ def test_normalize_missing_evidence_marks_result() -> None:
     assert normalized.status == "evidence_missing"
 
 
-def test_normalize_out_of_range_score_becomes_missing() -> None:
+def test_normalize_out_of_range_score_requires_schema_repair() -> None:
     raw = _communication_raw()
     raw["dimensions"][0]["score"] = 9
-    normalized, _ = normalize_judge_output(
+    normalized, error = normalize_judge_output(
         judge_type="communication", raw=raw, allowed_evidence_refs=ALLOWED,
     )
-    assert normalized is not None
-    assert normalized.dimensions[0].status == "evidence_missing"
+    assert normalized is None and error
 
 
 def test_normalize_rejects_wrong_schema_version() -> None:
@@ -361,6 +372,7 @@ def test_normalize_milestone_requires_necessity_vocab() -> None:
                 "necessity": "indispensable",  # not in vocab
                 "confidence": 0.9,
                 "evidence_refs": [ALLOWED[0]],
+                "rationale": "架构建议被采用并转化为实现方案。",
             }
         ],
         "missing_evidence": [],
@@ -386,6 +398,7 @@ def test_normalize_accepts_missing_judge_type_but_rejects_contradiction() -> Non
                 "summary": "contributed design",  # judges say "summary"
                 "confidence": 0.9,
                 "evidence_refs": [ALLOWED[0]],
+                "rationale": "指出了关键缺口并给出修复方向。",
             }
         ],
         "missing_evidence": [],
@@ -421,6 +434,7 @@ def test_normalize_accepts_live_model_output_shapes() -> None:
                 "adopted": True,
                 "gap": "",
                 "evidence_refs": [ALLOWED[0]],
+                "rationale": "设计结论被消息证据直接支持。",
             },
             {
                 "agent_id": "a2",
@@ -431,6 +445,7 @@ def test_normalize_accepts_live_model_output_shapes() -> None:
                 "adopted": True,
                 "gap": "minor",
                 "evidence_refs": [ALLOWED[0]],
+                "rationale": "指出了实现风险并给出改进建议。",
             },
         ],
         "confidence": 0.92,
@@ -447,11 +462,11 @@ def test_normalize_accepts_live_model_output_shapes() -> None:
     communication = {
         "schema_version": "communication_result.v1",
         "scores": {
-            "information_exchange": {"score": 5, "rationale": "rich exchange"},
-            "clarity": {"score": 5, "rationale": "clear"},
-            "task_assistance": {"score": 5, "rationale": "on task"},
-            "efficiency": {"score": 4, "rationale": "some rounds"},
-            "necessity": {"score": 4, "rationale": "one quiet spell"},
+            "information_exchange": {"score": 5, "rationale": "rich exchange", "evidence_refs": ALLOWED[:1]},
+            "clarity": {"score": 5, "rationale": "clear", "evidence_refs": ALLOWED[:1]},
+            "task_assistance": {"score": 5, "rationale": "on task", "evidence_refs": ALLOWED[:1]},
+            "efficiency": {"score": 4, "rationale": "some rounds", "evidence_refs": ALLOWED[:1]},
+            "necessity": {"score": 4, "rationale": "one quiet spell", "evidence_refs": ALLOWED[:1]},
         },
         "confidence": 0.92,
         "evidence_refs": ALLOWED[:3],
@@ -489,7 +504,7 @@ def _packet(judge_type: str = "milestone", run_id: str = "wf-x") -> dict:
                 "text": "proposal",
             }
         ],
-        channel_frozen_prd={"prd_ref": "p"},
+        channel_frozen_prd={"prd_ref": "p", "body": "# PRD\n\nDo X."},
     )
 
 
@@ -528,6 +543,7 @@ def _scored_record(run_id: str = "wf-x") -> dict:
                     "status": "scored",
                     "confidence": 0.9,
                     "evidence_refs": ["channel/message/evt-1"],
+                    "rationale": "cited concrete arguments",
                 }
             ],
             "missing_evidence": [],
@@ -675,6 +691,9 @@ def test_conclusion_overall_is_deterministically_recomputed(tmp_path: Path) -> N
                     "dimension_id": dim_id,
                     "score": 5,
                     "status": "scored",
+                    "confidence": 0.9,
+                    "evidence_refs": [ALLOWED[0]],
+                    "rationale": "明确交换了验收信息",
                 }
                 for dim_id in COMMUNICATION_DIMENSIONS
             ]
@@ -684,7 +703,9 @@ def test_conclusion_overall_is_deterministically_recomputed(tmp_path: Path) -> N
         "status": "scored",
         "result": {
             "dimensions": [
-                {"dimension_id": dim_id, "score": 2, "status": "scored"}
+                {"dimension_id": dim_id, "score": 2, "status": "scored",
+                 "confidence": 0.9, "evidence_refs": [ALLOWED[1]],
+                 "rationale": "遗漏了原始需求的关键条件"}
                 for dim_id in PRD_RESULT_DIMENSIONS
             ]
         },
@@ -699,7 +720,7 @@ def test_conclusion_overall_is_deterministically_recomputed(tmp_path: Path) -> N
             "prd_result_score": 1.0,
             "overall_score": 1.0,
             "agent_scores": [],
-            "team_findings": {"summary_zh": "ok"},
+            "team_findings": _team_findings(),
             "conclusion_zh": "结论：可用",
             "next_actions": [],
         }
@@ -1220,6 +1241,7 @@ def _seed_channel_state(
                 "channel_id": "ch-1",
                 "workflow_run_id": "wf-bound-1",
                 "task_id": "task-1",
+                "prd_ref": prd_ref,
             },
         )
     return posted_event_ids
@@ -1245,14 +1267,14 @@ def _judge_reply(judge_type: str, message_ref: str = "", with_bound: bool = Fals
                 "judge_type": "milestone",
                 "agent_findings": [
                     {
-                        "agent_id": "m1",
+                        "agent_id": agent_id,
                         "score": 4,
                         "necessity": "necessary",
                         "role_summary": "drove the design",
-                        "evidence_refs": [message_ref] if message_ref else [],
+                        "evidence_refs": [message_ref or "artifact/prd/channel-frozen.json"],
                         "rationale": "cited concrete arguments",
                         "confidence": 0.9,
-                    }
+                    } for agent_id in ("m1", "m2")
                 ],
                 "missing_evidence": [],
             }
@@ -1267,7 +1289,7 @@ def _judge_reply(judge_type: str, message_ref: str = "", with_bound: bool = Fals
                         "dimension_id": dim_id,
                         "score": 4,
                         "confidence": 0.9,
-                        "evidence_refs": [message_ref] if message_ref else [],
+                        "evidence_refs": [message_ref or "artifact/prd/channel-frozen.json"],
                         "rationale": "clear exchange",
                     }
                     for dim_id in COMMUNICATION_DIMENSIONS
@@ -1309,7 +1331,7 @@ def _judge_reply(judge_type: str, message_ref: str = "", with_bound: bool = Fals
             "judge_type": "conclusion",
             "status": "complete",
             "agent_scores": [],
-            "team_findings": {"summary_zh": "ok"},
+            "team_findings": _team_findings(),
             "conclusion_zh": "结论：通过",
             "next_actions": [],
         }
@@ -1445,7 +1467,7 @@ def test_observer_reruns_prd_result_after_workflow_bind(
     writer.emit(
         "workflow.invoke.requested", actor="test",
         payload={"channel_id": "ch-1", "workflow_run_id": "wf-1",
-                 "task_id": "task-1"},
+                 "task_id": "task-1", "prd_ref": "channel-artifacts/ch-1/prd.md"},
     )
 
     second = evaluation_observer.observe_once(state_dir=tmp_path, backend=backend)
@@ -1551,6 +1573,8 @@ def test_render_report_sections_follow_prd_order() -> None:
                         "score": 4,
                         "status": "scored",
                         "rationale": "r",
+                        "confidence": 0.9,
+                        "evidence_refs": [ALLOWED[0]],
                     }
                     for dim_id in COMMUNICATION_DIMENSIONS
                 ]
@@ -1566,6 +1590,8 @@ def test_render_report_sections_follow_prd_order() -> None:
                         "status": "scored",
                         "rationale": "r",
                         "verdict": "aligned",
+                        "confidence": 0.9,
+                        "evidence_refs": [ALLOWED[1]],
                     }
                     for dim_id in PRD_RESULT_DIMENSIONS
                 ],
@@ -1586,7 +1612,7 @@ def test_render_report_sections_follow_prd_order() -> None:
         },
     )
     assert body.index("## 1.") < body.index("## 2.") < body.index("## 3.") < body.index("## 4.") < body.index("## 5.") < body.index("## 6.")
-    assert "overall_score: **3.6**" in body
+    assert "overall_score: **3.4**" in body
     assert "communication_score: 4.0" in body
     assert "prd_result_score: 3.0" in body
 

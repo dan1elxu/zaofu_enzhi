@@ -14,6 +14,8 @@ before, so existing sidecars and events remain readable.
 
 from __future__ import annotations
 
+import math
+from dataclasses import replace
 from typing import Any
 
 from zf.runtime.evaluation_types import (
@@ -62,7 +64,7 @@ _CONFIDENCE_FLOOR = 0.60
 def mean_scores(scores: list[float | None]) -> float | None:
     """Round(mean(valid scores), 2); None when any required score is absent."""
 
-    if not scores or any(score is None for score in scores):
+    if not scores or any(not _valid_number(score, 1, 5) for score in scores):
         return None
     return round(sum(scores) / len(scores), 2)  # type: ignore[arg-type]
 
@@ -71,33 +73,31 @@ def communication_score(dimensions: list[Any]) -> float | None:
     """Deterministic team communication score (PRD §4.3)."""
 
     by_id = _dimension_index(dimensions)
+    if set(by_id) != set(COMMUNICATION_DIMENSIONS):
+        return None
     return mean_scores([
         _dimension_score_dataclass(by_id.get(dimension_id))
         for dimension_id in COMMUNICATION_DIMENSIONS
     ])
 
 
-def prd_result_score(dimensions: list[Any]) -> float | None:
+def prd_result_score(dimensions: list[Any], *, workflow_bound: bool | None = None) -> float | None:
     """Deterministic PRD result score (PRD §4.4).
 
     The PRD result judge now runs at freeze time and scores
     ``original_to_channel_prd`` immediately; the
     ``channel_to_workflow_prd`` dimension is scored only after a workflow
-    binds. When both dimensions are scored we return their mean; when only
-    one is scored we return that dimension's score so the freeze-time
-    evaluation still produces a meaningful result.
+    binds. Every applicable dimension must be present and scored; missing
+    or abstained workflow comparisons must never become a partial full score.
     """
 
     by_id = _dimension_index(dimensions)
-    original = _dimension_score_dataclass(by_id.get("original_to_channel_prd"))
-    workflow = _dimension_score_dataclass(by_id.get("channel_to_workflow_prd"))
-    if original is not None and workflow is not None:
-        return mean_scores([original, workflow])
-    if original is not None:
-        return original
-    if workflow is not None:
-        return workflow
-    return None
+    if workflow_bound is None:
+        workflow_bound = "channel_to_workflow_prd" in by_id
+    required = PRD_RESULT_DIMENSIONS if workflow_bound else PRD_RESULT_DIMENSIONS[:1]
+    if set(by_id) != set(required):
+        return None
+    return mean_scores([_dimension_score_dataclass(by_id[key]) for key in required])
 
 
 def overall_score(
@@ -107,7 +107,7 @@ def overall_score(
 ) -> float | None:
     """Deterministic overall score (PRD §4.5); None unless both inputs scored."""
 
-    if communication is None or prd_result is None:
+    if not _valid_number(communication, 1, 5) or not _valid_number(prd_result, 1, 5):
         return None
     return round(
         OVERALL_COMMUNICATION_WEIGHT * communication
@@ -121,6 +121,8 @@ def normalize_judge_output(
     judge_type: str,
     raw: dict[str, Any],
     allowed_evidence_refs: list[str],
+    expected_agent_ids: list[str] | None = None,
+    workflow_bound: bool | None = None,
 ) -> tuple[JudgeResult | None, str]:
     """Validate one judge JSON object against its v1 schema.
 
@@ -129,6 +131,8 @@ def normalize_judge_output(
     the item invalid; confidence below the floor converts to abstain.
     """
 
+    if not isinstance(raw, dict):
+        return None, "judge output must be an object"
     schema_version = SCHEMA_VERSIONS.get(judge_type)
     if not schema_version:
         return None, f"unknown judge_type: {judge_type}"
@@ -146,16 +150,19 @@ def normalize_judge_output(
         return None, f"judge_type mismatch: expected {judge_type}"
 
     allowed = {str(ref).strip() for ref in allowed_evidence_refs if str(ref).strip()}
-    if judge_type == "milestone":
-        result, norm_error = _normalize_milestone(raw, allowed)
-    elif judge_type == "communication":
-        result, norm_error = _normalize_communication(raw, allowed)
-    elif judge_type == "prd_result":
-        result, norm_error = _normalize_prd_result(raw, allowed)
-    elif judge_type == "conclusion":
-        result, norm_error = _normalize_conclusion(raw)
-    else:
-        return None, f"unknown judge_type: {judge_type}"
+    try:
+        if judge_type == "milestone":
+            result, norm_error = _normalize_milestone(raw, allowed, expected_agent_ids)
+        elif judge_type == "communication":
+            result, norm_error = _normalize_communication(raw, allowed)
+        elif judge_type == "prd_result":
+            result, norm_error = _normalize_prd_result(raw, allowed, workflow_bound)
+        elif judge_type == "conclusion":
+            result, norm_error = _normalize_conclusion(raw)
+        else:
+            return None, f"unknown judge_type: {judge_type}"
+    except (ValueError, TypeError, OverflowError) as exc:
+        return None, str(exc)
 
     if result is None:
         return None, norm_error
@@ -168,18 +175,28 @@ def _dimension_index(dimensions: list[Any]) -> dict[str, DimensionScore]:
     by_id: dict[str, DimensionScore] = {}
     for item in dimensions:
         if isinstance(item, DimensionScore):
-            by_id[item.dimension_id] = item
+            dim = item
         elif isinstance(item, dict):
+            try:
+                _score_value(item.get("score"))
+            except ValueError:
+                return {}
             dim = DimensionScore.from_dict(item)
-            if dim.dimension_id:
-                by_id[dim.dimension_id] = dim
+        else:
+            return {}
+        if not dim.dimension_id or dim.dimension_id in by_id:
+            return {}
+        by_id[dim.dimension_id] = dim
     return by_id
 
 
 def _dimension_score_dataclass(item: DimensionScore | None) -> float | None:
     if not item or item.status != "scored":
         return None
-    return item.score
+    try:
+        return _score_value(item.score)
+    except ValueError:
+        return None
 
 
 def _dimension_entries(value: Any) -> list[dict[str, Any]]:
@@ -189,14 +206,17 @@ def _dimension_entries(value: Any) -> list[dict[str, Any]]:
     does not declare one."""
 
     if isinstance(value, list) and value:
-        return [dict(item) for item in value if isinstance(item, dict)]
+        if not all(isinstance(item, dict) for item in value):
+            raise ValueError("every dimension must be an object")
+        return [dict(item) for item in value]
     if isinstance(value, dict) and value:
         entries: list[dict[str, Any]] = []
         for key, item in value.items():
-            if isinstance(item, dict):
-                entry = dict(item)
-                entry.setdefault("dimension_id", key)
-                entries.append(entry)
+            if not isinstance(item, dict) or item.get("dimension_id", key) != key:
+                raise ValueError("dimension mapping key and entry must agree")
+            entry = dict(item)
+            entry.setdefault("dimension_id", key)
+            entries.append(entry)
         return entries
     return []
 
@@ -204,6 +224,7 @@ def _dimension_entries(value: Any) -> list[dict[str, Any]]:
 def _normalize_milestone(
     raw: dict[str, Any],
     allowed: set[str],
+    expected_agent_ids: list[str] | None = None,
 ) -> tuple[MilestoneResult | None, str]:
     # Live judges (2026-09-17) emit ``evaluations`` and put confidence at
     # the top level; the v1 schema says ``agent_findings`` + per-item
@@ -216,11 +237,13 @@ def _normalize_milestone(
     )
     if not isinstance(findings, list) or not findings:
         return None, "agent_findings must be a non-empty list"
+    _require_ids(findings, "agent_id", expected_agent_ids)
     default_confidence = raw.get("confidence")
     normalized: list[AgentFinding] = []
     for item in findings:
         if not isinstance(item, dict) or not str(item.get("agent_id") or "").strip():
             return None, "every agent_finding needs agent_id"
+        _validate_item(item, default_confidence)
         score = _score_value(item.get("score"))
         necessity = str(item.get("necessity") or "").strip()
         if necessity not in NECESSITY_VOCAB:
@@ -240,12 +263,11 @@ def _normalize_milestone(
                 else default_confidence
             ),
         )
-        normalized.append(finding.with_status(_item_status(finding, allowed)))
+        status = _item_status(finding, allowed, str(item.get("status") or ""))
+        normalized.append(replace(finding, status=status, score=score if status == "scored" else None))
     missing = _string_list(
         raw.get("missing_evidence") or raw.get("missing_evidence_keys")
     )
-    if any(not _evidence_bound(ref, allowed) for ref in missing):
-        return None, "missing_evidence refs must come from allowed_evidence_refs"
     return MilestoneResult(
         schema_version=str(raw["schema_version"]),
         judge_type="milestone",
@@ -266,6 +288,7 @@ def _normalize_communication(
     )
     if not dimensions:
         return None, "dimensions must be a non-empty list"
+    _require_ids(dimensions, "dimension_id", COMMUNICATION_DIMENSIONS)
     default_confidence = raw.get("confidence")
     dims = [
         _normalize_dimension(item, allowed, default_confidence)
@@ -277,15 +300,19 @@ def _normalize_communication(
     missing = _string_list(
         raw.get("missing_evidence") or raw.get("missing_evidence_keys")
     )
+    status = _result_status(dims, missing)
+    human_count = raw.get("human_intervention_count", 0)
+    if type(human_count) is not int or human_count < 0:
+        return None, "human_intervention_count must be a non-negative integer"
     return CommunicationResult(
         schema_version=str(raw["schema_version"]),
         judge_type="communication",
-        status=_result_status(dims, missing),
+        status=status,
         run_id=str(raw.get("run_id") or ""),
         source_snapshot_digest=str(raw.get("source_snapshot_digest") or ""),
         dimensions=dims,
-        human_intervention_count=int(raw.get("human_intervention_count") or 0),
-        communication_score=communication_score(dims),
+        human_intervention_count=human_count,
+        communication_score=communication_score(dims) if status == "scored" else None,
         missing_evidence=missing,
     ), ""
 
@@ -293,6 +320,7 @@ def _normalize_communication(
 def _normalize_prd_result(
     raw: dict[str, Any],
     allowed: set[str],
+    workflow_bound: bool | None = None,
 ) -> tuple[PrdResult | None, str]:
     # Live judges (2026-09-17) also emit the two boundaries as top-level keys
     # ("original_to_channel_prd": {...}, "channel_to_workflow_prd": {...})
@@ -309,6 +337,10 @@ def _normalize_prd_result(
         )
     if not dimensions:
         return None, "dimensions must be a non-empty list"
+    if workflow_bound is None:
+        workflow_bound = "artifact/prd/workflow-bound.json" in allowed
+    required = PRD_RESULT_DIMENSIONS if workflow_bound else PRD_RESULT_DIMENSIONS[:1]
+    _require_ids(dimensions, "dimension_id", required)
     default_confidence = raw.get("confidence")
     dims = [
         _normalize_dimension(item, allowed, default_confidence)
@@ -320,15 +352,16 @@ def _normalize_prd_result(
     missing = _string_list(
         raw.get("missing_evidence") or raw.get("missing_evidence_keys")
     )
+    status = _result_status(dims, missing)
     return PrdResult(
         schema_version=str(raw["schema_version"]),
         judge_type="prd_result",
-        status=_prd_result_status(dims, missing, allowed),
+        status=status,
         run_id=str(raw.get("run_id") or ""),
         source_snapshot_digest=str(raw.get("source_snapshot_digest") or ""),
         dimensions=dims,
         differences=_string_list(raw.get("differences")),
-        prd_result_score=prd_result_score(dims),
+        prd_result_score=prd_result_score(dims, workflow_bound=workflow_bound) if status == "scored" else None,
         missing_evidence=missing,
     ), ""
 
@@ -344,9 +377,9 @@ def _normalize_conclusion(
         return None, "team_findings must be an object"
     agent_scores = raw.get("agent_scores")
     if not isinstance(agent_scores, list):
-        per_agent = (
-            (raw.get("scores") or {}).get("milestone") or {}
-        ).get("per_agent")
+        scores = raw.get("scores")
+        milestone = scores.get("milestone") if isinstance(scores, dict) else None
+        per_agent = milestone.get("per_agent") if isinstance(milestone, dict) else None
         if isinstance(per_agent, dict) and per_agent:
             agent_scores = [
                 {"agent_id": str(agent_id), "score": _float_or_none(score)}
@@ -357,6 +390,20 @@ def _normalize_conclusion(
     status = str(raw.get("status") or "complete").strip() or "complete"
     if status.lower() in {"ok", "done", "finished"}:
         status = "complete"
+    if status not in {"complete", "incomplete", "inconclusive"}:
+        return None, "conclusion status must be complete, incomplete or inconclusive"
+    narrative = raw.get("conclusion_zh") or raw.get("conclusion") or raw.get("summary") or raw.get("overall_rationale")
+    if not isinstance(narrative, str) or not narrative.strip():
+        return None, "conclusion_zh must be non-empty"
+    for field in ("discussion_meaningful", "discussion_progressed", "prd_ready_for_next_stage"):
+        if type(team.get(field)) is not bool:
+            return None, f"team_findings.{field} must be a boolean"
+    for field in ("problems", "underperformed_roles", "unnecessary_roles"):
+        if not isinstance(team.get(field), list):
+            return None, f"team_findings.{field} must be a list"
+        _string_list(team[field])
+    if status != "complete" and team["prd_ready_for_next_stage"]:
+        return None, "an incomplete conclusion cannot declare PRD ready"
     return ConclusionResult(
         schema_version=str(raw["schema_version"]),
         judge_type="conclusion",
@@ -368,13 +415,7 @@ def _normalize_conclusion(
         overall_score=_float_or_none(raw.get("overall_score")),
         agent_scores=list(agent_scores),
         team_findings=team,
-        conclusion_zh=str(
-            raw.get("conclusion_zh")
-            or raw.get("conclusion")
-            or raw.get("summary")
-            or raw.get("overall_rationale")
-            or ""
-        ).strip(),
+        conclusion_zh=narrative.strip(),
         next_actions=_string_list(raw.get("next_actions")),
         judge_refs=_string_list(raw.get("judge_refs")),
         evidence_refs=_string_list(raw.get("evidence_refs")),
@@ -389,6 +430,7 @@ def _normalize_dimension(
     dimension_id = str(item.get("dimension_id") or "").strip()
     if not dimension_id:
         return None
+    _validate_item(item, default_confidence)
     dim = DimensionScore(
         dimension_id=dimension_id,
         score=_score_value(item.get("score")),
@@ -402,13 +444,16 @@ def _normalize_dimension(
             else default_confidence
         ),
     )
-    return dim.with_status(_item_status(dim, allowed))
+    status = _item_status(dim, allowed, str(item.get("status") or ""))
+    return replace(dim, status=status, score=dim.score if status == "scored" else None)
 
 
-def _item_status(entry: AgentFinding | DimensionScore, allowed: set[str]) -> str:
+def _item_status(entry: AgentFinding | DimensionScore, allowed: set[str], declared: str = "") -> str:
     refs = entry.evidence_refs
     if any(not _evidence_bound(ref, allowed) for ref in refs):
         return "invalid"
+    if declared == "abstain":
+        return "abstain"
     if entry.score is None:
         return "evidence_missing"
     if entry.confidence < _CONFIDENCE_FLOOR:
@@ -429,49 +474,51 @@ def _result_status(items: list[Any], missing: list[str]) -> str:
     return "scored"
 
 
-def _prd_result_status(
-    dims: list[DimensionScore],
-    missing: list[str],
-    allowed: set[str],
-) -> str:
-    """Result status for prd_result with not-yet-applicable dimensions.
+def _require_ids(items: list[dict[str, Any]], field: str, expected: Any = None) -> None:
+    ids = [item.get(field) if isinstance(item, dict) else None for item in items]
+    if any(not isinstance(value, str) or not value or value != value.strip() for value in ids):
+        raise ValueError(f"every entry needs a non-empty {field}")
+    if len(set(ids)) != len(ids):
+        raise ValueError(f"duplicate {field}")
+    if expected is not None and set(ids) != set(expected):
+        raise ValueError(f"{field} must contain exactly {sorted(expected)}; got {sorted(ids)}")
 
-    ``channel_to_workflow_prd`` can only be judged after a workflow binds.
-    The packet carries ``artifact/prd/workflow-bound.json`` in
-    allowed_evidence_refs exactly when a workflow is bound (see
-    ``build_packet``); before that, a ``channel_to_workflow_prd`` entry the
-    judge left unscored (score null -> item evidence_missing) means "not
-    applicable yet", not "evidence missing". v3's prompt asked judges to
-    return such a null entry, which otherwise downgraded the whole result to
-    evidence_missing and hid the scored original_to_channel_prd dimension.
-    """
 
-    workflow_bound = "artifact/prd/workflow-bound.json" in allowed
-    if workflow_bound:
-        return _result_status(dims, missing)
-    active = [
-        d for d in dims
-        if d.dimension_id != "channel_to_workflow_prd"
-    ]
-    if not active:
-        return "evidence_missing"
-    return _result_status(active, missing)
+def _validate_item(item: dict[str, Any], default_confidence: Any) -> None:
+    if "score" not in item:
+        raise ValueError("score is required; use null when evidence is missing")
+    score = _score_value(item["score"])
+    confidence = _confidence(item.get("confidence", default_confidence))
+    if not isinstance(item.get("rationale"), str) or not item["rationale"].strip():
+        raise ValueError("each item requires a non-empty rationale")
+    refs = _string_list(item.get("evidence_refs"))
+    declared = item.get("status")
+    if declared is not None and declared not in {"scored", "abstain", "evidence_missing"}:
+        raise ValueError("item status must be scored, abstain or evidence_missing")
+    if declared in {"abstain", "evidence_missing"} and score is not None:
+        raise ValueError("unscored items must have score=null")
+    if declared == "scored" and (score is None or confidence < _CONFIDENCE_FLOOR):
+        raise ValueError("scored status requires a valid score and confidence >= 0.60")
+    if (score is not None or declared == "abstain") and not refs:
+        raise ValueError("scored/abstained items require non-empty evidence_refs")
+
+
+def _valid_number(value: Any, minimum: float, maximum: float) -> bool:
+    return type(value) in {int, float} and minimum <= value <= maximum and math.isfinite(value)
 
 
 def _score_value(value: Any) -> float | None:
-    score = _float_or_none(value)
-    if score is None:
+    if value is None:
         return None
-    if not 1.0 <= score <= 5.0:
-        return None
-    return score
+    if not _valid_number(value, 1, 5) or not float(value).is_integer():
+        raise ValueError("score must be an integer from 1 to 5, or null")
+    return float(value)
 
 
 def _confidence(value: Any) -> float:
-    try:
-        return round(float(value), 2)
-    except (TypeError, ValueError):
-        return 0.0
+    if not _valid_number(value, 0, 1):
+        raise ValueError("confidence must be a finite JSON number from 0 to 1")
+    return float(value)  # Never round 0.599 up across the abstention threshold.
 
 
 def _float_or_none(value: Any) -> float | None:
@@ -482,9 +529,11 @@ def _float_or_none(value: Any) -> float | None:
 
 
 def _string_list(value: Any) -> list[str]:
-    if not isinstance(value, list):
+    if value is None:
         return []
-    return [str(item).strip() for item in value if str(item).strip()]
+    if not isinstance(value, list) or any(not isinstance(item, str) or not item.strip() for item in value):
+        raise ValueError("expected a list of non-empty strings")
+    return [item.strip() for item in value]
 
 
 def _evidence_bound(ref: str, allowed: set[str]) -> bool:

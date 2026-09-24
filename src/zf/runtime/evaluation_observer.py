@@ -178,7 +178,7 @@ def _prepare_channel(
         "gaps": readiness.get("gaps") if isinstance(readiness, dict) else [],
         "risks": readiness.get("risks") if isinstance(readiness, dict) else [],
     }
-    bound_prd = _bound_prd_payload(bound_workflows, frozen_prd)
+    bound_prd = _bound_prd_payload(state_dir, bound_workflows, frozen_prd)
 
     task_statement = channel_requirement_text(state_dir, channel, thread_id)
     task = {
@@ -345,9 +345,13 @@ def render_report(
     comm = (judges.get("communication") or {}).get("result") or {}
     prd = (judges.get("prd_result") or {}).get("result") or {}
     milestone = (judges.get("milestone") or {}).get("result") or {}
-    comm_score = communication_score(comm.get("dimensions") or [])
-    prd_score = prd_result_score(prd.get("dimensions") or [])
-    overall = overall_score(communication=comm_score, prd_result=prd_score)
+    comm_score = (communication_score(comm.get("dimensions") or [])
+                  if judges.get("communication", {}).get("status") == "scored" else None)
+    prd_score = (prd_result_score(prd.get("dimensions") or [])
+                 if judges.get("prd_result", {}).get("status") == "scored" else None)
+    complete = all(judges.get(stage, {}).get("status") == "scored"
+                   for stage in ("milestone", "communication", "prd_result"))
+    overall = overall_score(communication=comm_score, prd_result=prd_score) if complete else None
 
     lines = [
         f"# PRD Evaluation Report — {workflow_run_id}",
@@ -402,7 +406,7 @@ def render_report(
     if conclusion:
         result = conclusion.get("result") or {}
         lines.append(f"- status: `{conclusion.get('status')}`")
-        lines.append(f"- overall_score: **{result.get('overall_score')}**")
+        lines.append(f"- overall_score: **{overall if conclusion.get('status') == 'complete' else None}**")
         lines.append(f"- 结论：{result.get('conclusion_zh') or '（无）'}")
         for action in result.get("next_actions") or []:
             lines.append(f"- next: {action}")
@@ -485,18 +489,30 @@ def _bound_workflows(events: list[Any]) -> dict[str, list[dict[str, Any]]]:
     """Workflow bindings per channel: invoke events carrying a channel task."""
 
     bound: dict[str, list[dict[str, Any]]] = {}
+    requests: dict[str, dict[str, Any]] = {}
     for event in events:
         if event.type not in WORKFLOW_BIND_EVENTS or not isinstance(event.payload, dict):
             continue
         payload = event.payload
-        channel_id = str(payload.get("channel_id") or payload.get("correlation_id") or "")
+        if event.type == "workflow.invoke.requested":
+            requests[event.id] = payload
+        else:
+            # Acceptance carries source_event_id instead of repeating every
+            # input ref. Follow that exact request, never another channel/run.
+            payload = {**requests.get(str(payload.get("source_event_id") or ""), {}), **payload}
+        refs = payload.get("source_refs")
+        refs = refs if isinstance(refs, dict) else {}
+        channel_id = str(payload.get("channel_id") or refs.get("channel_id") or payload.get("correlation_id") or "")
         if not channel_id:
             continue
         bound.setdefault(channel_id, []).append({
             "event_id": event.id,
             "workflow_run_id": str(payload.get("workflow_run_id") or payload.get("run_id") or ""),
             "task_id": str(payload.get("task_id") or ""),
-            "prd_ref": str(payload.get("prd_ref") or payload.get("source_ref") or ""),
+            "prd_ref": str(payload.get("prd_ref") or payload.get("source_ref")
+                           or refs.get("prd_ref") or refs.get("source_ref")
+                           or refs.get("task_source_ref")
+                           or refs.get("channel_prd_ref") or ""),
         })
     return bound
 
@@ -569,6 +585,7 @@ def _packet_messages(channel: dict[str, Any], *, freeze_event_id: str, hydrate: 
 
 
 def _bound_prd_payload(
+    state_dir: Path,
     bound_workflows: list[dict[str, Any]],
     frozen_prd: dict[str, Any],
 ) -> dict[str, Any] | None:
@@ -577,12 +594,14 @@ def _bound_prd_payload(
     if not bound_workflows:
         return None
     latest = bound_workflows[-1]
+    ref = str(latest.get("prd_ref") or "")
     return {
         "workflow_run_id": latest.get("workflow_run_id") or "",
         "task_id": latest.get("task_id") or "",
-        "prd_ref": str(latest.get("prd_ref") or frozen_prd.get("prd_ref") or ""),
+        "prd_ref": ref,
         "bound_from_channel_prd_ref": frozen_prd.get("prd_ref") or "",
-        "body": {"binding_event_id": latest.get("event_id") or ""},
+        "binding_event_id": latest.get("event_id") or "",
+        "body": _read_json_artifact(state_dir, ref),
     }
 
 
