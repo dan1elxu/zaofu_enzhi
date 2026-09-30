@@ -34,6 +34,7 @@ def _prepare_channel(
     *, state_dir: Path, events: list[Any], channel_id: str,
     freeze: dict[str, Any], bound_workflows: list[dict[str, Any]],
     project_root: Path | None = None,
+    role_catalog: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     """Capture immutable inputs before any asynchronous provider work."""
 
@@ -275,7 +276,7 @@ def _prepare_channel(
         "freeze_event_type": freeze_type,
         "freeze_reason": str(freeze.get("freeze_reason") or ""),
     }
-    catalog = _snapshot_evaluation_roles()
+    catalog = _snapshot_evaluation_roles() if role_catalog is None else role_catalog
     task_details["evaluation_role_catalog"] = catalog
     profiles = _frozen_profiles(channel, thread_id, messages, state_dir=state_dir)
     iteration_summary = {

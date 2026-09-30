@@ -21,6 +21,9 @@ from zf.core.events import EventLog, EventWriter
 from zf.core.state.atomic_io import atomic_write_text
 from zf.runtime.channel_contracts import normalize_product_discussion_mode
 from zf.runtime.evaluation_scheduler import EvaluationQueueEntry, scheduler_for_state
+from zf.runtime.evaluation_admission import (
+    admitted_context, binding_changed, require_admitted_trial, supersede_rubric_duplicates,
+)
 from zf.runtime.evaluation_artifacts import report_path
 from zf.runtime.evaluation_types import EvaluationPacket, necessity_label
 from zf.runtime.evaluation_packets import (
@@ -85,6 +88,15 @@ TASK_TYPES = frozenset({"bugfix", "refactor", "greenfield", "ambiguous"})
 _REVISION_RE = re.compile(r"^[1-9][0-9]*$")
 
 
+class _ManualRegradeWriter(EventWriter):
+    """Keep manual provider events out of the canonical Channel projection."""
+
+    def emit(self, event_type: str, **kwargs: Any) -> Any:
+        payload = dict(kwargs.pop("payload", None) or {})
+        payload["evaluation_origin"] = "manual_regrade"
+        return super().emit(event_type, payload=payload, **kwargs)
+
+
 def observe_once(
     *,
     state_dir: Path,
@@ -118,13 +130,33 @@ def observe_once(
     for _freeze_key, freeze in freeze_points.items():
         channel_id = str(freeze.get("channel_id") or "")
         try:
-            context = _prepare_channel(
-                state_dir=state_dir, events=events, channel_id=channel_id,
-                freeze=freeze, bound_workflows=bound_workflows.get(channel_id) or [],
-                project_root=project_root,
-            )
+            # Once admitted, a freeze keeps its rubric. Deploying a role.md
+            # update must not silently re-score an already frozen input.
+            admitted = admitted_context(state_dir, scheduler.entries, events, freeze)
+            changed_binding = bool(admitted and binding_changed(admitted, bound_workflows.get(channel_id) or []))
+            role_catalog = (admitted["packets"]["task_type"]["task_details"]["evaluation_role_catalog"]
+                            if admitted else None)
+            try:
+                context = _prepare_channel(
+                    state_dir=state_dir, events=events, channel_id=channel_id,
+                    freeze=freeze, bound_workflows=bound_workflows.get(channel_id) or [],
+                    project_root=project_root,
+                    role_catalog=role_catalog,
+                )
+            except ValueError:
+                if not admitted or changed_binding:
+                    raise
+                # An admitted packet is digest-bound by the queue receipt;
+                # resume it when live source files can no longer be rebuilt.
+                # A new Workflow binding still needs its full input checks.
+                context = admitted
+            if context is None and admitted and not changed_binding:
+                context = admitted
             if context is not None:
+                if admitted and context["trial_id"] != admitted["trial_id"]:
+                    raise ValueError("frozen evaluation evidence changed after admission")
                 stats["queued"] += _enqueue_channel(state_dir, scheduler, context)
+                supersede_rubric_duplicates(state_dir, scheduler, context)
         except Exception as exc:
             identity = ":".join(
                 str(freeze.get(key) or "")
@@ -136,6 +168,7 @@ def observe_once(
         results = scheduler.tick(lambda entry, slot_id: _evaluate_stage(
             state_dir=state_dir, project_root=project_root, config=config,
             entry=entry, slot_id=slot_id, backend=backend, log=log, stop_event=scheduler.stop_event,
+            enforce_admission=True,
         ))
         stats["judges_run"] = sum(int(item.get("judges_run") or 0) for item in results)
         stats["errors"].extend(str(item["error"]) for item in results if item.get("error"))
@@ -286,6 +319,7 @@ def _enqueue_channel(state_dir: Path, scheduler: Any, context: dict[str, Any]) -
             depends_on=list(deps),
             freeze_event_id=str(context["freeze"].get("event_id") or ""),
             evaluator_profile=stage,
+            evaluation_origin=str(context.get("evaluation_origin") or ""),
         ), repair=stage_repair))
     return queued
 
@@ -346,9 +380,12 @@ def _evaluate_stage(
     *, state_dir: Path, project_root: Path | None, config: Any | None,
     entry: EvaluationQueueEntry, slot_id: int, backend: Any | None, log: Any,
     stop_event: Event | None = None,
+    enforce_admission: bool = False,
 ) -> dict[str, Any]:
     try:
         context = _load_queue_context(state_dir, entry)
+        if enforce_admission:
+            require_admitted_trial(state_dir, context)
     except ValueError as exc:
         return {"judges_run": 0, "status": "inconclusive", "error": str(exc)}
     run_id, stage = entry.workflow_run_id, entry.judge_type
@@ -367,7 +404,8 @@ def _evaluate_stage(
             "status": "inconclusive",
             "error": f"unsupported evaluation stage retired; not dispatched: {stage}",
         }
-    writer = EventWriter(EventLog(state_dir / "events.jsonl"))
+    writer_class = _ManualRegradeWriter if entry.evaluation_origin == "manual_regrade" else EventWriter
+    writer = writer_class(EventLog(state_dir / "events.jsonl"))
     judges = {}
     for judge_type, packet in context["packets"].items():
         request_id = _request_id(run_id, packet["trial_id"], judge_type,
@@ -541,6 +579,9 @@ def _load_queue_context(state_dir: Path, entry: EvaluationQueueEntry) -> dict[st
         raise ValueError("evaluation queue input digest mismatch")
     if context.get("evaluation_contract") != "channel-prd-eval.v1":
         raise ValueError("unsupported evaluation contract in queue input")
+    origin = str(context.get("evaluation_origin") or "")
+    if origin not in {"", "manual_regrade"} or origin != entry.evaluation_origin:
+        raise ValueError("queue evaluation_origin mismatch")
     if str(context.get("workflow_run_id") or "") != entry.workflow_run_id:
         raise ValueError("queue workflow_run_id mismatch")
     if str(context.get("channel_id") or "") != entry.channel_id:

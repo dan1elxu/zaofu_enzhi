@@ -75,6 +75,33 @@ def test_claude_returns_only_assistant_answer(tmp_path):
     assert turns.observe_transcript(path, backend="claude-code", request_marker="marker").reply == "answer"
 
 
+def test_transcript_model_is_observed_from_provider_records(tmp_path):
+    codex = write_records(tmp_path / "codex.jsonl", [
+        *codex_start(),
+        {"type": "turn_context", "payload": {"turn_id": "current", "model": "gpt-codex"}},
+    ])
+    observed = turns.observe_transcript(codex, backend="codex", request_marker="evaluation-turn:request")
+    assert observed.observed_model == "gpt-codex"
+    assert observed.observed_model_source == "transcript.turn_context"
+
+    claude = write_records(tmp_path / "claude-model.jsonl", [
+        {"type": "user", "uuid": "new", "message": {"content": "marker"}},
+        {"type": "assistant", "message": {"model": "claude-test", "stop_reason": "end_turn", "content": [{"type": "text", "text": "ok"}]}},
+    ])
+    observed = turns.observe_transcript(claude, backend="claude-code", request_marker="marker")
+    assert observed.observed_model == "claude-test"
+    assert observed.observed_model_source == "transcript.assistant.message"
+
+
+def test_transcript_model_missing_is_unknown(tmp_path):
+    path = write_records(tmp_path / "claude-unknown.jsonl", [
+        {"type": "user", "uuid": "new", "message": {"content": "marker"}},
+        {"type": "assistant", "message": {"stop_reason": "end_turn", "content": [{"type": "text", "text": "ok"}]}},
+    ])
+    observed = turns.observe_transcript(path, backend="claude-code", request_marker="marker")
+    assert observed.observed_model == "unknown"
+
+
 def test_codex_binds_isolated_rollout_by_request_not_newest(tmp_path):
     root = tmp_path / "sessions"
     wanted = write_records(root / "2026/09/23/rollout-wanted.jsonl", codex_start())

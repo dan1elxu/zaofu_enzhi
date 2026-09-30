@@ -50,6 +50,7 @@ class EvaluationQueueEntry:
     input_ref: str = ""
     input_digest: str = ""
     freeze_event_id: str = ""
+    evaluation_origin: str = ""
     # v1 evaluation metadata.  These fields are persisted with the queue so
     # a resumed observer cannot silently switch role/profile mid-run.
     evaluator_profile: str = ""
@@ -60,6 +61,11 @@ class EvaluationQueueEntry:
     status: str = "queued"
     slot_id: int = -1
     error: str = ""
+    # A duplicate queue row remains in the durable audit trail, but this
+    # canonical job owns future scheduling.  It deliberately does not change
+    # ``status``: completed/inconclusive rows retain their result evidence and
+    # a running row is allowed to finish its already-issued provider request.
+    superseded_by: str = ""
     updated_at: str = ""
 
 
@@ -75,9 +81,16 @@ class EvaluationScheduler:
     """
 
     def __init__(self, state_dir: Path, *, max_slots: int | None = None,
-                 inline: bool = False) -> None:
+                 inline: bool = False, queue_path: Path | None = None) -> None:
         self.state_dir = Path(state_dir)
-        self.queue_path = self.state_dir / QUEUE_RELATIVE_PATH
+        self.queue_path = Path(queue_path) if queue_path is not None else (
+            self.state_dir / QUEUE_RELATIVE_PATH
+        )
+        self.queue_path.resolve().relative_to(self.state_dir.resolve())
+        self.evaluation_origin = (
+            "" if self.queue_path.resolve() == (self.state_dir / QUEUE_RELATIVE_PATH).resolve()
+            else "manual_regrade"
+        )
         self.queue_path.parent.mkdir(parents=True, exist_ok=True)
         self._owner = self.queue_path.with_suffix(".lock").open("a")
         try:
@@ -150,6 +163,10 @@ class EvaluationScheduler:
                     entry.slot_id = -1
                     entry.error = "cyclic evaluation dependencies"
             for entry in self._entries.values():
+                if entry.evaluation_origin != self.evaluation_origin:
+                    entry.status, entry.slot_id = "inconclusive", -1
+                    entry.error = "evaluation origin does not match scheduler queue"
+                    continue
                 if entry.judge_type not in SUPPORTED_JUDGE_TYPES:
                     # Preserve the old row for audit/recovery diagnostics, but
                     # make it terminal before dispatch.  Legacy entries must
@@ -180,6 +197,8 @@ class EvaluationScheduler:
 
     def enqueue(self, entry: EvaluationQueueEntry, *, repair: bool = False) -> bool:
         with self._lock:
+            if entry.evaluation_origin != self.evaluation_origin:
+                return False
             if entry.judge_type not in SUPPORTED_JUDGE_TYPES:
                 # Do not let callers reintroduce the retired v1 stage names.
                 # Returning False keeps this API non-throwing like duplicate
@@ -213,6 +232,11 @@ class EvaluationScheduler:
             ):
                 return False
             old = self._entries.get(entry.job_id)
+            # A duplicate may never be revived by a repair enqueue.  The
+            # supersession is durable audit state rather than a terminal
+            # result, so the usual terminal-row repair exception is unsafe.
+            if old is not None and old.superseded_by:
+                return False
             if old is not None and not (repair and old.status in TERMINAL):
                 return False
             previous = self._entries.get(entry.job_id)
@@ -226,6 +250,67 @@ class EvaluationScheduler:
             self._transition(entry)
             return True
 
+    def supersede_jobs(self, mapping: dict[str, str]) -> bool:
+        """Durably stop duplicate canonical-queue jobs from being dispatched.
+
+        This is intentionally a narrow recovery primitive for the observer:
+        both rows must describe the same frozen automatic evaluation stage,
+        and the target must be a still-canonical row.  It never deletes a row,
+        changes its result status, or attempts to interrupt an in-flight
+        provider call.  Replaying an already-applied mapping is a no-op and
+        emits no duplicate audit event.
+        """
+        with self._lock:
+            if not mapping or not all(
+                isinstance(duplicate_id, str) and duplicate_id.strip()
+                and isinstance(canonical_id, str) and canonical_id.strip()
+                for duplicate_id, canonical_id in mapping.items()
+            ):
+                return False
+            normalized = {
+                duplicate_id.strip(): canonical_id.strip()
+                for duplicate_id, canonical_id in mapping.items()
+            }
+            if any(duplicate_id == canonical_id
+                   for duplicate_id, canonical_id in normalized.items()):
+                return False
+            # A canonical target must not itself be another duplicate in this
+            # operation.  This rules out chains and cycles before mutation.
+            if set(normalized).intersection(normalized.values()):
+                return False
+
+            changed: list[EvaluationQueueEntry] = []
+            for duplicate_id, canonical_id in normalized.items():
+                duplicate = self._entries.get(duplicate_id)
+                canonical = self._entries.get(canonical_id)
+                if duplicate is None or canonical is None:
+                    return False
+                if duplicate.superseded_by:
+                    if duplicate.superseded_by != canonical_id:
+                        return False
+                    # Preserve strict replay idempotence even if a later
+                    # repair attempt made the old target invalid.
+                    continue
+                if (
+                    canonical.superseded_by
+                    or duplicate.evaluation_origin != ""
+                    or canonical.evaluation_origin != ""
+                    or not all((
+                        duplicate.channel_id, duplicate.workflow_run_id,
+                        duplicate.freeze_event_id, duplicate.judge_type,
+                        canonical.channel_id, canonical.workflow_run_id,
+                        canonical.freeze_event_id, canonical.judge_type,
+                    ))
+                    or not self._same_supersession_identity(duplicate, canonical)
+                ):
+                    return False
+                changed.append(duplicate)
+
+            for duplicate in changed:
+                duplicate.superseded_by = normalized[duplicate.job_id]
+                self._transition(duplicate)
+            return bool(changed)
+
     def tick(self, runner: StageRunner) -> list[dict[str, Any]]:
         with self._lock:
             self._runner = runner
@@ -238,7 +323,8 @@ class EvaluationScheduler:
             self._settle_blocked_entries()
             active_channels = {self._entries[job].channel_id for job in self._active.values()}
             entry = next((item for item in self._entries.values()
-                          if item.status == "queued" and item.channel_id not in active_channels
+                          if not item.superseded_by and item.status == "queued"
+                          and item.channel_id not in active_channels
                           and self._dependencies_satisfied(item)), None)
             if entry is None:
                 return
@@ -264,7 +350,7 @@ class EvaluationScheduler:
         classifier_failed = False
         for dep_id in entry.depends_on:
             dep = self._entries.get(dep_id)
-            if dep is None or dep.status not in TERMINAL:
+            if dep is None or dep.superseded_by or dep.status not in TERMINAL:
                 return False
             if entry.judge_type != "conclusion" and dep.judge_type == "task_type":
                 classifier_failed = dep.status != "completed"
@@ -276,12 +362,16 @@ class EvaluationScheduler:
         while changed:
             changed = False
             for entry in self._entries.values():
-                if entry.status != "queued" or entry.judge_type == "conclusion":
+                if (entry.superseded_by or entry.status != "queued"
+                        or entry.judge_type == "conclusion"):
                     continue
                 missing = [dep for dep in entry.depends_on if dep not in self._entries]
                 failed = [
                     self._entries[dep] for dep in entry.depends_on
-                    if dep in self._entries and self._entries[dep].status == "inconclusive"
+                    if dep in self._entries and (
+                        self._entries[dep].status == "inconclusive"
+                        or self._entries[dep].superseded_by
+                    )
                 ]
                 if missing or failed:
                     entry.status = "inconclusive"
@@ -295,6 +385,17 @@ class EvaluationScheduler:
                     )
                     self._transition(entry)
                     changed = True
+
+    @staticmethod
+    def _same_supersession_identity(
+        duplicate: EvaluationQueueEntry, canonical: EvaluationQueueEntry,
+    ) -> bool:
+        return (
+            duplicate.channel_id == canonical.channel_id
+            and duplicate.workflow_run_id == canonical.workflow_run_id
+            and duplicate.freeze_event_id == canonical.freeze_event_id
+            and duplicate.judge_type == canonical.judge_type
+        )
 
     def _cyclic_jobs(self) -> set[str]:
         cycles: set[str] = set()
@@ -370,15 +471,18 @@ class EvaluationScheduler:
         self._owner.close()
 
 
-_SCHEDULERS: dict[tuple[str, bool], EvaluationScheduler] = {}
+_SCHEDULERS: dict[tuple[str, bool, str], EvaluationScheduler] = {}
 _SCHEDULERS_LOCK = threading.Lock()
 
 
-def scheduler_for_state(state_dir: Path, *, inline: bool = False) -> EvaluationScheduler:
-    key = (str(Path(state_dir).resolve()), inline)
+def scheduler_for_state(
+    state_dir: Path, *, inline: bool = False, queue_path: Path | None = None,
+) -> EvaluationScheduler:
+    resolved_queue = Path(queue_path) if queue_path is not None else Path(state_dir) / QUEUE_RELATIVE_PATH
+    key = (str(Path(state_dir).resolve()), inline, str(resolved_queue.resolve()))
     with _SCHEDULERS_LOCK:
         scheduler = _SCHEDULERS.get(key)
         if scheduler is None or scheduler._closed:
-            scheduler = EvaluationScheduler(state_dir, inline=inline)
+            scheduler = EvaluationScheduler(state_dir, inline=inline, queue_path=queue_path)
             _SCHEDULERS[key] = scheduler
         return scheduler

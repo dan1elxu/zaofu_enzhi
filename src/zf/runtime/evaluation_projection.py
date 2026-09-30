@@ -104,6 +104,8 @@ def _event_identity(channel: dict[str, Any], payload: dict[str, Any]) -> dict[st
     A stage/run name alone is insufficient for retired evaluator events.
     """
 
+    if payload.get("evaluation_origin"):
+        return None
     if str(payload.get("evaluation_contract") or "") != EVALUATION_CONTRACT:
         return None
     identity = {
@@ -218,8 +220,19 @@ def fold_evaluation(channel: dict[str, Any], payload: dict[str, Any], *,
     for key in ("status", "attempt", "max_attempts", "slot_id", "phase", "error",
                 "last_activity_at", "tool_calls", "transcript_bytes", "request_id",
                 "task_type", "role_ref", "role_digest", "evaluator_profile",
-                "source_snapshot_digest", "prompt_version", "freeze_event_id", "trial_id"):
+                "source_snapshot_digest", "prompt_version", "freeze_event_id", "trial_id",
+                "superseded_by"):
         if key in payload:
+            # Supersession is a durable lineage fact.  A late event from the
+            # retired queue row must not clear it by omitting the field or by
+            # sending an empty value after the scheduler has marked it.
+            if key == "superseded_by":
+                incoming = str(payload.get(key) or "").strip()
+                existing = str(job.get(key) or "").strip()
+                if existing and not incoming:
+                    continue
+                if existing and incoming and incoming != existing:
+                    continue
             # The conclusion queue is bound to the PRD-fidelity digest.
             # Its result request is instead bound to the digest of four Judge
             # records; retain that only as audit metadata.
@@ -261,7 +274,8 @@ def public_evaluation(channel: dict[str, Any]) -> dict[str, Any]:
     jobs = [
         job for job in (channel.get("_evaluation_jobs") or {}).values()
         if (job["workflow_run_id"] == run_id
-            and (not freeze_event_id or job.get("freeze_event_id") == freeze_event_id))
+            and (not freeze_event_id or job.get("freeze_event_id") == freeze_event_id)
+            and not str(job.get("superseded_by") or "").strip())
     ]
     fidelity_jobs = [job for job in jobs if job.get("judge_type") == "prd_fidelity"]
     current_fidelity = max(

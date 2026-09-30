@@ -46,6 +46,7 @@ def build_parser() -> argparse.ArgumentParser:
     from zf.cli import project as project_cli
     from zf.cli import eval_preset as eval_preset_cli
     from zf.cli import evaluation_watch as evaluation_watch_cli
+    from zf.cli import evaluation_regrade as evaluation_regrade_cli
     from zf.cli import ctx as ctx_cli
     from zf.cli import channel as channel_cli
     from zf.cli import profile as profile_cli
@@ -116,6 +117,7 @@ def build_parser() -> argparse.ArgumentParser:
     project_cli.register(subparsers)
     eval_preset_cli.register(subparsers)
     evaluation_watch_cli.register(subparsers)
+    evaluation_regrade_cli.register(subparsers)
     failure_cli.register(subparsers)
     evolution_cli.register(subparsers)
 

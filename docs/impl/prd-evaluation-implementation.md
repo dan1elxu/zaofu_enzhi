@@ -34,6 +34,18 @@ metadata、旧 turn、user/tool 文本不会刷新当前 turn 的有效进展预
 
 observer 会检查完成后的 conclusion 和报告：结论缺失或损坏时只修复 conclusion，继续使用有效子评测；结论有效而报告缺失或内容损坏时直接重建报告，不调用 provider。结论恢复沿用持久化尝试次数，耗尽后记录 `inconclusive`，后续扫描不能无限重试。
 
+同一冻结输入不会为了观察评分波动而自动重评。observer 重启、重新扫描、更新 role.md 或收到冻结后的新消息，都不会主动创建新的评分身份；规则快照取首次入队时的 role catalog。需要人工复核时显式调用：
+
+```bash
+zf evaluation-regrade --input-ref artifacts/benchmark-evaluations/queue-inputs/<context-digest>.json --regrade-id <id>
+```
+
+`--input-ref` 从配置的 state dir 下 `artifacts/benchmark-evaluations/scheduler.json` 对应行的 `input_ref` 取得，精确选择需要复核的冻结/Workflow 绑定版本。`--regrade-id` 可省略，届时生成新 UUID；需要重复测试时使用新 id。
+
+手动重评分从已入队的 immutable context 读取材料，不重新扫描 Channel；首次手动执行使用当前 prompt 和 role catalog，随后将该次规则快照固化用于恢复。它使用 `artifacts/benchmark-evaluations/regrades/<id>/scheduler.json`、新的 workflow/request identity 和 `reports/regrade-<id>/report.md`，来源保存在报告旁的 `regrade.json`。同一 state dir 同时只运行一个手动重评，独占 `judges-slot-8`，与普通 slot 0～7 隔离。原报告、Judge sidecar 和 Channel 当前评测投影保持不变。相同 `regrade-id` 与同一输入幂等返回；中断后需再次手动执行恢复，同一 id 指向其他输入会失败。手动事件带 `evaluation_origin=manual_regrade`，不会进入 canonical Channel projection。
+
+每个 Judge 结果和 attempt 记录评测配置，报告旁 `audit/<identity>/evaluation.json` 汇集各阶段及 conclusion 的审计元数据：provider/backend、transcript 可观察到的 model、timeout/tool/retry budget、prompt/system/role digest、`sample_count=1` 及配置摘要。timeout/tool budget 在 request 执行前读取，传入实际执行器，返回后不重读环境；这不是对外部 provider 隐藏配置或随机性的完整复现保证。未观察到的 model/sampling 写 `unknown`，尚未配置的 token/cost budget 写 `null`；transport/schema retry 不计为额外 sample。上述细节不写入简洁的 `report.md`。
+
 Workflow bind 产生新的 PRD fidelity 输入后，投影按队列首次建立的顺序选择当前评测，并用原始 queue source digest 绑定对应 conclusion。旧结论及迟到事件不能把当前状态改回已完成；冻结材料未变的 contribution、discussion 结果继续复用。
 
 Channel 只读投影可补齐同一 prompt 版本内缺少身份字段的历史事件：scheduler 行必须携带真实冻结事件、trial、source digest，且 job id 必须匹配当前 prompt 版本的请求摘要；后续事件只从同一 run/stage/trial 的唯一匹配任务补齐缺字段。conclusion 的不同 request id 仅绑定唯一活动任务；显式冲突字段仍拒绝。旧 prompt 版本的结果保留审计，不混入当前版本展示。投影回放不改写历史账本，也不启动评测。页面显示“PRD 已冻结”，当前冻结共识允许 Plan Task；旧 readiness 和 synthesis 的 open_questions 不再拦截规划，readiness 保留给实际执行检查。
@@ -53,9 +65,13 @@ Channel 只读投影可补齐同一 prompt 版本内缺少身份字段的历史�
 
 这次 prompt 版本为当前 `prd-eval-prompts.v8`；评测身份包含 prompt 版本，新版本结果与旧报告分别保留。不合约的输出使用既有 schema 修复预算，不增加新的无限重试路径。role catalog 的版本、digest、role.md 引用和完整 packet 只保存在 audit sidecar；`report.md` 保持简洁。
 
+三个 role.md 进一步给出每个评估区块的 0～4 分锚点和边界案例：不按发言量奖励贡献，未采纳但排除了错误方案的分析仍可计入；贡献与必要性独立判断。评审材料缺失用 `evidence_missing`，材料存在但无法可靠判断用 `abstain`；材料齐全而 PRD 漏写约束/验收属于可评分的缺陷。
+
 机械门禁只能保证结构、证据引用和计算约束；不能证明语义评分绝对正确。以下人工校准方法尚未接入自动回放工具。
 
 ## Golden cases 人工校准
+
+当前没有已标注标准案例，本轮不新增案例集或自动校准。以下保留为后续人工校准方法。
 
 1. 先选三个真实冻结案例试标：高质量、有明显问题、缺证据各一个；再扩到 10～20 个，覆盖安静但有关键贡献的角色，以及 Workflow 未绑定和已绑定的场景。
 2. 从配置的 `project.state_dir` 下 `artifacts/benchmark-evaluations/inputs/` 保留各阶段 packet 的副本；记录 `workflow_run_id`、`trial_id`、`source_snapshot_digest`、`prompt_version` 和文件 SHA-256。人工与模型只读同一份输入。

@@ -305,7 +305,22 @@ def _write_audit_sidecars(
         "prompt_version": EVALUATION_PROMPT_VERSION,
         "judge_statuses": {key: value.get("status") for key, value in judges.items()},
         "conclusion_status": conclusion.get("status") if conclusion else "pending",
+        "evaluator_config": _evaluator_config_summary(judges, conclusion),
+        "stages": {
+            key: {
+                field: value.get(field)
+                for field in ("provider", "model", "model_source", "config_digest", "evaluator_config")
+                if value.get(field) is not None
+            }
+            for key, value in judges.items()
+        },
     }
+    if isinstance(conclusion, dict):
+        metadata["stages"]["conclusion"] = {
+            field: conclusion.get(field)
+            for field in ("provider", "model", "model_source", "config_digest", "evaluator_config")
+            if conclusion.get(field) is not None
+        }
     atomic_write_text(root / "evaluation.json", json.dumps(metadata, ensure_ascii=False, indent=2) + "\n")
     packet_manifest = {
         "schema_version": "channel-prd-evaluation-packet-manifest.v1",
@@ -345,6 +360,26 @@ def _write_audit_sidecars(
             subagents / f"{stage}.json",
             json.dumps(record, ensure_ascii=False, indent=2) + "\n",
         )
+
+
+def _evaluator_config_summary(
+    judges: dict[str, dict[str, Any]], conclusion: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Summarize observed execution metadata for audit readers only."""
+    records = list(judges.values()) + ([conclusion] if isinstance(conclusion, dict) else [])
+    configs = [value.get("evaluator_config") for value in records
+               if isinstance(value, dict) and isinstance(value.get("evaluator_config"), dict)]
+    if not configs:
+        return {}
+    # Preserve all fields only when they agree; differing models/providers are
+    # expected across stages and remain visible under ``stages``.
+    keys = set().union(*(config.keys() for config in configs))
+    summary: dict[str, Any] = {}
+    for key in sorted(keys):
+        values = [config.get(key) for config in configs]
+        if all(value == values[0] for value in values[1:]):
+            summary[key] = values[0]
+    return summary
 
 
 

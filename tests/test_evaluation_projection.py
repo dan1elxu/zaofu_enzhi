@@ -72,6 +72,28 @@ def test_projection_rejects_legacy_identity_and_late_old_run(tmp_path: Path) -> 
     assert [row["workflow_run_id"] for row in evaluation["stages"]] == ["run-new"]
 
 
+@pytest.mark.parametrize("event_type", [
+    "benchmark.evaluation.progress", "benchmark.evaluation.judge.completed",
+    "benchmark.evaluation.conclusion.completed",
+])
+def test_manual_regrade_cannot_bind_a_freeze_before_canonical_progress(
+    tmp_path: Path, event_type: str,
+) -> None:
+    writer = EventWriter(EventLog(tmp_path / "events.jsonl"))
+    freeze = _freeze(writer)
+    writer.emit(event_type, actor="evaluation-runner", payload=_evaluation_payload(
+        freeze.id, run_id="manual", evaluation_origin="manual_regrade", status="scored",
+    ))
+    assert project_channel(tmp_path, "ch-1")["evaluation"] == {}
+    writer.emit("benchmark.evaluation.progress", actor="evaluation-scheduler",
+                payload=_evaluation_payload(freeze.id))
+    before = project_channel(tmp_path, "ch-1")["evaluation"]
+    writer.emit(event_type, actor="evaluation-runner", payload=_evaluation_payload(
+        freeze.id, run_id="manual", evaluation_origin="manual_regrade", status="scored",
+    ))
+    assert project_channel(tmp_path, "ch-1")["evaluation"] == before
+
+
 def test_projection_rejects_malformed_source_snapshot_digest(tmp_path: Path) -> None:
     writer = EventWriter(EventLog(tmp_path / "events.jsonl"))
     freeze = _freeze(writer)
@@ -280,6 +302,62 @@ def test_new_fidelity_generation_hides_old_conclusion_and_late_completion(
         row["judge_type"] == "conclusion" and row["status"] == "complete"
         for row in evaluation["stages"]
     )
+
+
+def test_superseded_rubric_drift_rows_do_not_hide_original_five_stage_verdicts(
+    tmp_path: Path,
+) -> None:
+    """A recovered duplicate queue remains audit-visible but never public."""
+    writer = EventWriter(EventLog(tmp_path / "events.jsonl"))
+    freeze = _freeze(writer)
+    original: dict[str, dict] = {}
+    duplicate: dict[str, dict] = {}
+    for stage in ("task_type", "contribution", "discussion", "prd_fidelity", "conclusion"):
+        original[stage] = _evaluation_payload(
+            freeze.id, judge_type=stage, job_id=f"original-{stage}",
+            trial_id="original-trial", source_snapshot_digest="b" * 64,
+        )
+        duplicate[stage] = _evaluation_payload(
+            freeze.id, judge_type=stage, job_id=f"duplicate-{stage}",
+            trial_id="drift-trial", source_snapshot_digest="c" * 64,
+        )
+        writer.emit("benchmark.evaluation.progress", actor="evaluation-scheduler",
+                    payload=original[stage])
+        completed_type = (
+            "benchmark.evaluation.conclusion.completed"
+            if stage == "conclusion" else "benchmark.evaluation.judge.completed"
+        )
+        writer.emit(completed_type, actor="evaluation-runner", payload={
+            **original[stage], "status": "complete" if stage == "conclusion" else "scored",
+        })
+        writer.emit("benchmark.evaluation.progress", actor="evaluation-scheduler",
+                    payload=duplicate[stage])
+
+    # Scheduler recovery marks only the accidental rubric-drift rows.  This
+    # is a progress event, so the original verdict sidecars/events remain
+    # unmodified and replayable.
+    for stage, row in duplicate.items():
+        writer.emit("benchmark.evaluation.progress", actor="evaluation-scheduler", payload={
+            **row, "status": "queued", "superseded_by": original[stage]["job_id"],
+        })
+    evaluation = project_channel(tmp_path, "ch-1")["evaluation"]
+    assert [row["job_id"] for row in evaluation["stages"]] == [
+        original[stage]["job_id"]
+        for stage in ("task_type", "contribution", "discussion", "prd_fidelity", "conclusion")
+    ]
+    assert evaluation["stages"][1]["verdict"] == "scored"
+    assert evaluation["stages"][-1]["verdict"] == "complete"
+
+    # A delayed worker event lacks supersession data; it may update the
+    # retained audit row but must never make it public again.
+    writer.emit("benchmark.evaluation.judge.completed", actor="evaluation-runner", payload={
+        **duplicate["contribution"], "status": "scored",
+    })
+    evaluation = project_channel(tmp_path, "ch-1")["evaluation"]
+    assert [row["job_id"] for row in evaluation["stages"]] == [
+        original[stage]["job_id"]
+        for stage in ("task_type", "contribution", "discussion", "prd_fidelity", "conclusion")
+    ]
 
 
 def test_report_does_not_call_incomplete_conclusion_complete() -> None:

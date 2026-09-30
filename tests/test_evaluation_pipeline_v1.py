@@ -7,6 +7,7 @@ from pathlib import Path
 
 from zf.core.events import EventLog, EventWriter
 from zf.runtime import evaluation_observer as observer
+from zf.runtime import evaluation_inputs
 from zf.runtime.channel_prd_freeze import emit_prd_frozen
 from zf.runtime.evaluation_scheduler import EvaluationScheduler
 from tests.evaluation_fixtures import _seed_channel_state
@@ -122,3 +123,28 @@ def test_receipt_alone_does_not_start_role_evaluation(tmp_path: Path) -> None:
         assert scheduler.entries == {}
     finally:
         scheduler.close()
+
+
+def test_existing_freeze_keeps_admitted_rubric_after_catalog_update(tmp_path, monkeypatch):
+    _seed_channel_state(tmp_path)
+    scheduler = EvaluationScheduler(tmp_path, inline=True)
+    try:
+        first = observer.observe_once(state_dir=tmp_path, scheduler=scheduler, dispatch=False)
+        assert first["queued"] == 5 and first["errors"] == []
+        before = scheduler.entries
+    finally:
+        scheduler.close()
+
+    # A deployment may replace (or temporarily omit) the current role files.
+    # Rediscovery must continue using the immutable catalog admitted earlier.
+    def changed_catalog():
+        raise AssertionError("must not reload live rubric for an admitted freeze")
+
+    monkeypatch.setattr(evaluation_inputs, "_snapshot_evaluation_roles", changed_catalog)
+    resumed = EvaluationScheduler(tmp_path, inline=True)
+    try:
+        second = observer.observe_once(state_dir=tmp_path, scheduler=resumed, dispatch=False)
+        assert second["errors"] == [] and second["queued"] == 0
+        assert resumed.entries == before
+    finally:
+        resumed.close()

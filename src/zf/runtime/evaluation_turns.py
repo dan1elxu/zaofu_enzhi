@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import json
-import os
 import time
 from collections import Counter
 from dataclasses import dataclass, replace
@@ -10,6 +9,8 @@ from datetime import datetime
 from pathlib import Path
 from threading import Event
 from typing import Any, Callable
+
+from zf.runtime.evaluation_config import capture_evaluator_budgets
 
 
 class EvaluationCancelled(Exception):
@@ -31,6 +32,8 @@ class JudgeTurnObservation:
     activity_bytes: int = 0
     same_tool_calls: int = 0
     tool_wall_time: float = 0.0
+    observed_model: str = "unknown"
+    observed_model_source: str = "unknown"
 
 
 def _entries(path: Path) -> list[dict[str, Any]]:
@@ -123,6 +126,8 @@ def observe_transcript(path: Path, *, backend: str, current_turn_id: str = "",
     pending: dict[str, float] = {}
     tool_wall = 0.0
     activity_bytes = 0
+    observed_model = "unknown"
+    observed_model_source = "unknown"
     now = time.time() if now is None else now
     for index, entry in enumerate(active):
         payload, message = entry.get("payload") or {}, entry.get("message") or {}
@@ -134,6 +139,11 @@ def observe_transcript(path: Path, *, backend: str, current_turn_id: str = "",
         calls, results = [], []
         meaningful = False
         if backend == "codex":
+            if kind == "turn_context":
+                model = payload.get("model")
+                if isinstance(model, str) and model.strip():
+                    observed_model = model.strip()
+                    observed_model_source = "transcript.turn_context"
             if kind == "response_item":
                 meaningful = payload.get("role") != "user"
                 if payload_kind in {"function_call", "tool_call", "custom_tool_call", "computer_call"}:
@@ -165,6 +175,11 @@ def observe_transcript(path: Path, *, backend: str, current_turn_id: str = "",
                 elif meaningful and not phase:
                     phase = "reasoning"
         else:
+            if kind == "assistant":
+                model = message.get("model")
+                if isinstance(model, str) and model.strip():
+                    observed_model = model.strip()
+                    observed_model_source = "transcript.assistant.message"
             meaningful = kind in {"assistant", "error"}
             if kind == "error" or message.get("is_error") or entry.get("isApiErrorMessage"):
                 status, error = "provider_error", str(entry.get("error") or message.get("error") or _text(message.get("content")) or "provider error")
@@ -217,6 +232,8 @@ def observe_transcript(path: Path, *, backend: str, current_turn_id: str = "",
         phase=phase, activity_bytes=activity_bytes,
         same_tool_calls=max(Counter(tool_fingerprints.values()).values(), default=0),
         tool_wall_time=max(0.0, tool_wall),
+        observed_model=observed_model,
+        observed_model_source=observed_model_source,
     )
 
 
@@ -235,30 +252,26 @@ def _find_rollout(root: Path, marker: str, started_at: float | None) -> Path | N
     return matched[0] if matched else None
 
 
-def _budget(name: str, default: float) -> float:
-    try:
-        return max(0.0, float(os.environ.get(name, str(default))))
-    except ValueError:
-        return default
-
-
 def read_judge_reply(
     project_root: Path, session_uuid: str, *, timeout_s: float, poll_s: float = 5.0,
     log: Any | None = None, backend: str = "claude-code", started_at: float | None = None,
     codex_sessions_root: Path | None = None, request_marker: str = "",
     on_observation: Callable[[JudgeTurnObservation], None] | None = None,
     stop_event: Event | None = None,
+    evaluator_budgets: dict[str, Any] | None = None,
 ) -> JudgeTurnObservation:
     from zf.runtime.session_tailer import claude_session_path
 
     if backend == "codex" and (codex_sessions_root is None or not request_marker):
         return JudgeTurnObservation(status="provider_error", error="Codex judge requires isolated rollout root and request marker")
     path = None if backend == "codex" else claude_session_path(str(project_root), session_uuid)
-    first_limit = _budget("ZF_EVALUATION_JUDGE_FIRST_PROGRESS_TIMEOUT_S", 300)
-    idle_limit = _budget("ZF_EVALUATION_JUDGE_IDLE_TIMEOUT_S", 300)
-    call_limit = _budget("ZF_EVALUATION_JUDGE_MAX_TOOL_CALLS", 0)
-    same_limit = _budget("ZF_EVALUATION_JUDGE_MAX_SAME_TOOL_FINGERPRINT", 0)
-    wall_limit = _budget("ZF_EVALUATION_JUDGE_MAX_TOOL_WALL_TIME_S", 0)
+    budgets = evaluator_budgets if evaluator_budgets is not None else capture_evaluator_budgets()
+    timeouts, tool_budgets = budgets["timeouts"], budgets["tool_budgets"]
+    first_limit = float(timeouts["first_progress_seconds"])
+    idle_limit = float(timeouts["idle_seconds"])
+    call_limit = float(tool_budgets["max_tool_calls"])
+    same_limit = float(tool_budgets["max_same_tool_fingerprint"])
+    wall_limit = float(tool_budgets["max_tool_wall_time_seconds"])
     start = last_growth = time.monotonic()
     heartbeat = start + 60
     observation = JudgeTurnObservation(status="running")

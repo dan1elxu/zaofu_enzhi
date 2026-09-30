@@ -61,6 +61,8 @@ from zf.runtime.evaluation_types import (
     EvaluationPacket,
     JudgeRecord,
 )
+from zf.runtime.evaluation_config import capture_evaluator_budgets, observed_evaluator_config
+from zf.runtime.evaluation_role_binding import role_binding_error
 
 JUDGE_COMPLETED_EVENT = "benchmark.evaluation.judge.completed"
 CONCLUSION_COMPLETED_EVENT = "benchmark.evaluation.conclusion.completed"
@@ -94,11 +96,13 @@ _COMPLETED_JUDGE_STATUSES = frozenset({
 })
 _COMPLETED_CONCLUSION_STATUSES = frozenset({"complete", "invalid", "incomplete", "inconclusive"})
 
+
 def is_completed_judge_record(record: dict[str, Any] | None) -> bool:
     """True only when the record carries a genuine verdict (not a transport
     failure); completed records are what §8.2 identity dedup protects."""
 
     return str((record or {}).get("status") or "") in _COMPLETED_JUDGE_STATUSES
+
 
 def _retry_hint(error: object) -> str:
     """Compact retry feedback for the bounded second attempt.
@@ -140,6 +144,7 @@ def _visible_tmux_backend(**kwargs: Any) -> JudgeTurnObservation:
         return JudgeTurnObservation(status="provider_error", error="evaluation judge requires config.session.tmux_session")
     slot_id = kwargs.get("slot_id") or 0
     backend = evaluation_tmux.resolve_judge_backend(config)
+    budgets = kwargs.get("evaluator_budgets") or capture_evaluator_budgets()
     # Fresh IDs for retries and schema repairs prevent stale transcript reuse.
     launch_id = str(uuid.uuid4())
     launch_dir = state_dir / EVALUATION_ARTIFACT_ROOT / "sessions" / f"slot-{slot_id}" / launch_id
@@ -192,7 +197,7 @@ def _visible_tmux_backend(**kwargs: Any) -> JudgeTurnObservation:
             slot_id=slot_id, codex_home=codex_home,
             stop_event=kwargs.get("stop_event"),
             initial_prompt=prompt if backend == "codex" else "",
-            ready_timeout_s=float(os.environ.get("ZF_EVALUATION_JUDGE_START_TIMEOUT_S", "120")),
+            ready_timeout_s=float(budgets["timeouts"]["start_seconds"]),
         )
         if not ready:
             return JudgeTurnObservation(status="provider_error", error=error)
@@ -203,11 +208,12 @@ def _visible_tmux_backend(**kwargs: Any) -> JudgeTurnObservation:
             )
         observation = evaluation_tmux.read_judge_reply(
             workspace, launch_id,
-            timeout_s=float(os.environ.get("ZF_EVALUATION_JUDGE_TIMEOUT_S", "1800")),
+            timeout_s=float(budgets["timeouts"]["turn_seconds"]),
             backend=backend, started_at=started_at, request_marker=marker,
             codex_sessions_root=codex_home / "sessions" if codex_home else None,
             log=kwargs.get("log"), on_observation=observe,
             stop_event=kwargs.get("stop_event"),
+            evaluator_budgets=budgets,
         )
         observe(observation)
         return observation
@@ -336,7 +342,7 @@ def run_judge(
             trial_id=trial_id, request_id=request_id, packet=packet,
             status="inconclusive", result={},
             error="invalid judge sidecar; bounded recovery exhausted",
-            provider="deterministic", model="",
+            provider="deterministic", model="unknown",
         )
         result.update(attempt=recovery[0], max_attempts=recovery[1],
                       retryable=False, inconclusive_after=recovery[1])
@@ -411,7 +417,7 @@ def run_judge(
             result={"schema_version": _schema_version(judge_type, packet), "judge_type": judge_type,
                     "status": "evidence_missing", "dimensions": [],
                     "missing_evidence": missing}, error="missing evaluation input: " + ", ".join(missing),
-            provider="deterministic", model="",
+            provider="deterministic", model="unknown",
         )
         result["attempt"] = 0
     else:
@@ -643,7 +649,7 @@ def run_conclusion(
         result = _judge_record(
             judge_type="conclusion", workflow_run_id=workflow_run_id,
             trial_id=trial_id, request_id=request_id, packet=packet,
-            status=status, result={}, error=error, provider="deterministic", model="",
+            status=status, result={}, error=error, provider="deterministic", model="unknown",
         )
     else:
         rendered = _prompt_template("conclusion", packet).format(
@@ -747,14 +753,24 @@ def _run_request_turns(
             if judge_type == "conclusion" else judge_result_path(
                 state_dir, workflow_run_id=workflow_run_id, judge_type=judge_type, request_id=request_id))
     provider = f"tmux-{resolve_judge_backend(config)}" if backend is _visible_tmux_backend else "injected"
+    backend_name = resolve_judge_backend(config) if backend is _visible_tmux_backend else "injected"
+    budgets = capture_evaluator_budgets()
+    base_config = observed_evaluator_config(
+        backend=backend_name, provider=provider, prompt_version=EVALUATION_PROMPT_VERSION,
+        prompt_digest=stable_digest(_prompt_template(judge_type, packet)),
+        system_prompt_digest=stable_digest(SYSTEM_PROMPT),
+        role_ref=str(packet.get("role_ref") or ""), role_digest=str(packet.get("role_digest") or ""),
+        max_attempts=max_attempts, schema_max_attempts=2, budgets=budgets,
+    )
     record = _judge_record(
         judge_type=judge_type, workflow_run_id=workflow_run_id, trial_id=trial_id,
         request_id=request_id, packet=packet, status="inconclusive", result=None,
         error=str((existing or {}).get("error") or "provider retry budget exhausted"),
-        provider=provider, model="",
+        provider=provider, model="unknown",
     )
     record.update(attempt=min(previous, max_attempts), max_attempts=max_attempts,
                   retryable=False, inconclusive_after=max_attempts)
+    record.update(evaluator_config=base_config, config_digest=base_config["config_digest"], model_source="unknown")
     attempts_log: list[tuple[int, str, str, str]] = []
 
     def progress(observed: JudgeTurnObservation | None = None) -> None:
@@ -795,6 +811,7 @@ def _run_request_turns(
                     request_id=request_id, system_prompt=SYSTEM_PROMPT, prompt=prompt, packet_path=packet_path,
                     log=log, attempt=attempt, schema_attempt=schema_attempt,
                     slot_id=slot_id, progress=progress,
+                    evaluator_budgets=budgets,
                     stop_event=stop_event,
                 )
                 if not isinstance(observed, JudgeTurnObservation):
@@ -805,7 +822,20 @@ def _run_request_turns(
                 raise
             except Exception as exc:
                 observed = JudgeTurnObservation(status="provider_error", error=f"judge backend error: {exc}")
-            record.update(turn_id=observed.turn_id, transcript_ref=observed.transcript_ref)
+            turn_config = observed_evaluator_config(
+                backend=backend_name, provider=provider,
+                observed_model=observed.observed_model,
+                observed_model_source=observed.observed_model_source,
+                prompt_version=EVALUATION_PROMPT_VERSION,
+                prompt_digest=stable_digest(_prompt_template(judge_type, packet)),
+                system_prompt_digest=stable_digest(SYSTEM_PROMPT),
+                role_ref=str(packet.get("role_ref") or ""), role_digest=str(packet.get("role_digest") or ""),
+                max_attempts=max_attempts, schema_max_attempts=2, budgets=budgets,
+            )
+            record.update(turn_id=observed.turn_id, transcript_ref=observed.transcript_ref,
+                          model=turn_config["model"], model_source=turn_config["model_source"],
+                          evaluator_config=turn_config, config_digest=turn_config["config_digest"])
+            turn["evaluator_config"] = turn_config
             turn.update(vars(observed))
             atomic_write_text(turn_path, _canonical(turn))
             attempts_log.append((attempt * 10 + schema_attempt, SYSTEM_PROMPT, prompt, observed.reply))
@@ -829,7 +859,7 @@ def _run_request_turns(
                 expected_schema_version=_schema_version(judge_type, packet),
             ) if parsed is not None else (None, f"judge returned no single JSON object: {observed.reply[:240]}"))
             if normalized is not None and judge_type in {"contribution", "discussion", "prd_fidelity"}:
-                role_error = _role_binding_error(normalized.to_dict(), packet)
+                role_error = role_binding_error(normalized.to_dict(), packet)
                 if role_error:
                     normalized = None
                     error = role_error
@@ -853,52 +883,6 @@ def _run_request_turns(
     _write_turn_sidecars(state_dir, workflow_run_id=workflow_run_id, judge_type=judge_type,
                          request_id=request_id, attempts_log=attempts_log)
     return record
-
-
-def _role_binding_error(result: dict[str, Any], packet: Any) -> str:
-    """Reject a quality result that claims a different frozen evaluator role.
-
-    The selected role is a mechanical input binding.  The provider still
-    echoes task/role metadata in its result for auditability, but those fields
-    must agree with the packet before the score can become reusable.  An outer
-    record role digest alone is insufficient: a model could otherwise return a
-    different role id/version while the report appeared to use the selected
-    role.
-    """
-
-    expected_task = str(packet.get("task_type") or "").strip()
-    expected_ref = str(packet.get("role_ref") or "").strip()
-    details = packet.get("task_details") if hasattr(packet, "get") else {}
-    metadata = details.get("evaluation_metadata") if isinstance(details, dict) else {}
-    metadata = metadata if isinstance(metadata, dict) else {}
-    expected_version = str(metadata.get("role_version") or "").strip()
-    if not expected_task or not expected_ref:
-        # Classifier and test packets that have not selected a role do not
-        # carry a role contract to enforce.
-        return ""
-    result_task = str(result.get("task_type") or "").strip()
-    result_id = str(result.get("role_id") or "").strip()
-    result_version = str(result.get("role_version") or "").strip()
-    if result_task != expected_task:
-        return f"judge role task_type mismatch: expected {expected_task!r}, got {result_task!r}"
-    if result_id != expected_task:
-        return f"judge role_id mismatch: expected {expected_task!r}, got {result_id!r}"
-    if expected_version and result_version != expected_version:
-        return (
-            "judge role_version mismatch: "
-            f"expected {expected_version!r}, got {result_version!r}"
-        )
-    role_metadata = result.get("role_metadata")
-    if not isinstance(role_metadata, dict):
-        role_metadata = {}
-    returned_ref = str(role_metadata.get("role_ref") or "").strip()
-    returned_digest = str(role_metadata.get("role_digest") or "").strip()
-    expected_digest = str(packet.get("role_digest") or "").strip()
-    if returned_ref and returned_ref != expected_ref:
-        return f"judge role_ref mismatch: expected {expected_ref!r}, got {returned_ref!r}"
-    if returned_digest and expected_digest and returned_digest != expected_digest:
-        return "judge role_digest mismatch"
-    return ""
 
 
 def _parse_json_object(text: str) -> dict[str, Any] | None:
@@ -970,6 +954,15 @@ def _judge_record(
         evaluator_profile=str(packet_dict.get("evaluator_profile") or ""),
         task_type=str(packet_dict.get("task_type") or ""),
     )
+    if provider == "deterministic":
+        audit = observed_evaluator_config(
+            backend=provider, provider=provider, observed_model_source="not_applicable",
+            prompt_version=EVALUATION_PROMPT_VERSION, prompt_digest=record["prompt_digest"],
+            system_prompt_digest=stable_digest(SYSTEM_PROMPT),
+            role_ref=record["role_ref"], role_digest=record["role_digest"],
+        )
+        record.update(evaluator_config=audit, config_digest=audit["config_digest"],
+                      model_source="not_applicable")
     return record
 
 
