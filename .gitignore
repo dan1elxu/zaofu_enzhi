@@ -27,6 +27,8 @@ htmlcov/
 # Runtime state
 .zf/
 **/.zf*/
+/artifacts/
+/logs/
 
 # Local/private planning and release notes
 docs/*
