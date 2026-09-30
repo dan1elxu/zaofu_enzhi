@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from zf.runtime.evaluation_prompts import (
     DISCUSSION_PROMPT,
     EVALUATION_PROMPTS,
@@ -127,6 +129,7 @@ def test_task_classifier_is_bounded_and_low_confidence_becomes_ambiguous() -> No
     raw = {
         "schema_version": "task_type_result.v1",
         "judge_type": "task_type",
+        "status": "scored",
         "task_type": "refactor",
         "confidence": 0.59,
         "evidence_refs": [REFS[0]],
@@ -139,6 +142,37 @@ def test_task_classifier_is_bounded_and_low_confidence_becomes_ambiguous() -> No
     assert result is not None
     assert result.status == "abstain"
     assert result.task_type == "ambiguous"
+
+
+@pytest.mark.parametrize("status", ["abstain", "evidence_missing", "invalid", "ambiguous"])
+def test_explicit_non_scored_classifier_verdict_never_authorizes_roles(status: str) -> None:
+    raw = {
+        "schema_version": "task_type_result.v1",
+        "judge_type": "task_type",
+        "status": status,
+        "task_type": "bugfix",
+        "confidence": 0.9,
+        "evidence_refs": [REFS[0]],
+        "rationale": "分类器明确表示不能授权后续角色评测。",
+    }
+    result, error = normalize_judge_output(
+        judge_type="task_type", raw=raw, allowed_evidence_refs=REFS,
+    )
+    assert error == ""
+    assert result is not None
+    assert result.status == status
+    assert result.task_type == "ambiguous"
+
+
+@pytest.mark.parametrize("status", [None, "unknown", [], {}])
+def test_classifier_rejects_invalid_status_without_raising(status: object) -> None:
+    result, error = normalize_judge_output(
+        judge_type="task_type",
+        raw={"schema_version": "task_type_result.v1", "status": status},
+        allowed_evidence_refs=REFS,
+    )
+    assert result is None
+    assert "status" in error
 
 
 def test_main_judge_cannot_submit_adjusted_agent_score() -> None:

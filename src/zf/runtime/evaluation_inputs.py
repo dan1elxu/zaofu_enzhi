@@ -38,17 +38,6 @@ def _prepare_channel(
     """Capture immutable inputs before any asynchronous provider work."""
 
     from zf.runtime.channel_projection import project_channel
-    from zf.runtime.channel_prd_render import channel_requirement_text
-    from zf.runtime.channel_sidecar import hydrate_channel_message_text
-
-    # Bind the projection to the freeze ledger occurrence, not live messages,
-    # member presence or later discussion changes.
-    frozen_events = []
-    for event in events:
-        frozen_events.append(event)
-        if event.id == freeze.get("event_id"):
-            break
-    channel = project_channel(state_dir, channel_id, events=frozen_events) or {}
     thread_id = str(freeze.get("thread_id") or "main")
     prd_revision = _strict_revision(freeze.get("prd_revision"))
     if (
@@ -57,6 +46,31 @@ def _prepare_channel(
         or prd_revision < 1
     ):
         raise ValueError("freeze identity is incomplete or revision is invalid")
+    canonical_event_id = str(
+        freeze.get("consensus_event_id") or freeze.get("source_event_id") or ""
+    ).strip()
+    if not canonical_event_id:
+        raise ValueError("canonical PRD freeze source event is missing")
+    freeze_event_id = str(freeze.get("event_id") or "")
+    if not freeze_event_id:
+        raise ValueError("canonical PRD freeze event id is missing")
+    source_index = next((
+        index for index, event in enumerate(events)
+        if str(getattr(event, "id", "") or "") == canonical_event_id
+    ), -1)
+    freeze_index = next((
+        index for index, event in enumerate(events)
+        if str(getattr(event, "id", "") or "") == freeze_event_id
+    ), -1)
+    if source_index < 0:
+        raise ValueError("canonical PRD freeze source event is missing before freeze")
+    # A source event must precede its actual freeze occurrence. Building the
+    # packet from the freeze prefix would otherwise admit messages/roster edits
+    # made after consensus but before an operator emitted the handoff.
+    if freeze_index < 0 or source_index >= freeze_index:
+        raise ValueError("canonical PRD freeze source event does not precede freeze")
+    source_events = events[:source_index + 1]
+    channel = project_channel(state_dir, channel_id, events=source_events) or {}
     consensus = (channel.get("consensus") or {}).get(thread_id) or {}
     required = set(consensus.get("required_signers") or [])
     review_complete = (
@@ -65,11 +79,6 @@ def _prepare_channel(
         else consensus.get("human_confirmed") is True
     )
     freeze_type = str(freeze.get("event_type") or "channel.prd.frozen")
-    canonical_event_id = str(
-        freeze.get("consensus_event_id") or freeze.get("source_event_id") or ""
-    ).strip()
-    if not canonical_event_id:
-        raise ValueError("canonical PRD freeze source event is missing")
     matching_synthesis = next((
         synthesis for synthesis in channel.get("syntheses") or []
         if isinstance(synthesis, dict)
@@ -109,15 +118,7 @@ def _prepare_channel(
         occurrence_id=str(freeze.get("event_id") or ""),
     )
 
-    messages = _packet_messages(
-        channel,
-        channel_id=channel_id,
-        thread_id=thread_id,
-        freeze_event_id=str(freeze.get("event_id") or ""),
-        hydrate=lambda message: hydrate_channel_message_text(state_dir, message),
-    )
-    if not messages:
-        return None
+    messages: list[dict[str, Any]] = []
 
     prd_body = _read_json_artifact(
         state_dir, str(freeze.get("prd_ref") or ""),
@@ -184,6 +185,21 @@ def _prepare_channel(
             readiness_digest=readiness_digest,
             label="source snapshot",
         )
+        _validate_source_snapshot_manifest(
+            source_snapshot, source_events,
+            channel_id=channel_id, thread_id=thread_id,
+            source_event_id=canonical_event_id,
+        )
+        try:
+            messages = _packet_messages(
+                _snapshot_channel(source_snapshot, channel_id=channel_id),
+                channel_id=channel_id, thread_id=thread_id, freeze_event_id="",
+                hydrate=lambda payload: _strict_snapshot_message_text(state_dir, payload),
+            )
+        except Exception as exc:
+            raise ValueError(f"evidence_missing: frozen message body unavailable: {exc}") from exc
+    if not messages:
+        return None
     if not prd_body:
         return None  # PRD §8.1: frozen PRD must be readable or we do not trigger
     if prd_body.get("schema_version") == "channel-prd.v1" and (
@@ -209,16 +225,14 @@ def _prepare_channel(
         channel_id=channel_id, thread_id=thread_id, prd_revision=prd_revision,
     )
 
-    task_statement = channel_requirement_text(state_dir, channel, thread_id)
-    task = {
-        "task_id": str(channel.get("origin_task_id") or channel_id),
-        "statement": task_statement,
-    }
     requirement_message_id = str(
         ((channel.get("discussions") or {}).get(thread_id) or {}).get(
             "requirement_message_id"
         ) or ""
     )
+    # Derive the requirement from the already-hydrated frozen message slice.
+    # Re-reading the projection through channel_requirement_text would permit
+    # a relaxed sidecar fallback and make the packet depend on mutable state.
     requirement_messages = [
         message for message in messages
         if (
@@ -229,8 +243,22 @@ def _prepare_channel(
             )
         )
     ]
-    discussion_events = _frozen_discussion_events(
-        frozen_events, channel_id=channel_id, thread_id=thread_id,
+    task_statement = ""
+    for message in messages:
+        if requirement_message_id and str(message.get("message_id") or "") != requirement_message_id:
+            continue
+        if str(message.get("thread_id") or "") != thread_id:
+            continue
+        text = str(message.get("text") or "").strip()
+        if text:
+            task_statement = text
+            break
+    task = {
+        "task_id": str(channel.get("origin_task_id") or channel_id),
+        "statement": task_statement,
+    }
+    discussion_events = _snapshot_discussion_events(
+        source_snapshot, channel_id=channel_id, thread_id=thread_id,
     )
     task_details = {
         "statement": task_statement,
@@ -396,6 +424,87 @@ def _freeze_points(events: list[Any]) -> dict[str, dict[str, Any]]:
             else None,
         }
     return points
+
+
+
+def _validate_source_snapshot_manifest(
+    snapshot: dict[str, Any], events: list[Any], *,
+    channel_id: str, thread_id: str, source_event_id: str,
+) -> None:
+    """Verify the freeze snapshot contains the canonical event manifest.
+
+    The freeze helper records decision-bearing events through the consensus
+    source occurrence.  Rebuilding that same manifest here prevents a forged
+    or incomplete inline snapshot from silently changing the evidence set.
+    """
+    raw_events = snapshot.get("events")
+    if not isinstance(raw_events, list):
+        raise ValueError("source snapshot event manifest is missing")
+    from zf.runtime.channel_prd_freeze import source_snapshot_event_manifest
+
+    expected = source_snapshot_event_manifest(
+        events, channel_id=channel_id, thread_id=thread_id,
+        source_event_id=source_event_id,
+    )
+    if raw_events != expected:
+        raise ValueError("source snapshot event manifest does not match freeze ledger")
+
+
+def _snapshot_channel(snapshot: dict[str, Any], *, channel_id: str) -> dict[str, Any]:
+    """Expose the verified source manifest in the existing packet helper shape."""
+    messages = []
+    for item in snapshot.get("events") or []:
+        if not isinstance(item, dict) or item.get("event_type") != "channel.message.posted":
+            continue
+        payload = item.get("payload") if isinstance(item.get("payload"), dict) else {}
+        messages.append({**payload, "event_id": str(item.get("event_id") or "")})
+    return {"channel_id": channel_id, "messages": messages}
+
+
+def _strict_snapshot_message_text(state_dir: Path, payload: dict[str, Any]) -> str:
+    """Accept a full sidecar body or an inline legacy message, never a preview."""
+    from zf.runtime.channel_sidecar import (
+        CHANNEL_MESSAGE_BODY_SCHEMA_VERSION, channel_payload_sidecar_descriptor,
+        hydrate_channel_message_text,
+    )
+    from zf.runtime.sidecar_refs import hydrate_sidecar_ref
+
+    descriptor = channel_payload_sidecar_descriptor(payload, "message_body")
+    if not descriptor and str(payload.get("body_ref") or "").strip():
+        descriptor = {
+            "kind": "channel_message_body",
+            "ref": str(payload["body_ref"]),
+            "sha256": str(payload.get("body_sha256") or ""),
+            "byte_count": int(payload.get("body_byte_count") or 0),
+            "content_type": "application/json",
+            "schema_version": CHANNEL_MESSAGE_BODY_SCHEMA_VERSION,
+            "encoding": "utf-8",
+            "required": True,
+        }
+    if descriptor:
+        body = hydrate_sidecar_ref(state_dir, descriptor).payload
+        text = body.get("text") if isinstance(body, dict) else None
+        if not isinstance(text, str) or not text.strip():
+            raise ValueError("declared channel message sidecar has no text body")
+        return text
+    return hydrate_channel_message_text(state_dir, payload, strict=True)
+
+
+def _snapshot_discussion_events(
+    snapshot: dict[str, Any], *, channel_id: str, thread_id: str,
+) -> list[dict[str, Any]]:
+    """Reuse event filtering over the already verified source manifest."""
+    from zf.core.events.model import ZfEvent
+
+    events = [
+        ZfEvent(
+            type=str(item.get("event_type") or ""), id=str(item.get("event_id") or ""),
+            actor=str(item.get("actor") or ""), ts=str(item.get("ts") or ""),
+            payload=dict(item.get("payload") or {}),
+        )
+        for item in snapshot.get("events") or [] if isinstance(item, dict)
+    ]
+    return _frozen_discussion_events(events, channel_id=channel_id, thread_id=thread_id)
 
 
 def _frozen_profiles(

@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from zf.core.events import EventLog, EventWriter
 from zf.runtime import evaluation_artifacts as artifacts
 from zf.runtime import evaluation_observer as observer
@@ -11,6 +13,7 @@ from zf.runtime.evaluation_packets import PACKET_SCHEMA_VERSION, evaluation_requ
 from zf.runtime.evaluation_prompts import EVALUATION_PROMPT_VERSION
 from zf.runtime.evaluation_roles import snapshot_catalog
 from zf.runtime.evaluation_scheduler import EvaluationQueueEntry, EvaluationScheduler
+from tests.evaluation_fixtures import _seed_channel_state
 
 
 def _packet(stage: str, *, digest: str = "a" * 64, trial: str = "trial") -> dict:
@@ -57,16 +60,22 @@ def _context() -> tuple[dict, Path]:
     return context, Path("artifacts/benchmark-evaluations/queue-inputs") / f"{stable_digest(context)}.json"
 
 
-def test_classifier_failure_never_calls_quality_provider(tmp_path, monkeypatch):
+@pytest.mark.parametrize(
+    "classifier_status",
+    ["abstain", "evidence_missing", "invalid", "ambiguous", "", "unknown"],
+)
+def test_classifier_failure_never_calls_quality_provider(
+    tmp_path, monkeypatch, classifier_status,
+):
     context, relative = _context()
     path = tmp_path / relative
     path.parent.mkdir(parents=True)
     path.write_text(json.dumps(context), encoding="utf-8")
     calls: list[str] = []
     monkeypatch.setattr(observer, "read_judge_result", lambda *args, **kwargs: (
-        {"status": "evidence_missing", "result": {
+        {"status": classifier_status, "result": {
             "schema_version": "task_type_result.v1", "judge_type": "task_type",
-            "status": "evidence_missing", "task_type": "bugfix", "confidence": 0.9,
+            "status": classifier_status, "task_type": "bugfix", "confidence": 0.9,
         }} if kwargs.get("judge_type") == "task_type" else None
     ))
     monkeypatch.setattr(observer, "run_judge", lambda **kwargs: calls.append(kwargs["judge_type"]))
@@ -86,6 +95,50 @@ def test_classifier_failure_never_calls_quality_provider(tmp_path, monkeypatch):
     )
     assert result["status"] == "inconclusive"
     assert calls == []
+
+
+@pytest.mark.parametrize(
+    "classifier_status",
+    ["abstain", "evidence_missing", "invalid", "ambiguous"],
+)
+def test_observer_dispatches_only_classifier_for_explicit_non_scored_verdict(
+    tmp_path, classifier_status,
+):
+    """A high-confidence named type cannot make the scheduler release roles."""
+
+    message_ids = _seed_channel_state(tmp_path)
+    scheduler = EvaluationScheduler(tmp_path, inline=True)
+    calls: list[str] = []
+
+    def backend(**kwargs):
+        calls.append(kwargs["judge_type"])
+        assert kwargs["judge_type"] == "task_type"
+        return json.dumps({
+            "schema_version": "task_type_result.v1",
+            "judge_type": "task_type",
+            "status": classifier_status,
+            "task_type": "bugfix",
+            "confidence": 0.99,
+            "evidence_refs": [f"channel/message/{message_ids[0]}"],
+            "rationale": "分类器明确拒绝授权后续角色评测。",
+            "missing_evidence": [],
+        }), ""
+
+    try:
+        observer.observe_once(
+            state_dir=tmp_path, scheduler=scheduler, backend=backend,
+        )
+        assert calls and set(calls) == {"task_type"}
+        entries = scheduler.entries
+        assert next(
+            item for item in entries.values() if item.judge_type == "task_type"
+        ).status == "inconclusive"
+        for stage in ("contribution", "discussion", "prd_fidelity"):
+            entry = next(item for item in entries.values() if item.judge_type == stage)
+            assert entry.status == "inconclusive"
+            assert "dependency inconclusive" in entry.error
+    finally:
+        scheduler.close()
 
 
 def test_scheduler_settles_quality_dependents_of_failed_classifier(tmp_path):
@@ -167,6 +220,8 @@ def test_tampered_judge_sidecar_does_not_dedup(tmp_path, monkeypatch):
             for key in ("information_exchange", "clarity", "task_assistance",
                         "efficiency", "necessity")
         ],
+        "discussion_meaningful": True,
+        "discussion_progressed": True,
         "missing_evidence": [],
     }
     result = runner.run_judge(
@@ -222,6 +277,8 @@ def test_quality_result_with_wrong_role_metadata_is_invalid(tmp_path):
                 "efficiency", "necessity",
             )
         ],
+        "discussion_meaningful": True,
+        "discussion_progressed": True,
         "missing_evidence": [],
     }
     calls = []
@@ -241,7 +298,8 @@ def test_quality_result_with_wrong_role_metadata_is_invalid(tmp_path):
     assert len(calls) == 2  # bounded schema repair, never an unbounded retry
 
 
-def test_conclusion_packet_keeps_frozen_role_ref_and_digest(tmp_path):
+@pytest.mark.parametrize("child_value", [True, False])
+def test_conclusion_packet_keeps_frozen_role_ref_and_digest(tmp_path, child_value):
     role_ref = "evaluation_roles/bugfix.md"
     role_digest = "a" * 64
     judges = {
@@ -269,6 +327,10 @@ def test_conclusion_packet_keeps_frozen_role_ref_and_digest(tmp_path):
                 "task_type": "bugfix",
                 "agent_findings": [],
                 "dimensions": [],
+                **({"discussion_meaningful": child_value, "discussion_progressed": child_value}
+                   if stage == "discussion" else {}),
+                **({"prd_ready_for_next_stage": child_value}
+                   if stage == "prd_fidelity" else {}),
             },
         }
     response = {
@@ -278,9 +340,9 @@ def test_conclusion_packet_keeps_frozen_role_ref_and_digest(tmp_path):
         "score_scale": "0-4",
         "agent_scores": [],
         "team_findings": {
-            "discussion_meaningful": True,
-            "discussion_progressed": True,
-            "prd_ready_for_next_stage": True,
+            "discussion_meaningful": not child_value,
+            "discussion_progressed": not child_value,
+            "prd_ready_for_next_stage": not child_value,
             "problems": [],
             "underperformed_roles": [],
             "unnecessary_roles": [],
@@ -304,6 +366,41 @@ def test_conclusion_packet_keeps_frozen_role_ref_and_digest(tmp_path):
     assert packet["task_type"] == "bugfix"
     assert packet["role_ref"] == role_ref
     assert packet["role_digest"] == role_digest
+    assert result["result"]["team_findings"] == {
+        "discussion_meaningful": child_value,
+        "discussion_progressed": child_value,
+        "prd_ready_for_next_stage": child_value,
+        "problems": [],
+        "underperformed_roles": [],
+        "unnecessary_roles": [],
+    }
+
+
+def test_conclusion_fails_closed_when_role_bound_field_is_missing(tmp_path):
+    judges = {
+        "contribution": {"status": "scored", "result": {"agent_findings": []}},
+        "discussion": {"status": "scored", "result": {}},
+        "prd_fidelity": {"status": "scored", "result": {}},
+    }
+    result = runner.run_conclusion(
+        state_dir=tmp_path,
+        project_root=None,
+        config=None,
+        writer=EventWriter(EventLog(tmp_path / "events.jsonl")),
+        workflow_run_id="run-1",
+        trial_id="trial",
+        judges=judges,
+        backend=lambda **kwargs: (_ for _ in ()).throw(
+            AssertionError("missing role-bound conclusion field must not start main Judge")
+        ),
+    )
+    assert result["status"] == "incomplete"
+    assert "missing role-bound conclusion field" in result["error"]
+    assert result["result"]["team_findings"] == {
+        "problems": [result["error"]],
+        "underperformed_roles": [],
+        "unnecessary_roles": [],
+    }
 
 
 def test_malformed_inconclusive_sidecar_exhausts_without_provider(tmp_path):

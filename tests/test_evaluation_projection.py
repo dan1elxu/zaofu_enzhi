@@ -222,6 +222,66 @@ def test_newer_freeze_hides_previous_run_until_new_progress(tmp_path: Path) -> N
     assert evaluation["workflow_run_id"] == "run-new"
 
 
+def test_new_fidelity_generation_hides_old_conclusion_and_late_completion(
+    tmp_path: Path,
+) -> None:
+    writer = EventWriter(EventLog(tmp_path / "events.jsonl"))
+    freeze = _freeze(writer)
+    old_digest, new_digest, result_digest = "b" * 64, "c" * 64, "d" * 64
+
+    def queue(stage: str, digest: str, job_id: str, trial: str) -> dict:
+        return {
+            **_evaluation_payload(freeze.id, run_id="run-new", judge_type=stage),
+            "source_snapshot_digest": digest,
+            "trial_id": trial,
+            "job_id": job_id,
+            "status": "queued",
+        }
+
+    old_fidelity = queue("prd_fidelity", old_digest, "fidelity-old", "trial-old")
+    old_conclusion = queue("conclusion", old_digest, "conclusion-old", "trial-root")
+    writer.emit("benchmark.evaluation.progress", actor="evaluation-scheduler", payload=old_fidelity)
+    writer.emit("benchmark.evaluation.progress", actor="evaluation-scheduler", payload=old_conclusion)
+    writer.emit(
+        "benchmark.evaluation.conclusion.completed",
+        actor="evaluation-runner",
+        payload={**old_conclusion, "source_snapshot_digest": result_digest,
+                 "request_id": "conclusion-result-old", "job_id": "conclusion-old",
+                 "status": "complete"},
+    )
+
+    new_fidelity = queue("prd_fidelity", new_digest, "fidelity-new", "trial-new")
+    writer.emit("benchmark.evaluation.progress", actor="evaluation-scheduler", payload=new_fidelity)
+    evaluation = project_channel(tmp_path, "ch-1")["evaluation"]
+    assert all(row["judge_type"] != "conclusion" for row in evaluation["stages"])
+
+    # A late old completion cannot replace the current fidelity generation.
+    writer.emit(
+        "benchmark.evaluation.conclusion.completed",
+        actor="evaluation-runner",
+        payload={**old_conclusion, "source_snapshot_digest": result_digest,
+                 "request_id": "conclusion-result-old", "job_id": "conclusion-old",
+                 "status": "complete"},
+    )
+    evaluation = project_channel(tmp_path, "ch-1")["evaluation"]
+    assert all(row["judge_type"] != "conclusion" for row in evaluation["stages"])
+
+    new_conclusion = queue("conclusion", new_digest, "conclusion-new", "trial-root")
+    writer.emit("benchmark.evaluation.progress", actor="evaluation-scheduler", payload=new_conclusion)
+    writer.emit(
+        "benchmark.evaluation.conclusion.completed",
+        actor="evaluation-runner",
+        payload={**new_conclusion, "source_snapshot_digest": "e" * 64,
+                 "request_id": "conclusion-result-new", "job_id": "conclusion-new",
+                 "status": "complete"},
+    )
+    evaluation = project_channel(tmp_path, "ch-1")["evaluation"]
+    assert any(
+        row["judge_type"] == "conclusion" and row["status"] == "complete"
+        for row in evaluation["stages"]
+    )
+
+
 def test_report_does_not_call_incomplete_conclusion_complete() -> None:
     judges = {
         stage: {"status": "scored", "result": {}}
@@ -388,14 +448,24 @@ def test_legacy_events_without_valid_queue_identity_stay_hidden(
     assert project_channel(tmp_path, "ch-1")["evaluation"] == {}
 
 
-def test_legacy_conclusion_requires_unique_active_queue(tmp_path: Path) -> None:
+@pytest.mark.parametrize("old_status", ["running", "completed"])
+@pytest.mark.parametrize("explicit_identity", [False, True])
+def test_unbound_conclusion_requires_unique_queue(
+    tmp_path: Path, old_status: str, explicit_identity: bool,
+) -> None:
     writer = EventWriter(EventLog(tmp_path / "events.jsonl"))
     freeze = _freeze(writer)
-    for job_id in ("conclusion-1", "conclusion-2"):
+    for job_id, status in (("conclusion-1", old_status), ("conclusion-2", "running")):
         writer.emit("benchmark.evaluation.progress", actor="evaluation-scheduler", payload=
-                    _evaluation_payload(freeze.id, judge_type="conclusion", job_id=job_id, status="running"))
-    writer.emit("benchmark.evaluation.conclusion.completed", actor="evaluation-runner", payload={
+                    _evaluation_payload(freeze.id, judge_type="conclusion", job_id=job_id, status=status))
+    payload = {
         "channel_id": "ch-1", "workflow_run_id": "run-new", "trial_id": "trial-1",
         "judge_type": "conclusion", "request_id": "conclusion-result-request", "status": "complete",
-    })
+    }
+    if explicit_identity:
+        payload.update(
+            evaluation_contract="channel-prd-eval.v1", prompt_version=EVALUATION_PROMPT_VERSION,
+            freeze_event_id=freeze.id, source_snapshot_digest="c" * 64,
+        )
+    writer.emit("benchmark.evaluation.conclusion.completed", actor="evaluation-runner", payload=payload)
     assert project_channel(tmp_path, "ch-1")["evaluation"]["stages"][0]["status"] == "running"

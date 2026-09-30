@@ -199,7 +199,10 @@ def _judge_reply(judge_type: str, message_ref: str = "", with_bound: bool = Fals
                 "confidence": 0.9, "evidence_refs": [ref],
                 "rationale": "讨论有明确的信息交换和决策。", "verdict": "aligned",
             } for dimension in DISCUSSION_DIMENSIONS],
-            "human_intervention_count": 0, "missing_evidence": [],
+            "human_intervention_count": 0,
+            "discussion_meaningful": True,
+            "discussion_progressed": True,
+            "missing_evidence": [],
         }, ensure_ascii=False)
     if judge_type == "prd_fidelity":
         dimensions = ["original_to_channel_prd"]
@@ -217,7 +220,8 @@ def _judge_reply(judge_type: str, message_ref: str = "", with_bound: bool = Fals
                 "confidence": 0.9, "evidence_refs": refs,
                 "rationale": "需求边界在 PRD 中保持一致。", "verdict": "aligned",
             } for dimension in dimensions],
-            "differences": [], "missing_evidence": [],
+            "differences": [], "prd_ready_for_next_stage": True,
+            "missing_evidence": [],
         }, ensure_ascii=False)
     return json.dumps({
         "schema_version": "conclusion_result.v2", "judge_type": "conclusion",

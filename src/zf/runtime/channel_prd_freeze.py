@@ -70,6 +70,51 @@ def _stable_digest(value: Any) -> str:
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
+SOURCE_SNAPSHOT_EVENT_TYPES = frozenset({
+    "channel.message.posted", "channel.question.opened", "channel.question.updated",
+    "channel.question.resolved", "channel.consensus.proposed", "channel.consensus.signed",
+    "channel.synthesis.proposed", "channel.finding.recorded",
+})
+
+
+def source_snapshot_event_manifest(
+    events: list[ZfEvent], *, channel_id: str, thread_id: str, source_event_id: str,
+) -> list[dict[str, Any]]:
+    """Return the exact source-event-bounded manifest used by PRD freeze."""
+    output: list[dict[str, Any]] = []
+    found_source = False
+    for event in events:
+        payload = event.payload if isinstance(event.payload, dict) else {}
+        event_id = str(event.id or "")
+        matches = (
+            str(payload.get("channel_id") or "") == channel_id
+            and str(payload.get("thread_id") or "") == thread_id
+        )
+        if event_id == source_event_id:
+            if not matches:
+                raise ValueError("source event identity does not match Channel freeze")
+            output.append({
+                "event_id": event_id,
+                "event_type": str(event.type or ""),
+                "actor": str(event.actor or ""),
+                "ts": str(event.ts or ""),
+                "payload": payload,
+            })
+            found_source = True
+            break
+        if matches and event.type in SOURCE_SNAPSHOT_EVENT_TYPES:
+            output.append({
+                "event_id": event_id,
+                "event_type": str(event.type or ""),
+                "actor": str(event.actor or ""),
+                "ts": str(event.ts or ""),
+                "payload": payload,
+            })
+    if not found_source:
+        raise ValueError("source event is missing from Channel freeze ledger")
+    return output
+
+
 def _source_snapshot(
     writer: EventWriter,
     *,
@@ -79,45 +124,20 @@ def _source_snapshot(
     """Capture the bounded, identity-bearing source view at freeze time.
 
     The snapshot is inline in ``channel.prd.frozen`` so evaluation can replay
-    the exact handoff even if later Channel messages change.  It contains
-    decision-bearing occurrences only; full PRD/readiness bodies remain bound
-    by their own ref/digest pairs.
+    the exact handoff even if later Channel messages change. Full PRD/readiness
+    bodies remain bound by their own ref/digest pairs.
     """
-
     channel_id = str(consensus_payload.get("channel_id") or "")
     thread_id = str(consensus_payload.get("thread_id") or "main")
     revision = _safe_revision(consensus_payload.get("prd_revision"))
-    events: list[dict[str, Any]] = []
-    ignored = {
-        "channel.member.connected", "channel.member.disconnected",
-        "channel.typing.started", "channel.typing.stopped", "channel.message.read",
-    }
     try:
         prior_events = writer.event_log.read_all()
     except Exception:
         prior_events = []
-    for event in prior_events:
-        if event.type in ignored or not event.type.startswith("channel."):
-            continue
-        payload = event.payload if isinstance(event.payload, dict) else {}
-        if str(payload.get("channel_id") or "") != channel_id:
-            continue
-        if str(payload.get("thread_id") or "") != thread_id:
-            continue
-        if event.id == source_event.id or event.type in {
-            "channel.message.posted", "channel.question.opened", "channel.question.updated",
-            "channel.question.resolved", "channel.consensus.proposed", "channel.consensus.signed",
-            "channel.synthesis.proposed", "channel.finding.recorded",
-        }:
-            events.append({
-                "event_id": str(event.id),
-                "event_type": str(event.type),
-                "actor": str(event.actor or ""),
-                "ts": str(event.ts or ""),
-                "payload": payload,
-            })
-        if event.id == source_event.id:
-            break
+    events = source_snapshot_event_manifest(
+        prior_events, channel_id=channel_id, thread_id=thread_id,
+        source_event_id=str(source_event.id or ""),
+    )
     return {
         "schema_version": "channel.prd.evaluation-source-snapshot.v1",
         "channel_id": channel_id,
@@ -165,4 +185,7 @@ def emit_prd_frozen(
     )
 
 
-__all__ = ["PRD_FROZEN_EVENT", "emit_prd_frozen", "prd_frozen_payload"]
+__all__ = [
+    "PRD_FROZEN_EVENT", "SOURCE_SNAPSHOT_EVENT_TYPES", "emit_prd_frozen",
+    "prd_frozen_payload", "source_snapshot_event_manifest",
+]

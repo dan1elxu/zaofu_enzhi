@@ -9,6 +9,7 @@ one implementation without growing the orchestration module.
 from __future__ import annotations
 
 import json
+import hashlib
 from pathlib import Path
 from typing import Any
 
@@ -99,6 +100,50 @@ def read_conclusion_result(
         record, state_dir=Path(state_dir), workflow_run_id=workflow_run_id, judge_type="conclusion",
         request_id=request_id,
     )
+
+
+def _recover_sidecar_attempt(
+    record: dict[str, Any] | None, *, workflow_run_id: str, judge_type: str,
+    request_id: str, trial_id: str, source_snapshot_digest: str,
+) -> tuple[int, int] | None:
+    """Read only the durable retry counters from a malformed sidecar."""
+    if not isinstance(record, dict):
+        return None
+    if (
+        str(record.get("request_id") or "") != request_id
+        or str(record.get("workflow_run_id") or "") != workflow_run_id
+        or str(record.get("judge_type") or "") != judge_type
+        or str(record.get("trial_id") or "") != trial_id
+        or str(record.get("source_snapshot_digest") or "") != source_snapshot_digest
+    ):
+        return None
+    try:
+        attempt = int(record.get("attempt") or 0)
+        maximum = int(record.get("max_attempts") or 2)
+    except (TypeError, ValueError):
+        return None
+    if attempt <= 0 or maximum <= 0 or attempt > maximum:
+        return None
+    return attempt, maximum
+
+
+def _recover_attempt_archive(
+    path: Path, *, workflow_run_id: str, judge_type: str,
+    request_id: str, trial_id: str, source_snapshot_digest: str,
+) -> dict[str, Any] | None:
+    """Recover a consumed retry count when the latest sidecar was deleted."""
+
+    candidates: list[tuple[int, dict[str, Any]]] = []
+    for archive in (path.parent / "attempts").glob(f"{request_id}-attempt-*.json"):
+        record = _read_json(archive)
+        recovery = _recover_sidecar_attempt(
+            record, workflow_run_id=workflow_run_id, judge_type=judge_type,
+            request_id=request_id, trial_id=trial_id,
+            source_snapshot_digest=source_snapshot_digest,
+        )
+        if recovery is not None:
+            candidates.append((recovery[0], record))
+    return max(candidates, key=lambda item: item[0])[1] if candidates else None
 
 
 def _validate_read_record(
@@ -246,6 +291,20 @@ def _archive_report(path: Path, body: str) -> Path:
     return path
 
 
+def _archive_report_bytes(path: Path, body: bytes) -> Path:
+    """Preserve an unreadable report before replacing its latest projection."""
+
+    if path.exists() and path.read_bytes() != body:
+        path = path.with_name(
+            f"{path.stem}-{hashlib.sha256(body).hexdigest()[:16]}{path.suffix}"
+        )
+    if not path.exists():
+        # Latin-1 maps every byte one-to-one, letting the existing atomic
+        # text writer retain a corrupt UTF-8 report without lossy decoding.
+        atomic_write_text(path, body.decode("latin-1"), encoding="latin-1")
+    return path
+
+
 def write_report(
     state_dir: Path, workflow_run_id: str, body: str, *,
     prompt_version: str | None = None, trial_id: str = "",
@@ -257,9 +316,23 @@ def write_report(
     path = report_path(state_dir, workflow_run_id)
     with locked_path(path):
         if path.exists():
-            previous = path.read_text(encoding="utf-8")
-            if previous != body:
-                _archive_report(path.with_name(f"report-snapshot-{stable_digest(previous)[:16]}.md"), previous)
+            previous_bytes = path.read_bytes()
+            try:
+                previous = previous_bytes.decode("utf-8")
+            except UnicodeDecodeError:
+                _archive_report_bytes(
+                    path.with_name(
+                        "report-corrupt-"
+                        f"{hashlib.sha256(previous_bytes).hexdigest()[:16]}.bin"
+                    ),
+                    previous_bytes,
+                )
+            else:
+                if previous != body:
+                    _archive_report(
+                        path.with_name(f"report-snapshot-{stable_digest(previous)[:16]}.md"),
+                        previous,
+                    )
         if prompt_version and final:
             _archive_report(versioned_report_path(
                 state_dir, workflow_run_id, prompt_version,
@@ -327,7 +400,7 @@ def _read_json(path: Path) -> dict[str, Any] | None:
         return None
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+    except (OSError, UnicodeError, json.JSONDecodeError):
         return None
     return payload if isinstance(payload, dict) else None
 

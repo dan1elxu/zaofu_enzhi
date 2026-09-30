@@ -353,6 +353,12 @@ def _normalize_discussion(
     human_count = raw.get("human_intervention_count", 0)
     if type(human_count) is not int or human_count < 0:
         return None, "human_intervention_count must be a non-negative integer"
+    discussion_meaningful = raw.get("discussion_meaningful")
+    discussion_progressed = raw.get("discussion_progressed")
+    if type(discussion_meaningful) is not bool:
+        return None, "discussion_meaningful must be a boolean"
+    if type(discussion_progressed) is not bool:
+        return None, "discussion_progressed must be a boolean"
     return DiscussionResult(
         schema_version=str(raw["schema_version"]),
         judge_type="discussion",
@@ -362,6 +368,8 @@ def _normalize_discussion(
         dimensions=dims,
         human_intervention_count=human_count,
         discussion_score=discussion_score(dims, score_scale=score_scale) if status == "scored" else None,
+        discussion_meaningful=discussion_meaningful,
+        discussion_progressed=discussion_progressed,
         missing_evidence=missing,
         score_scale=score_scale,
         **_result_metadata(raw),
@@ -394,6 +402,9 @@ def _normalize_prd_fidelity(
         raw.get("missing_evidence") or raw.get("missing_evidence_keys")
     )
     status = _result_status(dims, missing)
+    prd_ready_for_next_stage = raw.get("prd_ready_for_next_stage")
+    if type(prd_ready_for_next_stage) is not bool:
+        return None, "prd_ready_for_next_stage must be a boolean"
     return PrdFidelityResult(
         schema_version=str(raw["schema_version"]),
         judge_type="prd_fidelity",
@@ -405,6 +416,7 @@ def _normalize_prd_fidelity(
         prd_fidelity_score=prd_fidelity_score(
             dims, workflow_bound=workflow_bound, score_scale=score_scale,
         ) if status == "scored" else None,
+        prd_ready_for_next_stage=prd_ready_for_next_stage,
         missing_evidence=missing,
         score_scale=score_scale,
         **_result_metadata(raw),
@@ -445,8 +457,10 @@ def _normalize_conclusion(
     if not isinstance(narrative, str) or not narrative.strip():
         return None, "conclusion_zh must be non-empty"
     for field in ("discussion_meaningful", "discussion_progressed", "prd_ready_for_next_stage"):
-        if type(team.get(field)) is not bool:
+        if status == "complete" and type(team.get(field)) is not bool:
             return None, f"team_findings.{field} must be a boolean"
+        if field in team and type(team[field]) is not bool:
+            return None, f"team_findings.{field} must be a boolean when present"
     for field in ("problems", "underperformed_roles", "unnecessary_roles"):
         if not isinstance(team.get(field), list):
             return None, f"team_findings.{field} must be a list"
@@ -730,6 +744,11 @@ def _normalize_task_type(
 ) -> tuple[TaskTypeResult | None, str]:
     """Normalize the bounded Judge classifier output."""
 
+    declared_status = raw.get("status")
+    if not isinstance(declared_status, str) or declared_status not in {
+        "scored", "ambiguous", "evidence_missing", "abstain", "invalid",
+    }:
+        return None, "task_type status must be scored, ambiguous, evidence_missing, abstain or invalid"
     task_type = str(raw.get("task_type") or "ambiguous").strip().lower()
     if task_type not in TASK_TYPES:
         return None, "task_type must be bugfix, refactor, greenfield or ambiguous"
@@ -740,6 +759,11 @@ def _normalize_task_type(
         return None, "task_type requires a non-empty rationale"
     if any(not _evidence_bound(ref, allowed) for ref in refs):
         status = "invalid"
+    elif declared_status != "scored":
+        # An explicit non-scored classifier outcome is fail-closed.  A high
+        # confidence/type pair must never re-authorize quality stages.
+        status = str(declared_status)
+        task_type = "ambiguous"
     elif not refs:
         status = "evidence_missing"
     elif task_type == "ambiguous":
@@ -752,6 +776,7 @@ def _normalize_task_type(
     missing = _string_list(raw.get("missing_evidence") or raw.get("missing_evidence_keys"))
     if missing and status == "scored":
         status = "evidence_missing"
+        task_type = "ambiguous"
     return TaskTypeResult(
         schema_version=str(raw["schema_version"]),
         judge_type="task_type",

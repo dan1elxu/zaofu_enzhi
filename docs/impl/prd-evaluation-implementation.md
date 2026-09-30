@@ -4,15 +4,15 @@
 
 ## 流程
 
-1. `evaluation_watch` 读取 `events.jsonl`，只以统一的 `channel.prd.frozen` 为评测入口；`channel.consensus.reached` 是冻结前的内部讨论事件，不单独触发评测。observer 在冻结 occurrence 处投影，校验 matching synthesis 且无开放问题/待修订。`multi_lens` 要求必需成员完整签署，`conversation` / `clarification` 要求 owner 已确认。结果 receipt 不会单独启动 Judge，readiness 不决定是否评测。
-2. 冻结 handoff 同时携带带 `channel/thread/revision` 身份的 source snapshot 及 digest；observer 在冻结事件处截断消息，按 ref 读取冻结 PRD/readiness，校验 PRD 原始字节与冻结 SHA-256；缺失、越界、摘要非法或不一致时不入队。版本化 PRD 还需匹配 channel/thread/revision。通过后生成不可变 packet，写入 `artifacts/benchmark-evaluations/queue-inputs/`，其中包含 `workflow_run_id`、`trial_id`、`judge_type` 和 `source_snapshot_digest`。已合法入队的快照继续用于恢复，不依赖源文件仍存在。
+1. `evaluation_watch` 读取 `events.jsonl`，只以统一的 `channel.prd.frozen` 为评测入口；`channel.consensus.reached` 是冻结前的内部讨论事件，不单独触发评测。observer 在冻结引用的 source occurrence 处投影，校验 matching synthesis 且无开放问题/待修订。`multi_lens` 要求必需成员完整签署，`conversation` / `clarification` 要求 owner 已确认。结果 receipt 不会单独启动 Judge，readiness 不决定是否评测。
+2. 冻结 handoff 同时携带带 `channel/thread/revision` 身份的 source snapshot 及 digest；observer 以其引用的 consensus/source occurrence 为材料截止点，并核对快照中的证据清单。consensus 与 freeze 之间的新增消息不进入 packet。按 ref 读取冻结 PRD/readiness，校验 PRD 原始字节与冻结 SHA-256；消息正文 sidecar 也必须完整读取并通过摘要校验，缺失或损坏不能回退到 preview。材料缺失、越界、摘要非法或不一致时不调用 provider。版本化 PRD 还需匹配 channel/thread/revision。通过后生成不可变 packet，写入 `artifacts/benchmark-evaluations/queue-inputs/`，其中包含 `workflow_run_id`、`trial_id`、`judge_type` 和 `source_snapshot_digest`。已合法入队的快照继续用于恢复，不依赖源文件仍存在。
 3. 统一冻结入口进入 `evaluation_scheduler.py` 的五个阶段：`task_type → contribution、discussion、prd_fidelity → conclusion`。`task_type` 只能从 `bugfix`、`refactor`、`greenfield`、`ambiguous` 中选择；只有明确类型才会绑定对应的三份冻结 role.md。三个语义 subagent 只读同一个 frozen packet、自己的 role 区块和自己的 scope，互不读取其他 subagent 结果；主 Judge 只汇总原始结果。同一 channel 严格按依赖执行；不同 channel 可以占用不同 slot。默认 2 个 slot，可用 `ZF_EVALUATION_JUDGE_SLOTS` 调整（上限 8）。
 4. 每个 slot 使用独立的 `judges-slot-N` tmux window、provider launch UUID、Codex `CODEX_HOME`/session root 和 binding sidecar。observer 只发现并入队，不等待 provider。
    Judge 在独立 input 目录读取本次 packet 副本；Claude 仅开放 Read，禁止权限询问并禁用 MCP/Hook；Codex 固定 `read-only` + `never`，禁用 Hook、Apps、Plugins 和用户配置的 MCP，不接受 worker sandbox 放宽。只读沙箱限制写入，不等于操作系统级的 packet-only 文件读取隔离。
 5. Judge turn 通过 `evaluation_turns.py` 按当前 provider session、rollout 和 turn 过滤 transcript。Codex 必须匹配本次 prompt marker；不会按项目目录“最新 rollout”猜测。Claude 只把当前 user marker 后的 assistant 内容作为结果。
    Codex 的带 marker 提示通过 CLI 初始 prompt 参数提交，避免 TUI 启动或粘贴吞掉字符/提交键；时间边界在启动前记录。Judge 调用关闭启动更新检查，更新菜单不能被当作就绪输入框；CLI 升级由 operator 单独管理。
 6. 每次 provider transport attempt 先写入 `running` 记录，然后启动 provider。provider error、aborted、启动失败和总时长 timeout 最多重试一次；schema 修复拥有独立的每 attempt 两次预算。第二次失败落为 `inconclusive`，不会无限依赖下一轮 observer 扫描。
-7. 若任一 Judge 为 `inconclusive`、timeout、aborted 或 provider error，conclusion 直接生成确定性的 `inconclusive` 记录，不再启动另一个 provider。conclusion provider 只负责文字结论，分数、Agent 分数和完整性由 runner 根据上游结果确定，不能用文字结论掩盖缺证据或评分冲突。
+7. 若任一 Judge 为 `inconclusive`、timeout、aborted 或 provider error，conclusion 直接生成确定性的 `inconclusive` 记录，不再启动另一个 provider。Discussion 子评测给出 `discussion_meaningful`、`discussion_progressed`，PRD fidelity 子评测给出 `prd_ready_for_next_stage`；主 Judge 汇总时原样保留这些判定和 Agent 分数。运行时检查类型与来源，不从分数硬编码就绪阈值；缺少子判定时不形成完整结论。
 8. 每一阶段写入 sidecar、attempt sidecar 和进度事件 `benchmark.evaluation.progress`。`judge.completed` 与 `conclusion.completed` 仍是 informational/projection-only 事件。
 
 ## 超时与活性预算
@@ -32,13 +32,18 @@ metadata、旧 turn、user/tool 文本不会刷新当前 turn 的有效进展预
 
 报告中的状态可以是 `scored`、`evidence_missing`、`abstain`、`conflict`、`invalid`、`inconclusive` 或等待状态。`inconclusive` 会同时出现在 conclusion sidecar、Markdown missing 区域、Channel projection 和 Web Channel 页面。
 
-Channel 只读投影兼容缺少身份字段的 v7 历史事件：旧 scheduler 行必须携带真实冻结事件、trial、source digest，且 job id 必须匹配当前 prompt 版本的请求摘要；后续事件只从同一 run/stage/trial 的唯一匹配任务补齐缺字段。conclusion 的不同 request id 仅绑定唯一活动任务；显式冲突字段仍拒绝。回放不改写历史账本，也不重跑评测。页面显示“PRD 已冻结”，当前冻结共识允许 Plan Task；旧 readiness 和 synthesis 的 open_questions 不再拦截规划，readiness 保留给实际执行检查。
+observer 会检查完成后的 conclusion 和报告：结论缺失或损坏时只修复 conclusion，继续使用有效子评测；结论有效而报告缺失或内容损坏时直接重建报告，不调用 provider。结论恢复沿用持久化尝试次数，耗尽后记录 `inconclusive`，后续扫描不能无限重试。
 
-## 评分质量门禁（prompt v7）
+Workflow bind 产生新的 PRD fidelity 输入后，投影按队列首次建立的顺序选择当前评测，并用原始 queue source digest 绑定对应 conclusion。旧结论及迟到事件不能把当前状态改回已完成；冻结材料未变的 contribution、discussion 结果继续复用。
+
+Channel 只读投影可补齐同一 prompt 版本内缺少身份字段的历史事件：scheduler 行必须携带真实冻结事件、trial、source digest，且 job id 必须匹配当前 prompt 版本的请求摘要；后续事件只从同一 run/stage/trial 的唯一匹配任务补齐缺字段。conclusion 的不同 request id 仅绑定唯一活动任务；显式冲突字段仍拒绝。旧 prompt 版本的结果保留审计，不混入当前版本展示。投影回放不改写历史账本，也不启动评测。页面显示“PRD 已冻结”，当前冻结共识允许 Plan Task；旧 readiness 和 synthesis 的 open_questions 不再拦截规划，readiness 保留给实际执行检查。
+
+## 评分质量门禁（prompt v8）
 
 门禁位于评测后端和评测 prompt，不修改 Channel 业务状态或前端操作流程。
 
 - 每个 `scored` 项必须给出至少一条精确匹配 packet allowlist 的非空证据引用和非空理由；集合级引用不能替代逐项证据。引用合法不代表内容支持评分，后者仍需人工校准。
+- 分类器显式返回 `abstain`、`evidence_missing`、`invalid` 或 `ambiguous` 时保持非评分状态；即使同时给出明确类型和高 confidence，也不能放行质量评测。
 - canonical role-driven v2 的所有质量分数统一为 0～4，且必须是有限整数。confidence 必须是 0～1 的有限数值，不接受 bool、字符串、NaN 或 Infinity。门槛判断在舍入前执行。confidence 低于 0.60 时弃权，缺证据时明确标记 `evidence_missing`；两者均保留原因并清空数字分数。当前入口没有旧阶段或旧评分合同的兼容路径。
 - `discussion` 必须完整返回五个已知维度，且每个恰好一次。`prd_fidelity` 在 PRD 未绑定 Workflow 时只评 `original_to_channel_prd`，绑定后必须返回两个边界；缺项、重复或未知维度不能当作完整评分。`contribution` 按 packet 的冻结 roster 逐一评价，缺少 roster 时使用冻结消息的成员集合；不允许重复、冒名或漏评，名册本身不能证明贡献。每个 Agent 还必须给出 `must`、`optional`、`not_needed` 或证据不足时的 `undetermined` 必要性。
 - `report.md` 只展示三个 subagent 的原始维度分数、逐 Agent 贡献分和必要性；不重新计算、平均或覆盖 subagent 分数。缺证据、弃权和无效结果保留原状态。
@@ -46,7 +51,7 @@ Channel 只读投影兼容缺少身份字段的 v7 历史事件：旧 scheduler 
 - Workflow 对齐只消费 `workflow.invoke.accepted`，按 `source_event_id` 追溯精确请求，且 `source_refs` 的 Channel/thread/revision/PRD ref/digest 以及 readiness ref/digest 必须同时匹配本次冻结；pending/rejected 或身份缺失不构成绑定。读取匹配绑定实际引用的 PRD 正文，不回退到其他 revision 或 readiness。原始需求或比较正文缺失时确定性产生 `evidence_missing`，不调用 provider。
 - `channel.prd.frozen` 的 role-driven 运行使用统一 v2 的 0～4 分合同；`channel.consensus.reached` 只保留为内部冻结前事件，不再有独立评测合同。三个维度（PRD 忠实性、讨论有效性、Agent 贡献）独立展示；Agent 贡献必须同时给出 `must`、`optional`、`not_needed`，证据不足时为 `undetermined`/`incomplete`，不把贡献简单平均成团队分数。通用证据要求和对应 role.md 规则随实际 prompt sidecar 送入 provider。Codex 的精简启动 persona 不会导致 rubric 丢失。
 
-这次 prompt 版本为当前 `prd-eval-prompts.v7`；评测身份包含 prompt 版本，新版本结果与旧报告分别保留。不合约的输出使用既有 schema 修复预算，不增加新的无限重试路径。role catalog 的版本、digest、role.md 引用和完整 packet 只保存在 audit sidecar；`report.md` 保持简洁。
+这次 prompt 版本为当前 `prd-eval-prompts.v8`；评测身份包含 prompt 版本，新版本结果与旧报告分别保留。不合约的输出使用既有 schema 修复预算，不增加新的无限重试路径。role catalog 的版本、digest、role.md 引用和完整 packet 只保存在 audit sidecar；`report.md` 保持简洁。
 
 机械门禁只能保证结构、证据引用和计算约束；不能证明语义评分绝对正确。以下人工校准方法尚未接入自动回放工具。
 

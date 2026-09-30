@@ -21,6 +21,7 @@ from zf.core.events import EventLog, EventWriter
 from zf.core.state.atomic_io import atomic_write_text
 from zf.runtime.channel_contracts import normalize_product_discussion_mode
 from zf.runtime.evaluation_scheduler import EvaluationQueueEntry, scheduler_for_state
+from zf.runtime.evaluation_artifacts import report_path
 from zf.runtime.evaluation_types import EvaluationPacket, necessity_label
 from zf.runtime.evaluation_packets import (
     EVALUATION_ARTIFACT_ROOT,
@@ -200,6 +201,7 @@ def _enqueue_channel(state_dir: Path, scheduler: Any, context: dict[str, Any]) -
     stages = ("task_type", "contribution", "discussion", "prd_fidelity", "conclusion")
     queued = 0
     repair_conclusion = False
+    judge_records: dict[str, dict[str, Any] | None] = {}
     for stage in stages:
         packet = context["packets"].get(stage) or context
         digest, trial = packet["source_snapshot_digest"], packet["trial_id"]
@@ -210,6 +212,7 @@ def _enqueue_channel(state_dir: Path, scheduler: Any, context: dict[str, Any]) -
                                          judge_type=stage, request_id=job_id,
                                          expected_trial_id=trial,
                                          expected_source_snapshot_digest=digest)
+            judge_records[stage] = existing
             old_entry = scheduler.entries.get(job_id)
             stage_repair = bool(
                 old_entry and old_entry.status == "completed"
@@ -217,7 +220,51 @@ def _enqueue_channel(state_dir: Path, scheduler: Any, context: dict[str, Any]) -
             )
             repair_conclusion = repair_conclusion or stage_repair
         else:
-            stage_repair = repair_conclusion
+            # A terminal upstream queue row may have lost its sidecar.  Use
+            # the same deterministic placeholder as the conclusion runner so
+            # an absent conclusion can still be rebuilt without reopening an
+            # exhausted provider request.
+            for judge_type, packet in context["packets"].items():
+                if judge_records.get(judge_type) is not None:
+                    continue
+                upstream_job = scheduler.entries.get(_request_id(
+                    run_id, packet["trial_id"], judge_type, packet["source_snapshot_digest"],
+                ))
+                if upstream_job and upstream_job.status in {"completed", "inconclusive"}:
+                    judge_records[judge_type] = {
+                        "status": "inconclusive", "result": {},
+                        "error": "Judge 未产出结果",
+                    }
+            _bind_quality_records_to_roles(
+                context,
+                {key: value for key, value in judge_records.items() if value is not None},
+            )
+            records_ready = all(
+                is_completed_judge_record(judge_records.get(judge_type))
+                for judge_type in context["packets"]
+            )
+            conclusion = None
+            if records_ready:
+                # The conclusion request is bound to the four verified Judge
+                # records, not to its scheduler queue id.
+                conclusion_digest = stable_digest({
+                    key: judge_records.get(key) for key in sorted(judge_records)
+                })
+                conclusion_request = _request_id(
+                    run_id, context["trial_id"], "conclusion", conclusion_digest,
+                )
+                conclusion = read_conclusion_result(state_dir, run_id, conclusion_request)
+                if conclusion is not None and not _report_matches(
+                    state_dir, context=context, judges=judge_records, conclusion=conclusion,
+                ):
+                    _refresh_evaluation_report(
+                        state_dir, context=context, judges=judge_records, conclusion=conclusion,
+                    )
+            old_entry = scheduler.entries.get(job_id)
+            stage_repair = repair_conclusion or bool(
+                records_ready and old_entry and old_entry.status in {"completed", "inconclusive"}
+                and conclusion is None
+            )
         # Quality subagents share only the classifier dependency.  They do
         # not consume one another's results even if slot limits serialize
         # their provider turns.  Only the main Judge's conclusion joins all
@@ -241,6 +288,58 @@ def _enqueue_channel(state_dir: Path, scheduler: Any, context: dict[str, Any]) -
             evaluator_profile=stage,
         ), repair=stage_repair))
     return queued
+
+
+def _report_matches(
+    state_dir: Path,
+    *,
+    context: dict[str, Any],
+    judges: dict[str, dict[str, Any] | None],
+    conclusion: dict[str, Any],
+) -> bool:
+    """Return whether the latest report is the exact current projection.
+
+    ``report.md`` is rebuildable, but a present file is not evidence that it
+    belongs to these frozen Judge records.  Strict UTF-8 comparison detects
+    deletion, byte corruption, and ordinary manual edits without adding a
+    second report identity format.
+    """
+
+    expected = render_report(
+        workflow_run_id=context["workflow_run_id"], trial_id=context["trial_id"],
+        channel_id=context["channel_id"], freeze=context["freeze"],
+        judges={key: value or {} for key, value in judges.items()},
+        conclusion=conclusion,
+        agent_profiles=(context.get("packets", {}).get("contribution", {})
+                        .get("agent_profiles") or []),
+    )
+    try:
+        return report_path(state_dir, context["workflow_run_id"]).read_text(
+            encoding="utf-8"
+        ) == expected
+    except (OSError, UnicodeError):
+        return False
+
+
+def _refresh_evaluation_report(
+    state_dir: Path,
+    *,
+    context: dict[str, Any],
+    judges: dict[str, dict[str, Any] | None],
+    conclusion: dict[str, Any],
+) -> None:
+    """Rebuild a damaged report solely from verified sidecars."""
+
+    _refresh_report(
+        state_dir, workflow_run_id=context["workflow_run_id"], trial_id=context["trial_id"],
+        channel_id=context["channel_id"], freeze=context["freeze"],
+        judges={key: value or {} for key, value in judges.items()}, conclusion=conclusion,
+        source_snapshot_digest=context["source_snapshot_digest"],
+        role_catalog=((context.get("packets", {}).get("task_type", {})
+                       .get("task_details", {}) or {}).get("evaluation_role_catalog")),
+        agent_profiles=(context.get("packets", {}).get("contribution", {})
+                        .get("agent_profiles") or []),
+    )
 
 
 def _evaluate_stage(
@@ -295,6 +394,7 @@ def _evaluate_stage(
             trial_id=context["trial_id"], judges=judges, slot_id=slot_id,
             channel_id=entry.channel_id,
             freeze_event_id=str(context.get("freeze", {}).get("event_id") or ""),
+            queue_job_id=entry.job_id,
             stop_event=stop_event,
         )
         record = conclusion or {}
@@ -741,6 +841,7 @@ def _pending_or_run_conclusion(
     slot_id: int | None = None,
     channel_id: str = "",
     freeze_event_id: str = "",
+    queue_job_id: str = "",
     stop_event: Event | None = None,
 ) -> tuple[dict[str, Any] | None, bool]:
     """Return (record, ran). An EXISTING conclusion record is returned too
@@ -778,7 +879,7 @@ def _pending_or_run_conclusion(
         judges=judges,
         backend=backend,
         log=log, slot_id=slot_id, channel_id=channel_id,
-        freeze_event_id=freeze_event_id, stop_event=stop_event,
+        freeze_event_id=freeze_event_id, queue_job_id=queue_job_id, stop_event=stop_event,
     ), True
 
 

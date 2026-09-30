@@ -35,6 +35,8 @@ from zf.runtime.evaluation_packets import (
 from zf.runtime.evaluation_artifacts import (
     _canonical,
     _read_json,
+    _recover_attempt_archive,
+    _recover_sidecar_attempt,
     _rel,
     _safe,
     _write_turn_sidecars,
@@ -474,31 +476,6 @@ def _missing_prd_inputs(packet: Any) -> list[str]:
     return missing
 
 
-def _recover_sidecar_attempt(
-    record: dict[str, Any] | None, *, workflow_run_id: str, judge_type: str,
-    request_id: str, trial_id: str, source_snapshot_digest: str,
-) -> tuple[int, int] | None:
-    """Read only the durable retry counters from a malformed sidecar."""
-    if not isinstance(record, dict):
-        return None
-    if (
-        str(record.get("request_id") or "") != request_id
-        or str(record.get("workflow_run_id") or "") != workflow_run_id
-        or str(record.get("judge_type") or "") != judge_type
-        or str(record.get("trial_id") or "") != trial_id
-        or str(record.get("source_snapshot_digest") or "") != source_snapshot_digest
-    ):
-        return None
-    try:
-        attempt = int(record.get("attempt") or 0)
-        maximum = int(record.get("max_attempts") or 2)
-    except (TypeError, ValueError):
-        return None
-    if attempt <= 0 or maximum <= 0 or attempt > maximum:
-        return None
-    return attempt, maximum
-
-
 def run_conclusion(
     *,
     state_dir: Path,
@@ -513,24 +490,42 @@ def run_conclusion(
     slot_id: int | None = None,
     channel_id: str = "",
     freeze_event_id: str = "",
+    queue_job_id: str = "",
     stop_event: Event | None = None,
 ) -> dict[str, Any]:
     """Run the conclusion agent once all three judges have terminal results."""
 
     log = log or (lambda message: None)
+    snapshot_digest = stable_digest({key: judges.get(key) for key in sorted(judges)})
     request_id = evaluation_request_id(
         workflow_run_id=workflow_run_id,
         trial_id=trial_id,
         judge_type="conclusion",
-        source_snapshot_digest=stable_digest(
-            {key: judges.get(key) for key in sorted(judges)}
-        ),
+        source_snapshot_digest=snapshot_digest,
     )
     existing = read_conclusion_result(state_dir, workflow_run_id, request_id)
     if existing is not None and str(existing.get("status") or "") in (
         _COMPLETED_CONCLUSION_STATUSES
     ):
         return existing
+    raw_existing = _read_json(conclusion_result_path(state_dir, workflow_run_id, request_id))
+    recovery = _recover_sidecar_attempt(
+        raw_existing, workflow_run_id=workflow_run_id, judge_type="conclusion",
+        request_id=request_id, trial_id=trial_id, source_snapshot_digest=snapshot_digest,
+    )
+    if recovery is None:
+        raw_existing = _recover_attempt_archive(
+            conclusion_result_path(state_dir, workflow_run_id, request_id),
+            workflow_run_id=workflow_run_id, judge_type="conclusion",
+            request_id=request_id, trial_id=trial_id,
+            source_snapshot_digest=snapshot_digest,
+        )
+        recovery = _recover_sidecar_attempt(
+            raw_existing, workflow_run_id=workflow_run_id, judge_type="conclusion",
+            request_id=request_id, trial_id=trial_id, source_snapshot_digest=snapshot_digest,
+        )
+    if existing is None and recovery is not None:
+        existing = raw_existing
 
     discussion = judges.get("discussion") or {}
     prd_fidelity = judges.get("prd_fidelity") or {}
@@ -621,6 +616,23 @@ def run_conclusion(
     packet["input_digest"] = conclusion_input_digest
     failed = {key: judges.get(key) or {} for key in ("contribution", "discussion", "prd_fidelity")
               if (judges.get(key) or {}).get("status") != "scored"}
+    conclusion_fields = {
+        "discussion": ("discussion_meaningful", "discussion_progressed"),
+        "prd_fidelity": ("prd_ready_for_next_stage",),
+    }
+    copied_team_findings: dict[str, bool] = {}
+    for stage, fields in conclusion_fields.items():
+        record = judges.get(stage) or {}
+        child = record.get("result") if isinstance(record.get("result"), dict) else {}
+        missing = [field for field in fields if type(child.get(field)) is not bool]
+        if missing:
+            failed[stage] = {
+                **record,
+                "error": str(record.get("error") or "")
+                or "missing role-bound conclusion field: " + ", ".join(missing),
+            }
+            continue
+        copied_team_findings.update({field: child[field] for field in fields})
     if failed:
         error = "; ".join(f"{key}: {value.get('error') or value.get('status')}"
                           for key, value in failed.items())
@@ -663,8 +675,7 @@ def run_conclusion(
         raw.update(schema_version=_schema_version("conclusion", packet), judge_type="conclusion",
                    status=status, score_scale="0-4", agent_scores=[],
                    conclusion_zh="Judge 结果未全部通过评分门禁，暂不形成汇总结论。",
-                   team_findings={"discussion_meaningful": False, "discussion_progressed": False,
-                                  "prd_ready_for_next_stage": False, "problems": [error],
+                   team_findings={"problems": [error],
                                   "underperformed_roles": [], "unnecessary_roles": []},
                    next_actions=["检查失败状态和缺失证据；修复后重新测评，保留旧报告。"],
                    judge_refs=[], evidence_refs=[])
@@ -677,6 +688,11 @@ def run_conclusion(
             "necessity": item.get("necessity"),
             "necessity_status": item.get("necessity_status") or "complete",
         } for item in findings]
+        team = raw.get("team_findings")
+        if not failed and isinstance(team, dict):
+            # These determinations belong to their role-bound subagents.  The
+            # main Judge may narrate them, but cannot replace their values.
+            team.update(copied_team_findings)
         raw["judge_refs"] = [value["request_id"] for value in judges.values() if value.get("request_id")]
         raw["evidence_refs"] = sorted({ref for value in judges.values()
             for item in ((value.get("result") or {}).get("dimensions") or [])
@@ -695,6 +711,7 @@ def run_conclusion(
             "schema_version": "benchmark.evaluation.conclusion.v1",
             "evaluation_contract": "channel-prd-eval.v1",
             "channel_id": channel_id,
+            "job_id": queue_job_id,
             "judge_type": "conclusion",
             "attempt": result["attempt"],
             "max_attempts": result["max_attempts"],

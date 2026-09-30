@@ -169,16 +169,6 @@ def fold_evaluation(channel: dict[str, Any], payload: dict[str, Any], *,
             "",
         )
         if not job_id:
-            job_id = next(
-                (key for key, job in jobs.items()
-                 if job["workflow_run_id"] == run_id
-                 and job["judge_type"] == stage
-                 and job.get("freeze_event_id") == identity["freeze_event_id"]
-                 and job.get("trial_id") == identity["trial_id"]
-                 and job.get("status") in {"running", "retryable_failure"}),
-                "",
-            )
-        if not job_id:
             candidates = [
                 (key, job) for key, job in jobs.items()
                 if job["workflow_run_id"] == run_id
@@ -186,8 +176,15 @@ def fold_evaluation(channel: dict[str, Any], payload: dict[str, Any], *,
                 and job.get("freeze_event_id") == identity["freeze_event_id"]
                 and job.get("trial_id") == identity["trial_id"]
             ]
-            if candidates:
-                job_id = max(candidates, key=lambda item: int(item[1].get("_event_seq") or 0))[0]
+            if len(candidates) == 1:
+                # A conclusion result has no queue id.  It is attributable
+                # only while this immutable run/trial has one queue row.
+                job_id = candidates[0][0]
+            elif stage == "conclusion" and candidates:
+                # An unbound request cannot be attributed across same-trial
+                # queues, even if only one is running: it may be a delayed
+                # result from an older queue.
+                return
         if not job_id:
             job_id = request_id
     if not job_id:
@@ -198,6 +195,7 @@ def fold_evaluation(channel: dict[str, Any], payload: dict[str, Any], *,
             "workflow_run_id": run_id,
             "judge_type": stage,
             **identity,
+            "_queue_seq": seq,
             "_event_seq": seq,
         }
     else:
@@ -213,6 +211,7 @@ def fold_evaluation(channel: dict[str, Any], payload: dict[str, Any], *,
             # legitimately differ from the queue row's frozen-input digest.
             if stage != "conclusion":
                 return
+            job["result_source_snapshot_digest"] = identity["source_snapshot_digest"]
         job["_event_seq"] = max(int(job.get("_event_seq") or 0), int(seq or 0))
     job = jobs[job_id]
     job["evaluator_profile"] = STAGE_PROFILES.get(stage, stage)
@@ -221,6 +220,14 @@ def fold_evaluation(channel: dict[str, Any], payload: dict[str, Any], *,
                 "task_type", "role_ref", "role_digest", "evaluator_profile",
                 "source_snapshot_digest", "prompt_version", "freeze_event_id", "trial_id"):
         if key in payload:
+            # The conclusion queue is bound to the PRD-fidelity digest.
+            # Its result request is instead bound to the digest of four Judge
+            # records; retain that only as audit metadata.
+            if (key == "source_snapshot_digest" and stage == "conclusion"
+                    and str(job.get("source_snapshot_digest") or "")
+                    != str(payload.get(key) or "")):
+                job["result_source_snapshot_digest"] = str(payload.get(key) or "")
+                continue
             job[key] = payload[key]
     if event_type.endswith(".completed"):
         verdict = str(payload.get("status") or "incomplete")
@@ -251,14 +258,37 @@ def fold_evaluation(channel: dict[str, Any], payload: dict[str, Any], *,
 def public_evaluation(channel: dict[str, Any]) -> dict[str, Any]:
     run_id = channel.get("_evaluation_latest_run")
     freeze_event_id = str(channel.get("_evaluation_latest_freeze_event_id") or "")
-    stages: dict[str, dict[str, Any]] = {}
-    for job in (channel.get("_evaluation_jobs") or {}).values():
+    jobs = [
+        job for job in (channel.get("_evaluation_jobs") or {}).values()
         if (job["workflow_run_id"] == run_id
-                and (not freeze_event_id or job.get("freeze_event_id") == freeze_event_id)):
-            stage = str(job.get("judge_type") or "")
-            prior = stages.get(stage)
-            if prior is None or int(job.get("_event_seq") or 0) >= int(prior.get("_event_seq") or 0):
-                stages[stage] = dict(job)
+            and (not freeze_event_id or job.get("freeze_event_id") == freeze_event_id))
+    ]
+    fidelity_jobs = [job for job in jobs if job.get("judge_type") == "prd_fidelity"]
+    current_fidelity = max(
+        fidelity_jobs,
+        key=lambda job: (
+            int(job.get("_queue_seq") or job.get("_event_seq") or 0),
+            int(job.get("_event_seq") or 0),
+        ),
+        default=None,
+    )
+    current_fidelity_digest = str(
+        (current_fidelity or {}).get("source_snapshot_digest") or ""
+    )
+    stages: dict[str, dict[str, Any]] = {}
+    for job in jobs:
+        stage = str(job.get("judge_type") or "")
+        # A workflow bind requeues only PRD fidelity and its conclusion.  The
+        # queue's frozen-input digest is the local generation boundary; do
+        # not combine a newly queued fidelity review with an old conclusion.
+        if stage == "prd_fidelity" and job is not current_fidelity:
+            continue
+        if (stage == "conclusion" and current_fidelity_digest
+                and str(job.get("source_snapshot_digest") or "") != current_fidelity_digest):
+            continue
+        prior = stages.get(stage)
+        if prior is None or int(job.get("_event_seq") or 0) >= int(prior.get("_event_seq") or 0):
+            stages[stage] = dict(job)
     if not stages:
         return {}
     result = {"workflow_run_id": run_id, "stages": []}
@@ -267,6 +297,8 @@ def public_evaluation(channel: dict[str, Any]) -> dict[str, Any]:
             continue
         row = dict(stages[key])
         row.pop("_event_seq", None)
+        row.pop("_queue_seq", None)
+        row.pop("result_source_snapshot_digest", None)
         result["stages"].append(row)
     classification = stages.get("task_type") or {}
     if classification.get("task_type"):

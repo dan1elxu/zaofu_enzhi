@@ -164,6 +164,8 @@ class DiscussionResult:
     dimensions: list[DimensionScore] = field(default_factory=list)
     human_intervention_count: int = 0
     discussion_score: float | None = None
+    discussion_meaningful: bool | None = None
+    discussion_progressed: bool | None = None
     missing_evidence: list[str] = field(default_factory=list)
     task_type: str = ""
     role_id: str = ""
@@ -189,6 +191,14 @@ class DiscussionResult:
             ],
             human_intervention_count=int(value.get("human_intervention_count") or 0),
             discussion_score=_float_or_none(value.get("discussion_score")),
+            discussion_meaningful=(
+                value.get("discussion_meaningful")
+                if type(value.get("discussion_meaningful")) is bool else None
+            ),
+            discussion_progressed=(
+                value.get("discussion_progressed")
+                if type(value.get("discussion_progressed")) is bool else None
+            ),
             missing_evidence=_string_list(value.get("missing_evidence")),
             task_type=str(value.get("task_type") or ""),
             role_id=str(value.get("role_id") or ""),
@@ -208,6 +218,7 @@ class PrdFidelityResult:
     dimensions: list[DimensionScore] = field(default_factory=list)
     differences: list[str] = field(default_factory=list)
     prd_fidelity_score: float | None = None
+    prd_ready_for_next_stage: bool | None = None
     missing_evidence: list[str] = field(default_factory=list)
     task_type: str = ""
     role_id: str = ""
@@ -233,6 +244,10 @@ class PrdFidelityResult:
             ],
             differences=_string_list(value.get("differences")),
             prd_fidelity_score=_float_or_none(value.get("prd_fidelity_score")),
+            prd_ready_for_next_stage=(
+                value.get("prd_ready_for_next_stage")
+                if type(value.get("prd_ready_for_next_stage")) is bool else None
+            ),
             missing_evidence=_string_list(value.get("missing_evidence")),
             task_type=str(value.get("task_type") or ""),
             role_id=str(value.get("role_id") or ""),

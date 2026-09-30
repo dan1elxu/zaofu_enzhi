@@ -13,7 +13,7 @@ versioned because packet identity binds the prompt version.
 
 from __future__ import annotations
 
-EVALUATION_PROMPT_VERSION = "prd-eval-prompts.v7"
+EVALUATION_PROMPT_VERSION = "prd-eval-prompts.v8"
 
 JUDGE_TYPES: tuple[str, ...] = (
     "task_type",
@@ -178,6 +178,8 @@ Return exactly one JSON object with EXACTLY these fields:
     }}
   ],
   "human_intervention_count": 0,
+  "discussion_meaningful": <true|false>,
+  "discussion_progressed": <true|false>,
   "missing_evidence": []
 }}
 """ + "\n" + SCORE_RUBRIC
@@ -228,6 +230,7 @@ Return exactly one JSON object with EXACTLY these fields:
     }}
   ],
   "differences": [],
+  "prd_ready_for_next_stage": <true|false>,
   "missing_evidence": []
 }}
 """ + "\n" + SCORE_RUBRIC
@@ -239,6 +242,11 @@ subagent results below. You may summarize conflicts and limitations, but you
 must copy every subagent score and necessity exactly. You cannot adjust,
 average, replace, or silently overwrite a subagent score. Do not add an
 overall/team contribution score.
+
+Copy `discussion_meaningful` and `discussion_progressed` exactly from the
+Discussion Effectiveness result, and copy `prd_ready_for_next_stage` exactly
+from the PRD Fidelity result. Do not infer, reverse, or replace these three
+role-bound determinations.
 
 Task type: {task_type}
 Selected role reference: {role_ref}

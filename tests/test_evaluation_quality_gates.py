@@ -36,12 +36,17 @@ def raw_result(stage="discussion", *, bound=False):
     ids = DISCUSSION_DIMENSIONS if stage == "discussion" else (
         PRD_FIDELITY_DIMENSIONS if bound else PRD_FIDELITY_DIMENSIONS[:1]
     )
-    return {
+    result = {
         "schema_version": "discussion_result.v2" if stage == "discussion" else "prd_fidelity_result.v2",
         "judge_type": stage,
         "dimensions": [{**copy.deepcopy(item), "dimension_id": key} for key in ids],
         "missing_evidence": [],
     }
+    if stage == "discussion":
+        result.update(discussion_meaningful=True, discussion_progressed=True)
+    else:
+        result["prd_ready_for_next_stage"] = True
+    return result
 
 
 def normalize(raw, **kwargs):
@@ -161,6 +166,22 @@ def test_contribution_accepts_complete_agent_set():
     raw["agent_findings"] = [{**item, "agent_id": agent_id} for agent_id in ["m2", "m1"]]
     normalized, error = normalize(raw, expected_agent_ids=["m1", "m2"])
     assert not error and normalized is not None and normalized.status == "scored"
+
+
+@pytest.mark.parametrize(
+    ("stage", "field"),
+    [
+        ("discussion", "discussion_meaningful"),
+        ("discussion", "discussion_progressed"),
+        ("prd_fidelity", "prd_ready_for_next_stage"),
+    ],
+)
+def test_role_bound_conclusion_field_is_required(stage, field):
+    raw = raw_result(stage)
+    raw.pop(field)
+    normalized, error = normalize(raw)
+    assert normalized is None
+    assert field in error
 
 
 def test_main_judge_cannot_submit_aggregate_fields(tmp_path: Path):
