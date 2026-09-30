@@ -74,6 +74,7 @@ WAKE_PATTERNS: tuple[str, ...] = (
     # wait for an unrelated event or the deadline sweep.
     "channel.discussion.next_round.proposed",
     "channel.synthesis.repair.requested",
+    "channel.synthesis.blocked",
     "channel.question.dedup.requested",
     "channel.question.dedup.applied",
     "channel.question.dedup.rejected",

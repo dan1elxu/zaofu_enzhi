@@ -17,6 +17,8 @@ from datetime import datetime, timezone
 from typing import Any, Callable, Iterable
 
 from zf.core.events import EventWriter, ZfEvent
+from zf.core.state.locks import locked_path
+from zf.runtime.channel_dispatch_claim import channel_reply_claim_path
 
 CHANNEL_REPLY_STUCK_AFTER_SECONDS = 900
 CHANNEL_REPLY_MAX_GENERATION = 3
@@ -284,53 +286,20 @@ def remediate_channel_replies(
     for candidate in candidates:
         channel_id = str(candidate["channel_id"])
         request_id = str(candidate["request_id"])
-        generation = _positive_int(candidate.get("run_generation"), default=1)
-        if candidate["kind"] == "exhaust":
-            writer.emit(
-                CHANNEL_REPLY_EXHAUSTED_EVENT,
-                actor="orchestrator-remediation",
-                correlation_id=channel_id,
-                causation_id=str(candidate.get("last_event_id") or "") or None,
-                payload={
-                    "channel_id": channel_id,
-                    "thread_id": str(candidate.get("thread_id") or "main"),
-                    "request_id": request_id,
-                    "target_member_id": str(candidate.get("target_member_id") or ""),
-                    "run_generation": generation,
-                    "last_status": str(candidate.get("status") or ""),
-                    "reason": str(candidate.get("reason") or "")
-                    or f"reply stuck in {candidate.get('status')} after {generation} generations",
-                    "failure_status": str(candidate.get("failure_status") or ""),
-                    "failure_class": str(candidate.get("failure_class") or ""),
-                    "retryable": bool(candidate.get("retryable", True)),
-                    "source": "runtime",
-                },
-            )
+        claim = channel_reply_claim_path(writer.event_log.path.parent, channel_id, request_id)
+        try:
+            with locked_path(claim, timeout_seconds=0):
+                # Live provider calls retain this claim until completion or
+                # their own bounded timeout; age alone is not abandonment.
+                current = fold_channel_reply_states(writer.event_log.read_all()).get((channel_id, request_id), {})
+                if current.get("last_event_id") != candidate.get("last_event_id"):
+                    continue
+                kind = _record_reply_remediation(writer, candidate)
+        except TimeoutError:
+            continue
+        if kind == "exhaust":
             exhausted.append(request_id)
             continue
-        prior_reason = str(candidate.get("reason") or "").strip()
-        writer.emit(
-            _REQUESTED,
-            actor="orchestrator-remediation",
-            correlation_id=channel_id,
-            causation_id=str(candidate.get("last_event_id") or "") or None,
-            payload={
-                "channel_id": channel_id,
-                "thread_id": str(candidate.get("thread_id") or "main"),
-                "request_id": request_id,
-                "message_id": str(candidate.get("message_id") or ""),
-                "target_member_id": str(candidate.get("target_member_id") or ""),
-                "status": "pending",
-                "run_generation": generation + 1,
-                "routing_reason": "remediation_redispatch",
-                "reason": (
-                    f"remediation redispatch after {candidate.get('status')} "
-                    f"(gen {generation})"
-                    + (f"; diagnostic: {prior_reason}" if prior_reason else "")
-                ),
-                "source": "runtime",
-            },
-        )
         redispatched.append(request_id)
         if dispatch is not None:
             try:
@@ -341,6 +310,58 @@ def remediate_channel_replies(
                 # starve the others.
                 continue
     return {"redispatched": redispatched, "exhausted": exhausted}
+
+
+def _record_reply_remediation(writer: EventWriter, candidate: dict[str, Any]) -> str:
+    channel_id = str(candidate["channel_id"])
+    request_id = str(candidate["request_id"])
+    generation = _positive_int(candidate.get("run_generation"), default=1)
+    if candidate["kind"] == "exhaust":
+        writer.emit(
+            CHANNEL_REPLY_EXHAUSTED_EVENT,
+            actor="orchestrator-remediation",
+            correlation_id=channel_id,
+            causation_id=str(candidate.get("last_event_id") or "") or None,
+            payload={
+                "channel_id": channel_id,
+                "thread_id": str(candidate.get("thread_id") or "main"),
+                "request_id": request_id,
+                "target_member_id": str(candidate.get("target_member_id") or ""),
+                "run_generation": generation,
+                "last_status": str(candidate.get("status") or ""),
+                "reason": str(candidate.get("reason") or "")
+                or f"reply stuck in {candidate.get('status')} after {generation} generations",
+                "failure_status": str(candidate.get("failure_status") or ""),
+                "failure_class": str(candidate.get("failure_class") or ""),
+                "retryable": bool(candidate.get("retryable", True)),
+                "source": "runtime",
+            },
+        )
+        return "exhaust"
+    prior_reason = str(candidate.get("reason") or "").strip()
+    writer.emit(
+        _REQUESTED,
+        actor="orchestrator-remediation",
+        correlation_id=channel_id,
+        causation_id=str(candidate.get("last_event_id") or "") or None,
+        payload={
+            "channel_id": channel_id,
+            "thread_id": str(candidate.get("thread_id") or "main"),
+            "request_id": request_id,
+            "message_id": str(candidate.get("message_id") or ""),
+            "target_member_id": str(candidate.get("target_member_id") or ""),
+            "status": "pending",
+            "run_generation": generation + 1,
+            "routing_reason": "remediation_redispatch",
+            "reason": (
+                f"remediation redispatch after {candidate.get('status')} "
+                f"(gen {generation})"
+                + (f"; diagnostic: {prior_reason}" if prior_reason else "")
+            ),
+            "source": "runtime",
+        },
+    )
+    return "redispatch"
 
 
 def pending_channel_reply_exhausted_actions(events: list[ZfEvent]) -> list[dict[str, Any]]:

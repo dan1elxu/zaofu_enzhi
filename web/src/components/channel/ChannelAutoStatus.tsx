@@ -13,7 +13,7 @@ export function ChannelAutoStatus({ rows, actionReady, onRetry }: {
 }) {
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
-  const visible = (rows ?? []).filter((row) => row.status !== "completed");
+  const visible = (rows ?? []).filter((row) => row.purpose === "resolve" && row.status !== "completed");
   if (!visible.length) return null;
   return (
     <section aria-label="自动主持人状态" aria-live="polite" className="channel-workspace-panel"

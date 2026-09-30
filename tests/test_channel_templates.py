@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from tests.channel_dispatch_fixture import channel_dispatches
+
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -1300,7 +1302,7 @@ def test_synthesis_continue_emits_a_sidecar_bound_selective_round(
 
 
 def test_discussion_start_dispatches_participants_and_synthesis_once(
-    tmp_path: Path,
+    tmp_path: Path, channel_dispatches,
 ):
     state_dir, log, writer, service = _runtime(tmp_path)
     created = _execute(
@@ -1379,7 +1381,9 @@ def test_discussion_start_dispatches_participants_and_synthesis_once(
         openclaw_client=None,
     )
     EventReactorMixin._on_channel_synthesis_requested(host, synthesis_request)
+    channel_dispatches()
     EventReactorMixin._on_channel_synthesis_requested(host, synthesis_request)
+    channel_dispatches()
 
     events = log.read_all()
     synthesis_messages = [
@@ -1435,7 +1439,9 @@ def test_discussion_start_dispatches_participants_and_synthesis_once(
         for event in events
     )
     react_channel_consensus_proposed(host, consensus[0])
+    channel_dispatches()
     react_channel_consensus_proposed(host, consensus[0])
+    channel_dispatches()
     signed = {
         event.payload.get("member_id")
         for event in log.read_all()

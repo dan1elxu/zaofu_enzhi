@@ -81,6 +81,31 @@ for an explicitly trusted local repository and network. Shared hosts,
 untrusted projects, and production-like environments must repair namespace or
 bubblewrap support instead of using bypass.
 
+### 2.2 CPA relay and tmux workers
+
+When Codex uses the CPA relay, load the CPA environment in the same shell that
+starts `zf`:
+
+```bash
+source ~/.config/cpa/defaults.env
+```
+
+The relay configuration must be in `~/.codex/config.toml` and include
+`model_provider`, `model_providers.<name>.base_url`, and its `env_key`. ZaoFu
+uses an isolated `CODEX_HOME` for each role; every worker spawn refreshes that
+config and passes `CPA_API_KEY` through tmux's controlled environment update,
+so an old role config cannot send Codex back to the ChatGPT login screen. After
+switching relays, restart the worker group:
+
+```bash
+uv run zf stop
+uv run zf start
+tmux attach -t zf-test_dev5
+```
+
+Do not put a real CPA key in pane commands or logs; inspect only the variable
+name and a redacted value.
+
 ## 3. Channel Failure Signals
 
 When Codex sandbox or app-server startup fails, the expected event sequence is:

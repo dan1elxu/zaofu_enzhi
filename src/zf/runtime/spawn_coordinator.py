@@ -549,7 +549,8 @@ class SpawnCoordinator(ProviderSessionPreparationMixin):
 
         config_src = global_home / "config.toml"
         config_dst = codex_home / "config.toml"
-        if config_src.exists() and not config_dst.exists():
+        # Refresh isolated provider config before adding runtime hook trust.
+        if config_src.exists():
             shutil.copy2(config_src, config_dst)
 
         version_src = global_home / "version.json"
@@ -884,8 +885,12 @@ def _write_codex_runtime_hook_trust(
             "",
         ])
     for key, trusted_hash in hook_states:
+        # Refreshed config may already contain this TOML trust table.
+        state_key = f"[hooks.state.{_toml_basic_string(key)}]"
+        if state_key in base:
+            continue
         block_lines.extend([
-            f"[hooks.state.{_toml_basic_string(key)}]",
+            state_key,
             f"trusted_hash = {_toml_basic_string(trusted_hash)}",
             "",
         ])

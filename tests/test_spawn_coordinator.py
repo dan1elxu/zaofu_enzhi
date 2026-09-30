@@ -385,6 +385,52 @@ class TestCodexFirstSpawn:
         assert sessions.is_dir()
         assert not sessions.is_symlink()
 
+    def test_codex_home_refreshes_provider_config_on_existing_role_home(
+        self, state_dir, registry, transport, tmp_path, monkeypatch,
+    ):
+        """A provider switch must reach an already-created role CODEX_HOME."""
+        home = tmp_path / "home"
+        global_home = home / ".codex"
+        global_home.mkdir(parents=True)
+        config_src = global_home / "config.toml"
+        config_src.write_text(
+            'model = "gpt-6-astra"\n'
+            'model_reasoning_effort = "max"\n',
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("HOME", str(home))
+        coordinator = SpawnCoordinator(
+            state_dir=state_dir,
+            registry=registry,
+            transport=transport,
+            project_root=str(tmp_path),
+        )
+        role = RoleConfig(name="dev", backend="codex")
+
+        # First boot creates the isolated role config from the old provider.
+        coordinator._prepare_codex_home(role)
+        config_dst = state_dir / "workdirs" / "dev" / "codex-home" / "config.toml"
+        assert "model_provider" not in config_dst.read_text(encoding="utf-8")
+
+        # The operator switches to CPA while the role home already exists.
+        config_src.write_text(
+            'model = "gpt-6-astra"\n'
+            'model_provider = "cpa_default"\n'
+            '[model_providers.cpa_default]\n'
+            'name = "CPA"\n'
+            'base_url = "http://relay.example/v1"\n'
+            'env_key = "CPA_API_KEY"\n'
+            'wire_api = "responses"\n'
+            'requires_openai_auth = false\n',
+            encoding="utf-8",
+        )
+        coordinator._prepare_codex_home(role)
+
+        refreshed = config_dst.read_text(encoding="utf-8")
+        assert 'model_provider = "cpa_default"' in refreshed
+        assert "[model_providers.cpa_default]" in refreshed
+        assert 'env_key = "CPA_API_KEY"' in refreshed
+
     def test_codex_home_records_project_hook_trust_state(
         self, state_dir, tmp_path,
     ):
@@ -403,6 +449,32 @@ class TestCodexFirstSpawn:
         assert 'trust_level = "trusted"' in text
         assert f'[hooks.state."{hook_key}"]' in text
         assert 'trusted_hash = "sha256:abc"' in text
+
+    def test_codex_hook_trust_does_not_duplicate_global_state(
+        self, tmp_path,
+    ):
+        """Refreshing from a global config with the same hook key stays valid."""
+        import tomllib
+
+        config = tmp_path / "config.toml"
+        hook_key = f"{tmp_path}/.codex/hooks.json:stop:0:0"
+        config.write_text(
+            f'[hooks.state.{json.dumps(hook_key)}]\n'
+            'trusted_hash = "sha256:old"\n',
+            encoding="utf-8",
+        )
+
+        _write_codex_runtime_hook_trust(
+            config,
+            project_root=tmp_path,
+            hook_states=[(hook_key, "sha256:new")],
+        )
+
+        parsed = tomllib.loads(config.read_text(encoding="utf-8"))
+        assert parsed["hooks"]["state"][hook_key]["trusted_hash"] == "sha256:old"
+        assert config.read_text(encoding="utf-8").count(
+            f'[hooks.state.{json.dumps(hook_key)}]'
+        ) == 1
 
     def test_codex_spawn_trusts_workdir_project_hooks(
         self, state_dir, registry, transport, tmp_path, monkeypatch,

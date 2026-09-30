@@ -3,6 +3,7 @@ import type { ChannelDetail } from "../../api/types";
 export interface CanonicalChannelPrd {
   artifactDigest: string;
   artifactRef: string;
+  canonical: boolean;
   consensusEventId: string;
   implementationStart: boolean;
   readinessVerdict: string;
@@ -21,25 +22,6 @@ export type ChannelWorkflowBackend = "claude-headless" | "codex-headless";
 
 function text(value: unknown): string {
   return typeof value === "string" ? value.trim() : "";
-}
-
-function bareDigest(value: unknown): string {
-  return text(value).replace(/^sha256:/, "");
-}
-
-function ownerReadinessRiskAccepted(
-  consensus: Record<string, unknown>,
-  readinessRef: string,
-  readinessDigest: string,
-): boolean {
-  return Boolean(
-    consensus.human_confirmed
-    && consensus.risk_accepted === true
-    && readinessRef
-    && readinessDigest
-    && text(consensus.confirmed_readiness_ref) === readinessRef
-    && bareDigest(consensus.confirmed_readiness_digest) === bareDigest(readinessDigest),
-  );
 }
 
 function headlessBackend(value: unknown): ChannelWorkflowBackend | null {
@@ -90,31 +72,21 @@ export function canonicalChannelPrd(
   const implementationStart = (
     synthesis?.implementation_start ?? consensus.implementation_start
   ) === true;
-  const readinessRef = text(synthesis?.readiness_ref ?? consensus.readiness_ref);
-  const readinessDigest = text(
-    synthesis?.readiness_digest ?? consensus.readiness_digest,
+  // Current consensus authorizes Task/Workflow planning. Execution has a
+  // separate backend gate; historical synthesis fields must not disable Plan.
+  const canonical = Boolean(
+    artifactRef && artifactDigest && consensusEventId && synthesis
+    && !consensus.revision_pending
+    && !(Array.isArray(consensus.blocked) && consensus.blocked.length),
   );
-  // Task and Workflow planning are allowed for a confirmed, planning-ready
-  // PRD. Actual workflow execution has a separate backend gate.
-  const readinessAuthorized = readinessVerdict === "ready"
-    || ownerReadinessRiskAccepted(consensus, readinessRef, readinessDigest);
-  const openQuestions = Array.isArray(synthesis?.open_questions)
-    ? synthesis.open_questions.filter((item) => text(item))
-    : [];
   return {
     artifactDigest,
     artifactRef,
+    canonical,
     consensusEventId,
     implementationStart,
     readinessVerdict,
-    ready: Boolean(
-      artifactRef
-      && artifactDigest
-      && consensusEventId
-      && synthesis
-      && readinessAuthorized
-      && openQuestions.length === 0
-    ),
+    ready: canonical,
     sourceRefs: Array.isArray(synthesis?.source_refs)
       ? synthesis.source_refs.map((item) => text(item)).filter(Boolean)
       : [],

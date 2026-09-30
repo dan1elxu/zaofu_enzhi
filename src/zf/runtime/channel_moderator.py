@@ -8,7 +8,7 @@ Responsibilities, per discussion config flag ``moderator: true``:
 
 1. At discussion start, classify requirement complexity and decide the
    reply-dispatch budget (``channel.discussion.complexity.decided``).
-2. At each phase2 round boundary (the thread is quiet: no pending/running
+2. At each phase2 round boundary (the thread is quiet: no queued/executing
    replies, no open questions), request a verdict: ``continue`` with the
    next round's speakers + focus, or ``conclude`` the discussion.
 3. On conclude, the kernel gate (zero open questions + completed
@@ -25,6 +25,7 @@ forever, whatever the LLM does.
 from __future__ import annotations
 
 import hashlib
+import json
 import threading
 from pathlib import Path
 from typing import Any
@@ -34,6 +35,8 @@ from zf.runtime.channel_contracts import (
     channel_discussion_moderator_enabled,
     default_debate_max_rounds,
 )
+from zf.runtime.channel_prd_render import channel_requirement_text
+from zf.runtime.channel_question_dedup import question_ledger_digest
 
 MODERATOR_ACTOR = "channel-moderator"
 
@@ -101,16 +104,52 @@ def _replies_used(channel: dict[str, Any], thread_id: str, session: dict[str, An
 
 
 def _round_quiet(channel: dict[str, Any], thread_id: str) -> bool:
-    """No reply_request for the thread is still pending or running."""
+    """No reply request for the thread is still queued or executing."""
     for item in _reply_items(channel):
         if str(item.get("thread_id") or "main") != thread_id:
             continue
-        if str(item.get("status") or "") in {"pending", "running"}:
+        if str(item.get("status") or "") in {"pending", "queued", "running", "started"}:
             return False
     return True
 
 
-def _pending_verdict(channel: dict[str, Any], thread_id: str, round_no: int) -> dict[str, Any] | None:
+def _round_dispatch_ready(
+    channel: dict[str, Any],
+    thread_id: str,
+    round_no: int,
+) -> bool:
+    """Opening a round is not evidence that its replies have been routed."""
+    opened = [
+        item for item in channel.get("moderator_rounds") or []
+        if isinstance(item, dict)
+        and str(item.get("thread_id") or "main") == thread_id
+        and int(item.get("round") or 0) == round_no
+    ]
+    if not opened:
+        return True
+    latest = opened[-1]
+    message_id = str(latest.get("message_id") or f"moderator-round-{round_no}")
+    speakers = set(latest.get("speakers") or [])
+    targets = {
+        str(item.get("target_member_id") or "")
+        for item in _reply_items(channel)
+        if str(item.get("thread_id") or "main") == thread_id
+        and str(item.get("message_id") or "") == message_id
+    }
+    if targets and speakers <= targets:
+        return True
+    route_events = list(channel.get("routes") or []) + list(channel.get("relay_events") or [])
+    return any(
+        isinstance(item, dict)
+        and str(item.get("thread_id") or "main") == thread_id
+        and str(item.get("message_id") or "") == message_id
+        and (item.get("routing_reason") == "blocked"
+             or item.get("type") == "channel.relay.suppressed")
+        for item in route_events
+    )
+
+
+def _pending_verdict(channel: dict[str, Any], thread_id: str, round_no: int, digest: str) -> dict[str, Any] | None:
     """Latest proposed verdict/fallback for ``round_no`` not yet consumed."""
     latest: dict[str, Any] | None = None
     for item in channel.get("moderator_verdicts") or []:
@@ -122,15 +161,18 @@ def _pending_verdict(channel: dict[str, Any], thread_id: str, round_no: int) -> 
             continue
         if str(item.get("kind") or "") not in {"proposed", "fallback"}:
             continue
+        if item.get("ledger_digest") and item["ledger_digest"] != digest:
+            continue
         latest = item
     return latest
 
 
-def _verdict_requested(channel: dict[str, Any], thread_id: str, round_no: int) -> bool:
+def _verdict_requested(channel: dict[str, Any], thread_id: str, round_no: int, digest: str) -> bool:
     return any(
         isinstance(item, dict)
         and str(item.get("thread_id") or "main") == thread_id
         and int(item.get("round") or 0) == round_no
+        and str(item.get("ledger_digest") or "") == digest
         and str(item.get("kind") or "") == "requested"
         for item in channel.get("moderator_verdicts") or []
     )
@@ -140,21 +182,18 @@ def round_ledger_digest(channel: dict[str, Any], thread_id: str, round_no: int) 
     """Digest the moderator must echo back on its verdict.
 
     Binds a verdict to the ledger snapshot it decided on: recent message
-    event ids + open-question state + round counter.
+    event ids + complete question ledger + round counter.
     """
     message_ids = [
         str(item.get("event_id") or "")
         for item in (channel.get("recent_messages") or [])[-20:]
         if isinstance(item, dict)
-    ]
-    open_questions = [
-        str(item.get("question_id") or "")
-        for item in (channel.get("open_questions") or [])
-        if isinstance(item, dict)
         and str(item.get("thread_id") or "main") == thread_id
-        and str(item.get("status") or "") == "open"
     ]
-    raw = "|".join([thread_id, str(round_no), *message_ids, *sorted(open_questions)])
+    raw = "|".join([
+        thread_id, str(round_no), *message_ids,
+        question_ledger_digest(channel, thread_id=thread_id),
+    ])
     return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:16]
 
 
@@ -190,11 +229,16 @@ def advance_moderator_round(
     replies_used = _replies_used(channel, thread_id, session)
     roster = [str(m) for m in session.get("roster") or [] if str(m)]
 
-    pending = _pending_verdict(channel, thread_id, round_no)
+    if not _round_quiet(channel, thread_id):
+        return emitted  # A verdict must also wait for replies arriving during its turn.
+
+    if not _round_dispatch_ready(channel, thread_id, round_no):
+        return emitted  # round.opened landed before its message was routed
+
+    digest = round_ledger_digest(channel, thread_id, round_no)
+    pending = _pending_verdict(channel, thread_id, round_no, digest)
     if pending is not None:
         action = str(pending.get("action") or "")
-        if pending.get("digest") and str(pending.get("digest")) != round_ledger_digest(channel, thread_id, round_no):
-            action = "continue"  # stale snapshot: safe default, budget-bounded
         if action == "continue" and budget > 0 and replies_used >= budget:
             action = "conclude"  # budget exhausts moderator discretion
         if action == "conclude":
@@ -233,6 +277,7 @@ def advance_moderator_round(
                 "channel_id": channel_id,
                 "thread_id": thread_id,
                 "round": round_no + 1,
+                "message_id": f"moderator-round-{round_no + 1}",
                 "speakers": list(pending.get("speakers") or []),
                 "focus": str(pending.get("focus") or ""),
                 "fallback": str(pending.get("kind") or "") == "fallback",
@@ -246,9 +291,6 @@ def advance_moderator_round(
         return emitted  # resolver / owner path owns the thread for now
     if complexity_decision(channel, thread_id) is None:
         return emitted  # classification turn still running; it re-ticks on decide
-    if not _round_quiet(channel, thread_id):
-        return emitted  # relay still flowing
-
     if budget > 0 and replies_used >= budget:
         # Budget exhausted: the moderator is bypassed for the freeze decision.
         if _conclude_gate(channel, thread_id):
@@ -261,7 +303,7 @@ def advance_moderator_round(
             ))
         return emitted
 
-    if _verdict_requested(channel, thread_id, round_no):
+    if _verdict_requested(channel, thread_id, round_no, digest):
         return emitted  # verdict LLM turn still running
 
     writer.emit(
@@ -272,7 +314,7 @@ def advance_moderator_round(
             "channel_id": channel_id,
             "thread_id": thread_id,
             "round": round_no,
-            "ledger_digest": round_ledger_digest(channel, thread_id, round_no),
+            "ledger_digest": digest,
             "replies_used": replies_used,
             "budget_max_rounds": budget,
             "roster": roster,
@@ -293,7 +335,7 @@ def _conclude_gate(channel: dict[str, Any], thread_id: str) -> bool:
     """Mechanical freeze gate: no open questions, cross-reviews completed."""
     from zf.runtime.channel_discussion import _thread_has_open_questions
 
-    if _thread_has_open_questions(channel, thread_id):
+    if not _round_quiet(channel, thread_id) or _thread_has_open_questions(channel, thread_id):
         return False
     cross_reviews = channel.get("cross_reviews") or []
     candidates = (
@@ -353,12 +395,12 @@ def run_complexity_classification(
     """Classify requirement complexity → budget. Never blocks: LLM failure
     falls back to the standard budget (recorded as source="fallback")."""
     session = ((channel.get("discussions") or {}).get(thread_id) or {})
-    trigger = str(session.get("trigger") or "")
+    trigger = channel_requirement_text(state_dir, channel, thread_id) or str(session.get("trigger") or "")
     member_count = len(channel.get("members") or [])
     parsed: dict[str, Any] | None = None
     if trigger.strip():
         prompt = _CLASSIFY_PROMPT.format(
-            requirement=trigger[:2000],
+            requirement=trigger,
             member_count=member_count,
         )
         parsed, _ = agent_json_turn(
@@ -409,25 +451,35 @@ def run_moderator_verdict(
     replies_used = int(request_event.get("replies_used") or 0)
     budget = int(request_event.get("budget_max_rounds") or 0)
     roster = [str(m) for m in (request_event.get("roster") or []) if str(m)]
-    trigger = str(request_event.get("trigger") or "")
+    trigger = channel_requirement_text(state_dir, channel, thread_id) or str(request_event.get("trigger") or "")
 
     parsed: dict[str, Any] | None = None
     error = ""
     if roster:
         prompt = _VERDICT_PROMPT.format(
-            trigger=trigger[:1500],
+            trigger=trigger,
             round_no=round_no,
             replies_used=replies_used,
             budget=budget,
             roster=", ".join(roster),
             recent=_recent_discussion_text(channel, thread_id),
+            questions=json.dumps([
+                {key: item.get(key) for key in (
+                    "question_id", "question", "status", "resolution", "answer",
+                    "resolved_by", "risk_note", "evidence_refs",
+                )}
+                for item in channel.get("open_questions") or []
+                if isinstance(item, dict)
+                and str(item.get("thread_id") or "main") == thread_id
+                and item.get("status") != "merged"
+            ], ensure_ascii=False),
             digest=digest,
         )
         parsed, error = agent_json_turn(
             state_dir=state_dir,
             project_root=project_root,
             config=config,
-            thread_key=f"channel-moderator-verdict:{channel_id}:{thread_id}:{round_no}",
+            thread_key=f"channel-moderator-verdict:{channel_id}:{thread_id}:{round_no}:{digest}",
             prompt=prompt,
             repair_hint=(
                 "Return exactly one fenced JSON object: "
@@ -561,7 +613,7 @@ def react_channel_moderator_verdict_request(host: Any, event: Any) -> None:
             return None
         thread_id = str(payload.get("thread_id") or "main")
         round_no = int(payload.get("round") or 0)
-        key = f"{channel_id}:{thread_id}:verdict:{round_no}"
+        key = f"{channel_id}:{thread_id}:verdict:{round_no}:{payload.get('ledger_digest') or ''}"
         if key in _IN_FLIGHT:
             return None
         _IN_FLIGHT.add(key)
@@ -652,9 +704,21 @@ Ledger digest: {digest}
 Recent discussion:
 {recent}
 
+Current question ledger (authoritative over stale discussion summaries):
+{questions}
+
 Decide the next step:
 - "continue": keep discussing. Pick the speakers (subset of roster, max 6) who should speak next and state the focus (what to resolve in the next round). Prefer targeted @mentions over @all.
-- "conclude": discussion is done, freeze the PRD and proceed to synthesis. Only conclude when the open questions are answered and the design is stable.
+- "conclude": proceed to PRD synthesis. This does not freeze or approve the PRD; the full draft still needs artifact-bound review and every required member's signature. Conclude when questions have valid resolutions and the design can be expressed as an implementable draft.
+
+Distinguish requirement definition from later implementation acceptance. A resolved
+assumption stays an assumption with its risk and planned verification; lack of future
+implementation, test results, device measurements or PRD artifacts alone is not a
+reason to repeat discussion. Never claim those checks passed. If a concrete design
+contradiction still prevents implementation, continue with that exact unresolved
+decision and ask for a typed question so the normal resolution path can settle it.
+Do not repeatedly reopen a resolved question merely because its resolution is an
+assumption. Preserve material dissent in synthesis and review.
 
 Reply with exactly one fenced JSON object:
 ```json

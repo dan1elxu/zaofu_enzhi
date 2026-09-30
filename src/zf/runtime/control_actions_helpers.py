@@ -480,6 +480,10 @@ def validate_shared_action_payload(
         "channel-consensus-block",
     } and not _required_text(payload, "channel_id"):
         return "channel_id is required"
+    if action == "channel-consensus-review-retry":
+        for field in ("channel_id", "consensus_event_id", "reason"):
+            if not _required_text(payload, field):
+                return f"{field} is required"
     if action == "workflow-request":
         if not (
             _required_text(payload, "objective")

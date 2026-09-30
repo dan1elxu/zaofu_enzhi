@@ -56,6 +56,10 @@ def question_dedup_gate_state(
         )
     ]
     if not requests:
+        if session.get("phase_reason") in {"consensus_blocked", "synthesis_questions_opened"}:
+            # No blind-round questions meant no dedup request. Structured
+            # blockers introduced by a later review must still be answerable.
+            return "open"
         # The phase transition is appended before its dedup request. Fail
         # closed during that short projection window as well.
         return "consolidating"

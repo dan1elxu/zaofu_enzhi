@@ -2,7 +2,7 @@
 
 [English](15-channel-collaboration.en.md) · [Channel 到 PRD 最短路径](workflows/channel-to-prd.md)
 
-> 适用对象：希望让人和多个 Agent 围绕需求持续讨论、形成 Owner 确认 PRD，并在
+> 适用对象：希望让人和多个 Agent 围绕需求持续讨论、形成经 Owner 授权冻结的 PRD，并在
 > Web、Kanban Agent 或飞书中继续协作的操作者。
 >
 > 当前状态：按 2026-08-03 代码和测试核实。默认 Channel mode 是
@@ -46,16 +46,20 @@ Channel 与 Workflow 是两个状态机：
 - 只有受控 Task/Workflow proposal 经人工批准后才进入 Kernel Workflow；
 - Delivery receipt 只读返回 Channel，不让 Channel 接管运行态。
 
-## 3. 三种产品模式
+## 3. 四种产品模式
 
 | Mode | 默认触发 | 适用场景 | Engine mapping |
 |---|---|---|---|
 | `conversation` | Channel 创建后默认 | 自然群聊、定向 @mention、持续讨论 | `manual_mention` |
 | `clarification` | 显式选择或模板声明 | 逐项解决开放问题和缺失决策 | `mention_relay` |
 | `multi_lens` | 显式 Discuss | 独立多视角、relay/critique 和 synthesis | `fanout_then_synthesis` |
+| `auto` | 创建 Plan 时显式授权 | 自动答题、全文评审并冻结 PRD；冻结后独立规划 | `multi_lens` + auto |
 
 Engine mapping 是兼容实现细节，不是额外产品 mode。`max_rounds` 约束显式有界讨论，
 不会让 `conversation` 自动唤醒所有成员。
+
+`auto` 模板或 `discussion_mode=auto` 复用 `multi_lens`，通过创建 Plan 前置 Owner 授权，
+自动答题、全文评审并冻结 PRD。自动讨论链到冻结结束，后续 Task/Workflow 独立规划。
 
 ## 4. 内置模板
 
@@ -187,7 +191,8 @@ conversation / clarification / multi_lens
   -> explicit Finalize
   -> PRD draft artifact
   -> Continue | Revise | Owner confirm
-  -> channel.consensus.reached(ref, digest, revision)
+  -> channel.consensus.reached (内部共识)
+  -> channel.prd.frozen(ref, digest, revision)
   -> exact-origin PRD receipt
 ```
 
@@ -196,14 +201,26 @@ conversation / clarification / multi_lens
 - PRD body 完整保存在 sanctioned artifact/sidecar；
 - event 只保存 identity、revision、digest、preview/ref 和 causation；
 - revision 更新使用 currentness/CAS，旧 revision 不能覆盖新确认结果；
-- 只有 Owner confirm 能产生 canonical PRD；
+- 普通模式由 Owner confirm 授权冻结；auto 模式以批准 `channel-create-and-start` Plan
+  作为本次讨论与冻结的前置授权，仍须通过全 roster 签名和其他机械门禁；
+- `channel.consensus.reached` 只是冻结前的内部共识事件，后续的
+  `channel.prd.frozen` 才是带不可变快照的 canonical PRD handoff 和评测入口；
 - receipt 必须回到 exact origin，失败时保持可重试而不重复确认；
 - synthesis、Agent 自述或多数意见不等于 Owner confirmation。
 
+所有模式都由 `channel.prd.frozen` 把同一冻结材料交给独立 eval：主 Judge 识别任务类型，
+三个隔离 subagent 按版本化 role.md 分别评测 PRD 忠实性、讨论有效性和逐 Agent 贡献。
+主 Judge 只汇总，不能改分；贡献结论同时说明 Agent 必须、可选或不需要，缺证据时明确标记。
+`report.md` 保持简洁；完整 packet、规则版本/digest 和原始结论保留在同目录审计文件中，
+新版本评测保留旧报告。readiness 只影响后续规划授权，不决定是否评测。
+详见 [PRD Evaluation 实施说明](../impl/prd-evaluation-implementation.md)。
+
 ## 8. 从 PRD 交接到 Workflow
 
+普通或 auto Channel 冻结 PRD 后，Task/Workflow 都通过以下独立规划与审批路径进入交付：
+
 ```text
-confirmed PRD
+frozen canonical PRD
   -> existing Task
      or Create Task proposal -> human confirm
   -> Task-bound Workflow Plan
@@ -266,11 +283,12 @@ zf status --workers
 - conversation 是否没有非预期 fanout；
 - Discuss operation 的成员、轮次、budget 和 terminal refs；
 - PRD draft/confirmed revision、digest 和 exact-origin receipt；
+- `channel.prd.frozen` 是否存在并触发独立评测，`report.md` 与审计 sidecar 是否齐全；
 - handoff 是否由 exact Leader 提案并经过独立 Approve；
 - provider failure、retry 和 result receipt 是否幂等；
 - required sidecar 缺失是否 fail closed。
 
 ## 完成定义
 
-Channel 自身完成条件是可继续交互、Owner-confirmed PRD 可追溯、来源回执成功。软件交付
-完成条件属于 Task/Workflow/Run/Delivery，不属于 Channel synthesis。
+Channel 自身完成条件是可继续交互、按 Owner 逐次确认或 auto 前置授权冻结的 PRD
+可追溯、来源回执成功。软件交付完成条件属于 Task/Workflow/Run/Delivery，不属于 Channel synthesis。

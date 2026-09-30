@@ -6,7 +6,7 @@ import hashlib
 
 from zf.core.events import ZfEvent
 from zf.runtime.channel_projection import project_channel
-from zf.runtime.channel_router import route_channel_message
+from zf.runtime.channel_message_ingress import route_reactor_message_after_ingress
 from zf.runtime.channel_sidecar import channel_message_event_payload
 
 
@@ -405,18 +405,7 @@ def _route_runtime_message(host, event: ZfEvent, message: ZfEvent) -> None:
             and str(prior_payload.get("message_id") or "") == message_id
         ):
             return
-    route_channel_message(
-        state_dir=host.state_dir,
-        writer=host.event_writer,
-        message_event=message,
-        message_payload=message.payload,
-        actor="orchestrator-reactor",
-        source="runtime",
-        project_root=getattr(host, "project_root", None),
-        config=getattr(host, "config", None),
-        openclaw_client=getattr(host, "openclaw_client", None),
-        dispatch_inline=True,
-    )
+    route_reactor_message_after_ingress(host, event=message, payload=message.payload)
 
 
 __all__ = ["react_channel_synthesis_next_round_proposed"]

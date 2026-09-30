@@ -81,6 +81,28 @@ uv run zf web --host 127.0.0.1 --port 8001
 的本地代码库和网络；共享主机、非可信项目或 production-like 环境应修复
 namespace / bubblewrap，而不是使用 bypass。
 
+### 2.2 CPA 中转站与 tmux worker
+
+如果 Codex 使用 CPA 中转站，先在启动 `zf` 的同一个 shell 加载 CPA 环境：
+
+```bash
+source ~/.config/cpa/defaults.env
+```
+
+Codex 的中转配置必须位于 `~/.codex/config.toml`，至少包含
+`model_provider`、`model_providers.<name>.base_url` 和对应的 `env_key`。
+ZaoFu 为每个 role 使用独立的 `CODEX_HOME`；每次 worker 启动都会刷新这份配置，
+并通过 tmux 的受控环境更新传递 `CPA_API_KEY`，避免旧 role 配置把 Codex 带回
+ChatGPT 登录页。切换中转站后请重启整组 worker：
+
+```bash
+uv run zf stop
+uv run zf start
+tmux attach -t zf-test_dev5
+```
+
+不要把真实 CPA key 写进 pane 命令或日志；检查时只显示变量名和脱敏值。
+
 ## 3. Channel 失败判断
 
 Channel / Kanban Agent 使用真实 Codex provider 时,如果 sandbox 或 app-server 启动失败,期望事件是:

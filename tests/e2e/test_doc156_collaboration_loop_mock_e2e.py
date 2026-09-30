@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from tests.channel_dispatch_fixture import channel_dispatches
+
 import hashlib
 import json
 import time
@@ -535,6 +537,7 @@ def test_doc156_channel_research_adoption_and_workflow_start(
 
 def test_four_lens_discussion_cross_review_and_signoff_closes(
     tmp_path: Path,
+    channel_dispatches,
 ) -> None:
     state_dir = tmp_path / ".zf"
     state_dir.mkdir()
@@ -700,7 +703,9 @@ def test_four_lens_discussion_cross_review_and_signoff_closes(
     assert len(review_requests) == 2
     for request in review_requests:
         react_channel_cross_review_requested(host, request)
+        channel_dispatches()
         react_channel_cross_review_requested(host, request)
+        channel_dispatches()
     detail = project_channel(state_dir, channel_id)
     assert {
         (review["target_member_id"], review["status"])
@@ -741,6 +746,7 @@ def test_four_lens_discussion_cross_review_and_signoff_closes(
         host,
         synthesis_request,
     )
+    channel_dispatches()
     consensus = next(
         event
         for event in reversed(log.read_all())
@@ -753,7 +759,9 @@ def test_four_lens_discussion_cross_review_and_signoff_closes(
         "critic",
     ]
     react_channel_consensus_proposed(host, consensus)
+    channel_dispatches()
     react_channel_consensus_proposed(host, consensus)
+    channel_dispatches()
     signed = {
         event.payload.get("member_id")
         for event in log.read_all()

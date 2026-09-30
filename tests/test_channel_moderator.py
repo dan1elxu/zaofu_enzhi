@@ -176,6 +176,50 @@ def test_quiet_phase2_requests_moderator_verdict(state_dir: Path) -> None:
     assert "channel.moderator.verdict.requested" not in emitted2
 
 
+@pytest.mark.parametrize("status", ["pending", "queued", "running", "started"])
+@pytest.mark.parametrize("verdict", [None, "continue", "conclude"])
+def test_moderator_waits_for_unfinished_reply(
+    state_dir: Path, status: str, verdict: str | None,
+) -> None:
+    log = EventLog(state_dir / "events.jsonl")
+    _seed_phase2_moderated(log)
+    writer = EventWriter(log)
+    if verdict:
+        _advance(state_dir, writer)
+        channel = project_channel(state_dir, CHANNEL_ID)
+        writer.emit(
+            "channel.moderator.verdict.proposed",
+            actor=moderator.MODERATOR_ACTOR,
+            correlation_id=CHANNEL_ID,
+            payload={
+                "channel_id": CHANNEL_ID, "thread_id": "main", "round": 1,
+                "ledger_digest": moderator.round_ledger_digest(channel, "main", 1),
+                "action": verdict, "speakers": ["arch-1"],
+            },
+        )
+    payload = {
+        "channel_id": CHANNEL_ID, "thread_id": "main",
+        "request_id": "reply-wait", "target_member_id": "arch-1",
+    }
+    writer.emit(
+        "channel.agent.reply.requested", actor="router",
+        correlation_id=CHANNEL_ID, payload={**payload, "status": status},
+    )
+    assert _advance(state_dir, writer) == []
+    assert project_channel(state_dir, CHANNEL_ID)["discussions"]["main"]["state"] == "phase2_relay"
+
+    writer.emit(
+        "channel.agent.reply.completed", actor="arch-1",
+        correlation_id=CHANNEL_ID, payload=payload,
+    )
+    expected = {
+        None: "channel.moderator.verdict.requested",
+        "continue": "channel.discussion.round.opened",
+        "conclude": "channel.synthesis.requested",
+    }
+    assert expected[verdict] in _advance(state_dir, writer)
+
+
 def test_verdict_continue_opens_round_with_moderator_message(state_dir: Path) -> None:
     log = EventLog(state_dir / "events.jsonl")
     _seed_phase2_moderated(log)
@@ -207,12 +251,62 @@ def test_verdict_continue_opens_round_with_moderator_message(state_dir: Path) ->
     last_msg = channel["recent_messages"][-1]
     assert last_msg["member_id"] == moderator.MODERATOR_ACTOR
     assert "@arch-1" in last_msg["text"] and "存储格式" in last_msg["text"]
+    # The watcher can tick after round.opened but before routing its message.
+    assert _advance(state_dir, writer) == []
+    for member in ("arch-1", "critic-1"):
+        payload = {
+            "channel_id": CHANNEL_ID, "thread_id": "main",
+            "message_id": last_msg["message_id"], "target_member_id": member,
+            "request_id": f"round-2-{member}",
+        }
+        writer.emit("channel.agent.reply.requested", actor="router", payload=payload)
+        assert _advance(state_dir, writer) == []
+        writer.emit("channel.agent.reply.completed", actor=member, payload=payload)
+        if member == "arch-1":
+            assert _advance(state_dir, writer) == []
+    assert "channel.moderator.verdict.requested" in _advance(state_dir, writer)
+    assert project_channel(state_dir, CHANNEL_ID)["moderator_verdicts"][-1]["round"] == 2
 
 
-def test_verdict_conclude_enters_phase3_via_synthesis(state_dir: Path) -> None:
+@pytest.mark.parametrize("event_type", ["channel.route.blocked", "channel.relay.suppressed"])
+def test_round_with_explicit_route_rejection_does_not_wait_forever(
+    state_dir: Path, event_type: str,
+) -> None:
+    log = EventLog(state_dir / "events.jsonl")
+    _seed_phase2_moderated(log)
+    writer = EventWriter(log)
+    payload = {"channel_id": CHANNEL_ID, "thread_id": "main"}
+    writer.emit("channel.discussion.round.opened", actor="test", payload={
+        **payload, "round": 2, "message_id": "moderator-round-2",
+        "speakers": ["arch-1"],
+    })
+    assert _advance(state_dir, writer) == []
+    writer.emit(event_type, actor="router", payload={
+        **payload, "message_id": "moderator-round-2", "reason": "no_target",
+    })
+    assert "channel.moderator.verdict.requested" in _advance(state_dir, writer)
+
+
+@pytest.mark.parametrize("stale", [False, True])
+@pytest.mark.parametrize("continued", [False, True])
+def test_verdict_conclude_enters_phase3_via_synthesis(
+    state_dir: Path, stale: bool, continued: bool,
+) -> None:
     log = EventLog(state_dir / "events.jsonl")
     _seed_phase2_moderated(log)
     writer = EventWriter(EventLog(state_dir / 'events.jsonl'))
+    if continued:
+        payload = {"channel_id": CHANNEL_ID, "thread_id": "main"}
+        writer.emit("channel.synthesis.requested", actor="test", payload={
+            **payload, "request_id": "synth-prior", "target_member_id": "pm-1",
+        })
+        synthesis = writer.emit("channel.synthesis.proposed", actor="pm-1", payload={
+            **payload, "request_id": "synth-prior",
+        })
+        writer.emit("channel.discussion.continued", actor="test", payload={
+            **payload, "revision": 2, "synthesis_event_id": synthesis.id,
+            "synthesis_request_id": "synth-prior",
+        })
     _advance(state_dir, writer)
     channel = project_channel(state_dir, CHANNEL_ID)
     digest = moderator.round_ledger_digest(channel, "main", 1)
@@ -230,7 +324,29 @@ def test_verdict_conclude_enters_phase3_via_synthesis(state_dir: Path) -> None:
             "focus": "",
         },
     )
+    if stale:
+        writer.emit("channel.message.posted", actor="arch-1", correlation_id=CHANNEL_ID, payload={
+            "channel_id": CHANNEL_ID, "thread_id": "main", "message_id": "new-evidence",
+            "member_id": "arch-1", "text": "A new design contradiction needs resolution.",
+        })
     emitted = _advance(state_dir, writer)
+    if stale:
+        assert "channel.synthesis.requested" not in emitted
+        assert "channel.discussion.round.opened" not in emitted
+        assert "channel.moderator.verdict.requested" in emitted
+        assert _advance(state_dir, writer) == []
+        channel = project_channel(state_dir, CHANNEL_ID)
+        assert moderator.discussion_round(channel, "main") == 1
+        assert channel["moderator_verdicts"][-1]["ledger_digest"] != digest
+        fresh_digest = channel["moderator_verdicts"][-1]["ledger_digest"]
+        # A late result from the old snapshot cannot mask the fresh verdict.
+        for verdict_digest in (fresh_digest, digest):
+            writer.emit("channel.moderator.verdict.proposed", actor=moderator.MODERATOR_ACTOR, payload={
+                "channel_id": CHANNEL_ID, "thread_id": "main", "round": 1,
+                "ledger_digest": verdict_digest, "action": "conclude",
+            })
+        assert "channel.synthesis.requested" in _advance(state_dir, writer)
+        return
     assert "channel.synthesis.requested" in emitted
     assert "channel.discussion.phase.changed" in emitted
     channel = project_channel(state_dir, CHANNEL_ID)
@@ -352,7 +468,7 @@ def test_verdict_llm_failure_emits_deterministic_fallback(
         thread_id="main",
         request_event={
             "round": 1,
-            "ledger_digest": "x",
+            "ledger_digest": moderator.round_ledger_digest(project_channel(state_dir, CHANNEL_ID), "main", 1),
             "replies_used": 0,
             "budget_max_rounds": 20,
             "roster": ROSTER,
@@ -389,6 +505,39 @@ def test_classification_failure_falls_back_to_standard_budget(
     assert result["source"] == "fallback"
     channel = project_channel(state_dir, CHANNEL_ID)
     assert moderator.complexity_budget_max_rounds(channel, "main") > 0
+
+
+def test_moderator_receives_requirement_and_resolved_question_answers(
+    state_dir: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    log = EventLog(state_dir / "events.jsonl")
+    _seed_phase2_moderated(log)
+    writer = EventWriter(log)
+    channel = project_channel(state_dir, CHANNEL_ID)
+    channel["discussions"]["main"]["trigger"] = "explicit_discuss"
+    channel["open_questions"] = [{
+        "thread_id": "main", "question_id": "q-performance", "question": "测试环境如何确定？",
+        "status": "resolved", "resolution": "assumption",
+        "answer": "采用候选参考设备，实施阶段验证可用性并保存实测证据。",
+    }]
+    prompts = []
+
+    def turn(**kwargs):
+        prompts.append(kwargs["prompt"])
+        return {"complexity": "simple", "action": "conclude"}, ""
+
+    monkeypatch.setattr(moderator, "agent_json_turn", turn)
+    args = dict(state_dir=state_dir, writer=writer, channel=channel,
+                channel_id=CHANNEL_ID, thread_id="main")
+    moderator.run_complexity_classification(**args)
+    result = moderator.run_moderator_verdict(**args, request_event={
+        "round": 1, "roster": ROSTER, "trigger": "explicit_discuss",
+    })
+    assert result == {"ok": True, "action": "conclude"}
+    assert all("做一个 CLI todo 工具" in prompt for prompt in prompts)
+    assert all("explicit_discuss" not in prompt for prompt in prompts)
+    assert channel["open_questions"][0]["answer"] in prompts[-1]
+    assert '"resolution": "assumption"' in prompts[-1]
 
 
 def test_verdict_request_dispatches_through_run_once_l2_active(

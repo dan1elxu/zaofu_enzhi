@@ -46,6 +46,36 @@ def register(subparsers: argparse._SubParsersAction) -> None:
     status.add_argument("--state-dir", default=None)
     status.set_defaults(func=run_status)
 
+    retry = sub.add_parser("review-retry", help="Re-review an unchanged PRD after repairing a review failure")
+    retry.add_argument("channel_id")
+    retry.add_argument("--thread", default="main")
+    retry.add_argument("--consensus-event-id", required=True)
+    retry.add_argument("--reason", required=True)
+    retry.add_argument("--actor", default="operator")
+    retry.add_argument("--state-dir", default=None)
+    retry.set_defaults(func=run_review_retry)
+
+
+def run_review_retry(args: argparse.Namespace) -> int:
+    try:
+        context = resolve_project_context(explicit_state_dir=args.state_dir)
+    except ConfigError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+    payload = {
+        "channel_id": args.channel_id, "thread_id": args.thread,
+        "consensus_event_id": args.consensus_event_id, "reason": args.reason,
+    }
+    writer = EventWriter(event_log_from_project(context.state_dir, config=context.config))
+    requested = writer.emit("control.action.requested", actor=args.actor, payload=payload)
+    result = ControlledActionService(
+        context.state_dir, writer, config=context.config, actor=args.actor,
+        project_root=context.project_root, source="cli", surface="cli",
+    ).execute(action="channel-consensus-review-retry", requested_action="zf channel review-retry",
+              payload=payload, requested=requested)
+    print(json.dumps(result, ensure_ascii=False))
+    return 0 if result.get("ok") else 1
+
 
 def _root(args: argparse.Namespace) -> int:
     print("Usage: zf channel say <channel_id> --text ...", file=sys.stderr)

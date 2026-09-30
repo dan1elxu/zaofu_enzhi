@@ -53,13 +53,23 @@ def build_channel_provider_prompt(
             )
         )
     semantic_source_instruction = ""
-    if context_pack.get("semantic_source_required") is True:
+    if context_pack.get("semantic_source_stage") == "consensus_review":
+        semantic_source_instruction = (
+            "Read the complete canonical PRD in context_pack.semantic_source_documents. "
+            "Its ref and SHA256 were verified before dispatch. Review this version only; "
+            "earlier review failures are history, not findings about this version. "
+            "Return the canonical artifact_digest in channel_consensus_review."
+        )
+    elif context_pack.get("semantic_source_required") is True:
         semantic_source_instruction = (
             "Completion-critical source contract: read every full item in "
             "context_pack.semantic_source_documents. The manifest binds each "
             "member, round, message_id, body ref, and digest. Return exactly all "
             "semantic_source_required_digests in consumed_message_digests; "
             "missing or invented digests fail the turn."
+            " A prd_checkpoint is the full previous PRD; revise it using the original "
+            "requirement, subsequent source documents and complete question ledger. "
+            "Preserve settled requirements and record how material blockers were resolved."
         )
     write_policy = (
         member.get("write_policy")

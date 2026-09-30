@@ -1926,6 +1926,7 @@ def _apply_moderator_round(channel: dict[str, Any], event: ZfEvent, payload: dic
     channel["moderator_rounds"].append(redact_obj({
         "thread_id": _payload_str(payload, "thread_id") or "main",
         "round": _payload_int(payload.get("round"), 0),
+        "message_id": _payload_str(payload, "message_id"),
         "speakers": _string_list(payload.get("speakers")),
         "focus": _payload_str(payload, "focus"),
         "fallback": payload.get("fallback") is True,
@@ -2367,7 +2368,13 @@ def _apply_consensus(channel: dict[str, Any], event: ZfEvent, payload: dict[str,
             "event_id": event.id,
             "ts": event.ts,
         })
-        item["reopened"] = False
+        # A blocker received after the discussion already returned to phase 2
+        # belongs to that reopened round. Do not clear the phase-2 marker or
+        # the next synthesis tick will bounce back to relay again.
+        item["reopened"] = (
+            channel["discussions"].get(thread_id, {}).get("state")
+            == "phase2_relay"
+        )
         return
     if event.type == "channel.consensus.review.rejected":
         item.setdefault("review_rejections", []).append({
@@ -2522,6 +2529,8 @@ def _apply_contribution(
 def _apply_synthesis(channel: dict[str, Any], event: ZfEvent, payload: dict[str, Any]) -> None:
     item = {
         "event_id": event.id,
+        "ts": event.ts,
+        "request_id": _payload_str(payload, "request_id"),
         "thread_id": _payload_str(payload, "thread_id") or "main",
         "decision": _payload_str(payload, "decision"),
         "summary": _payload_str(payload, "summary"),

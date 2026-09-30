@@ -13,6 +13,8 @@ reply.requested events trigger a dispatch.
 
 from __future__ import annotations
 
+from tests.channel_dispatch_fixture import channel_dispatches
+
 from pathlib import Path
 
 import pytest
@@ -131,6 +133,7 @@ def _reply_requested_payload(*, target: str = TARGET_MEMBER_ID) -> dict:
 
 def test_raw_reply_requested_dispatches_to_target_backend(
     state_dir: Path, config: ZfConfig, transport: TmuxTransport,
+    channel_dispatches,
 ) -> None:
     """Operator raw-emits channel.agent.reply.requested → reactor handler
     calls dispatch_reply_request → channel.agent.reply.started is emitted
@@ -148,6 +151,7 @@ def test_raw_reply_requested_dispatches_to_target_backend(
     )
 
     decision = orch._on_channel_agent_reply_requested(requested)
+    channel_dispatches()
     assert decision is None
 
     started = [
@@ -167,6 +171,7 @@ def test_raw_reply_requested_dispatches_to_target_backend(
 
 def test_reply_requested_handler_is_idempotent_when_started_exists(
     state_dir: Path, config: ZfConfig, transport: TmuxTransport,
+    channel_dispatches,
 ) -> None:
     """If channel.agent.reply.started already exists for the same
     (channel_id, request_id) — which is what the inline router path
@@ -199,6 +204,7 @@ def test_reply_requested_handler_is_idempotent_when_started_exists(
     )
 
     orch._on_channel_agent_reply_requested(requested)
+    channel_dispatches()
 
     started = [
         e for e in log.read_all() if e.type == "channel.agent.reply.started"
@@ -217,6 +223,7 @@ def test_reply_requested_handler_is_idempotent_when_started_exists(
 
 def test_reply_requested_handler_skips_when_target_member_missing(
     state_dir: Path, config: ZfConfig, transport: TmuxTransport,
+    channel_dispatches,
 ) -> None:
     """If the target member is not in the channel, dispatch_reply_request
     skips (status_pending check fails because the projection has no reply
@@ -235,6 +242,7 @@ def test_reply_requested_handler_skips_when_target_member_missing(
 
     # Must not raise even though the target member is missing.
     decision = orch._on_channel_agent_reply_requested(requested)
+    channel_dispatches()
     assert decision is None
 
     started = [

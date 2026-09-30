@@ -22,6 +22,11 @@ from zf.runtime.control_actions_helpers import (
 
 
 class ChannelConsensusActionsMixin:
+    def _channel_consensus_review_retry(self, **kwargs) -> dict:
+        from zf.runtime.channel_consensus_retry import retry_consensus_review
+
+        return retry_consensus_review(self, **kwargs)
+
     def _channel_question_resolve(
         self,
         *,

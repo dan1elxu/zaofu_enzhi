@@ -357,6 +357,11 @@ def test_question_dedup_contract_only_allows_open_questions() -> None:
     assert "currently open ledger item" in prompt
     assert "Never use a resolved or merged question as a canonical target" in prompt
     assert "never merge across question statuses" in prompt
+    assert "cross_review_requests item MUST use" in prompt
+    assert '"target_member_ids"' in prompt
+    assert '"prompt"' in prompt
+    assert '"source_refs"' in prompt
+    assert "Do not use target_member_id, request, or evidence_refs" in prompt
 
 
 def test_consensus_review_prompt_pins_canonical_artifact_digest() -> None:

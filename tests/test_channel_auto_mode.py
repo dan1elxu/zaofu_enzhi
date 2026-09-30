@@ -3,8 +3,12 @@
 from __future__ import annotations
 
 import hashlib
+
+import pytest
 from types import SimpleNamespace
 from pathlib import Path
+
+from tests.channel_prd_fixture import persist_test_prd
 
 from zf.core.config.schema import (
     FanoutAggregateConfig,
@@ -203,21 +207,18 @@ def test_auto_chain_handlers_bind_the_orchestrator_host(
         seen.append((received_host, event.type))
 
     monkeypatch.setattr(channel_auto_chain, "react_channel_auto_question_event", _record)
-    monkeypatch.setattr(channel_auto_chain, "react_channel_consensus_reached", _record)
     registry = EventActionRegistry()
     channel_auto_chain.register_auto_chain_handlers(registry, host)
 
     question = writer.emit("channel.question.opened", correlation_id=CH)
     blocked = writer.emit("channel.consensus.blocked", correlation_id=CH)
-    consensus = writer.emit("channel.consensus.reached", correlation_id=CH)
     registry.resolve("channel.question.opened")[0].handler(question)
     registry.resolve("channel.consensus.blocked")[0].handler(blocked)
-    registry.resolve("channel.consensus.reached")[0].handler(consensus)
+    assert not registry.resolve("channel.consensus.reached")
 
     assert seen == [
         (host, "channel.question.opened"),
         (host, "channel.consensus.blocked"),
-        (host, "channel.consensus.reached"),
     ]
 
 
@@ -230,7 +231,8 @@ def test_auto_handoff_event_is_kernel_owned_even_with_layer2() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_auto_consensus_reached_without_human(tmp_path: Path) -> None:
+@pytest.mark.parametrize("readiness", ["ready", "needs_multi_lens", "needs_owner"])
+def test_auto_consensus_reached_without_human(tmp_path: Path, readiness: str) -> None:
     state_dir, writer = _writer(tmp_path)
     _auto_channel(writer, state_dir, tmp_path)
     writer.emit(
@@ -245,23 +247,28 @@ def test_auto_consensus_reached_without_human(tmp_path: Path) -> None:
             "source": "runtime",
         },
     )
+    artifact = persist_test_prd(state_dir, CH, verdict=readiness)
+    frozen_files = {
+        ref: (state_dir / ref).read_bytes()
+        for ref in (artifact["artifact_ref"], artifact["readiness_ref"], artifact["conclusion_ref"])
+    }
     _consensus(
         writer, "proposed", "pm-1",
-        artifact_ref="channels/ch-auto/prd/r1.json",
-        artifact_digest="d1", prd_ref="channels/ch-auto/prd/r1.json",
-        prd_digest="d1", prd_revision=1,
-        readiness_ref="channels/ch-auto/prd/r1-readiness.json",
-        readiness_digest="rd1", readiness_verdict="ready",
-        implementation_start=False,
+        **artifact,
         required_signers=["pm-1", "arch-1", "critic-1"],
         proposed_by="pm-1",
     )
     for member in ("pm-1", "arch-1", "critic-1"):
         _consensus(writer, "signed", member, member_id=member)
     advance_discussion(state_dir, writer, channel_id=CH, thread_id="main")
+    advance_discussion(state_dir, writer, channel_id=CH, thread_id="main")
     types = [event.type for event in _events(writer)]
-    assert "channel.consensus.reached" in types
+    assert types.count("channel.consensus.reached") == 1
     assert "channel.discussion.closed" in types
+    assert "task.created" not in types
+    assert "workflow.request.proposed" not in types
+    assert project_channel(state_dir, CH)["consensus"]["main"]["readiness_verdict"] == readiness
+    assert all((state_dir / ref).read_bytes() == body for ref, body in frozen_files.items())
 
 
 def test_non_auto_consensus_still_requires_human(tmp_path: Path) -> None:
@@ -681,7 +688,7 @@ def test_handoff_retries_once_with_gate_rejection_reason(tmp_path: Path, monkeyp
     assert "channel.auto_chain.completed" in types
 
 
-def test_handoff_fails_when_readiness_not_ready(tmp_path: Path, monkeypatch) -> None:
+def test_handoff_plans_task_with_confirmed_nonready_prd(tmp_path: Path, monkeypatch) -> None:
     state_dir, writer = _writer(tmp_path)
     _ready_auto_prd(tmp_path, writer, state_dir, readiness_verdict="needs_owner")
     monkeypatch.setattr(channel_auto_chain, "_agent_json_turn", _fake_handoff_turn)
@@ -691,12 +698,11 @@ def test_handoff_fails_when_readiness_not_ready(tmp_path: Path, monkeypatch) -> 
         project_root=tmp_path, channel_id=CH, thread_id="main",
         cause_event_id=cause.id,
     )
-    assert result["ok"] is False
-    failed = [
-        event for event in _events(writer)
-        if event.type == "channel.auto_chain.failed"
-    ]
-    assert failed and failed[-1].payload["status"] == "channel_prd_not_planning_authorized"
+    assert result["ok"] is True, result
+    task = TaskStore(state_dir / "kanban.json").get(result["task_id"])
+    assert task is not None
+    assert task.contract.evidence_contract["readiness_verdict"] == "needs_owner"
+    assert not any(event.type == "workflow.invoke.requested" for event in _events(writer))
 
 
 def test_handoff_skips_non_auto_channel(tmp_path: Path, monkeypatch) -> None:

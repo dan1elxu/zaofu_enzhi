@@ -15,6 +15,7 @@ import shutil
 import subprocess
 import threading
 import time
+import tomllib
 import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
@@ -73,9 +74,67 @@ def _headless_subprocess_env(extra_env: dict[str, str] | None = None) -> dict[st
             for marker in ("TOKEN", "PASSCODE", "SECRET", "ENCRYPT_KEY")
         ):
             env.pop(key, None)
+    _bypass_proxy_for_codex_base_urls(env)
     env[ZF_CLI_CMD_ENV] = _headless_zf_cli_cmd()
     env.update(extra_env or {})
     return env
+
+
+def _codex_base_url_hosts() -> list[str]:
+    """Collect hostnames from `base_url` entries in the Codex config."""
+    codex_home = Path(os.environ.get("CODEX_HOME") or (Path.home() / ".codex"))
+    config_path = codex_home / "config.toml"
+    try:
+        data = tomllib.loads(config_path.read_text(encoding="utf-8"))
+    except (OSError, tomllib.TOMLDecodeError, UnicodeDecodeError):
+        return []
+
+    hosts: list[str] = []
+
+    def scan(value: Any) -> None:
+        if isinstance(value, dict):
+            for key, item in value.items():
+                if key == "base_url" and isinstance(item, str):
+                    try:
+                        from urllib.parse import urlparse
+
+                        host = urlparse(item).hostname
+                    except ValueError:
+                        host = None
+                    if host and host not in hosts:
+                        hosts.append(host)
+                else:
+                    scan(item)
+        elif isinstance(value, list):
+            for item in value:
+                scan(item)
+
+    scan(data)
+    return hosts
+
+
+def _bypass_proxy_for_codex_base_urls(env: dict[str, str]) -> None:
+    """Ensure provider relay hosts bypass HTTP(S) proxies in child processes.
+
+    When the Web dashboard is launched from a shell that exports
+    HTTP(S)_PROXY without listing the CPA relay host in NO_PROXY, the Codex
+    app-server forwards relay requests through the corporate proxy, which
+    answers with `502 Bad Gateway`. Adding the configured `base_url` hosts to
+    NO_PROXY keeps relay traffic direct regardless of launch environment.
+    """
+    if not (env.get("HTTP_PROXY") or env.get("http_proxy")
+            or env.get("HTTPS_PROXY") or env.get("https_proxy")):
+        return
+    hosts = _codex_base_url_hosts()
+    if not hosts:
+        return
+    for key in ("NO_PROXY", "no_proxy"):
+        existing = [part.strip() for part in (env.get(key) or "").split(",") if part.strip()]
+        merged = list(existing)
+        for host in hosts:
+            if host not in merged:
+                merged.append(host)
+        env[key] = ",".join(merged)
 
 
 def _headless_zf_cli_cmd() -> str:
@@ -563,7 +622,7 @@ def _codex_security_config(permission_profile: str) -> dict[str, str]:
     return codex_security_config_for_profile(permission_profile)
 
 
-def _codex_sandbox_preflight_error(args: list[str], security: dict[str, str]) -> str:
+def _codex_sandbox_preflight_warning(args: list[str], security: dict[str, str]) -> str:
     sandbox = str(security.get("sandbox") or "")
     if sandbox == "danger-full-access":
         return ""
@@ -571,12 +630,15 @@ def _codex_sandbox_preflight_error(args: list[str], security: dict[str, str]) ->
         return ""
     if not args or Path(args[0]).name != "codex":
         return ""
-    unshare = shutil.which("unshare")
-    if not unshare:
+    # Codex sandboxes via bubblewrap, so probe bubblewrap itself. Probing
+    # `unshare` instead gives false negatives on hosts where user namespaces
+    # are restricted for unshare(1) but the setuid/bundled bwrap still works.
+    bwrap = shutil.which("bwrap")
+    if not bwrap:
         return ""
     try:
         probe = subprocess.run(
-            [unshare, "-n", "true"],
+            [bwrap, "--dev-bind", "/", "/", "true"],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
@@ -586,11 +648,13 @@ def _codex_sandbox_preflight_error(args: list[str], security: dict[str, str]) ->
     except Exception:
         return ""
     text = f"{probe.stdout}\n{probe.stderr}"
-    if probe.returncode == 0 or "operation not permitted" not in text.lower():
+    if probe.returncode == 0:
         return ""
     detail = _tail(text, limit=600)
-    return _codex_sandbox_error_with_hint(
-        f"Codex sandbox unsupported for sandbox={sandbox}: {detail}"
+    return (
+        f"Codex sandbox probe failed for sandbox={sandbox}: {detail}; "
+        "continuing with the requested sandbox and approval policy; "
+        "app-server errors will be reported by the provider turn"
     )
 
 
@@ -616,6 +680,23 @@ def _codex_failure_status(error: str) -> str:
     if _is_codex_timeout_error(error):
         return "timeout"
     return "failed"
+
+
+_TRANSIENT_PROVIDER_ERROR_MARKERS = (
+    "502",
+    "503",
+    "504",
+    "bad gateway",
+    "service unavailable",
+    "gateway timeout",
+    "timed out",
+    "timeout",
+)
+
+
+def _is_transient_provider_error(error: str) -> bool:
+    text = (error or "").lower()
+    return any(marker in text for marker in _TRANSIENT_PROVIDER_ERROR_MARKERS)
 
 
 def _codex_sandbox_error_with_hint(error: str) -> str:
@@ -733,20 +814,9 @@ class CodexHeadlessBackend:
     ) -> HeadlessTurnResult:
         args = self.build_args()
         security_config = _codex_security_config(permission_profile)
-        preflight_error = _codex_sandbox_preflight_error(args, security_config)
-        if preflight_error:
-            return HeadlessTurnResult(
-                ok=False,
-                status="sandbox_unsupported",
-                backend=self.backend_id,
-                thread_id=thread_id,
-                provider_session_id=provider_session_id,
-                reply="",
-                messages=[],
-                usage={},
-                resumed=bool(provider_session_id),
-                error=preflight_error,
-            )
+        preflight_warning = _codex_sandbox_preflight_warning(args, security_config)
+        if preflight_warning:
+            logger.warning("codex headless sandbox preflight: %s", preflight_warning)
         client = _CodexRpcClient(
             args,
             cwd=cwd,
@@ -1046,6 +1116,34 @@ class KanbanHeadlessAgent:
                 if retry.fallback_reason:
                     fallback_reason = retry.fallback_reason
                 result = replace(retry, fallback_reason=fallback_reason)
+            if (
+                retry_transport and result.status != "cancelled"
+                and not result.ok
+                and result.provider_session_id
+                and _is_transient_provider_error(result.error)
+            ):
+                retry_reason = result.fallback_reason or (
+                    f"transient provider error; resumed and retried: {result.error}"
+                )
+                retry = adapter.run_turn(
+                    prompt=prompt,
+                    cwd=self.project_root,
+                    system_prompt=self._system_prompt(permission_profile),
+                    thread_id=thread_id,
+                    provider_session_id=result.provider_session_id,
+                    on_session_id=pin,
+                    on_message=on_message,
+                    timeout_s=self.timeout_s,
+                    thinking_level=thinking_level,
+                    run_id=str(context.get("turn_id") or ""),
+                    run_thread_id=str(context.get("run_thread_id") or thread_key),
+                    project_id=str(context.get("project_id") or ""),
+                    conversation_id=str(context.get("conversation_id") or ""),
+                    permission_profile=permission_profile,
+                )
+                if retry.fallback_reason:
+                    retry_reason = retry.fallback_reason
+                result = replace(retry, fallback_reason=retry_reason)
             final_snapshot = snapshot_with_provider_session(
                 base_snapshot,
                 result.provider_session_id,

@@ -26,8 +26,10 @@ from zf.core.verification.evidence import (
     build_done_evidence_payload,
     validate_terminal_done_evidence,
 )
-from zf.runtime.channel_adapter import dispatch_reply_request
-from zf.runtime.channel_message_ingress import route_reactor_message_after_ingress
+from zf.runtime.channel_message_ingress import (
+    dispatch_channel_replies_background,
+    route_reactor_message_after_ingress,
+)
 from zf.runtime.channel_synthesis_reactor import (
     react_channel_consensus_proposed,
     react_channel_cross_review_requested,
@@ -5903,7 +5905,7 @@ class EventReactorMixin(OrchestratorAgentReactorMixin, DurableCallWorkflowMixin)
         is idempotent against the folded projection, so double invocation via
         the inline router path is a no-op.
         """
-        if event.actor in {"orchestrator-reactor", "channel-discussion"}:
+        if event.actor == "channel-discussion":
             return None
         payload = event.payload if isinstance(event.payload, dict) else {}
         channel_id = str(payload.get("channel_id") or event.correlation_id or "")
@@ -5968,13 +5970,7 @@ class EventReactorMixin(OrchestratorAgentReactorMixin, DurableCallWorkflowMixin)
         return self._on_channel_discussion_event(event)
 
     def _on_channel_agent_reply_requested(self, event: ZfEvent) -> WorkflowRuntimeDecision | None:
-        """Raw `zf emit channel.agent.reply.requested` dispatches to the
-        target member's backend via `dispatch_reply_request`. The inline
-        router path (`route_channel_message` → `dispatch_reply_request`)
-        already emits `channel.agent.reply.started` before this handler
-        sees the event, so the started-event idempotency check keeps the
-        handler a no-op on that path and only fires on raw operator emits.
-        """
+        """Dispatch durable requests without waiting for providers in the watcher."""
         if event.actor == "orchestrator-reactor":
             return None
         payload = event.payload if isinstance(event.payload, dict) else {}
@@ -5997,11 +5993,10 @@ class EventReactorMixin(OrchestratorAgentReactorMixin, DurableCallWorkflowMixin)
                 and _reply_run_generation(prior_payload) >= requested_generation
             ):
                 return None
-        dispatch_reply_request(
+        dispatch_channel_replies_background(
             state_dir=self.state_dir,
-            writer=self.event_writer,
             channel_id=channel_id,
-            request_id=request_id,
+            max_dispatch=64,
             actor="orchestrator-reactor",
             source="runtime",
             project_root=getattr(self, "project_root", None),
@@ -6026,11 +6021,10 @@ class EventReactorMixin(OrchestratorAgentReactorMixin, DurableCallWorkflowMixin)
             return
 
         def _dispatch(channel_id: str, request_id: str) -> None:
-            dispatch_reply_request(
+            dispatch_channel_replies_background(
                 state_dir=self.state_dir,
-                writer=self.event_writer,
                 channel_id=channel_id,
-                request_id=request_id,
+                max_dispatch=64,
                 actor="orchestrator-remediation",
                 source="runtime",
                 project_root=getattr(self, "project_root", None),

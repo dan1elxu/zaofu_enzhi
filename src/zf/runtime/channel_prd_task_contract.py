@@ -33,7 +33,7 @@ def compile_channel_prd_task_payload(
     state_dir: Path,
     payload: dict[str, Any],
 ) -> dict[str, Any]:
-    """Return a Task payload bound to one ready, immutable Channel PRD.
+    """Return a Task payload bound to one confirmed, immutable Channel PRD.
 
     The compiler preserves product facts already present in the PRD. It does
     not invent implementation file ownership; the delivery planner owns that
@@ -57,15 +57,6 @@ def compile_channel_prd_task_payload(
             "Channel PRD has no synthesis matching the confirmed artifact"
         )
 
-    readiness_verdict = str(
-        synthesis.get("readiness_verdict")
-        or consensus.get("readiness_verdict")
-        or "unassessed"
-    ).strip()
-    implementation_start = synthesis.get(
-        "implementation_start",
-        consensus.get("implementation_start"),
-    )
     readiness_ref = str(synthesis.get("readiness_ref") or "").strip()
     readiness_digest = _bare_digest(synthesis.get("readiness_digest"))
     risk_accepted = owner_readiness_risk_accepted(
@@ -73,17 +64,9 @@ def compile_channel_prd_task_payload(
         readiness_ref=readiness_ref,
         readiness_digest=readiness_digest,
     )
-    if not channel_prd_planning_authorized(
-        readiness_verdict=readiness_verdict,
-        risk_accepted=risk_accepted,
-    ):
+    if not channel_prd_planning_authorized(consensus=consensus):
         raise ChannelPrdTaskContractError(
-            "Channel PRD is not ready for Task planning: "
-            f"readiness_verdict={readiness_verdict!r}"
-        )
-    if _string_items(synthesis.get("open_questions")):
-        raise ChannelPrdTaskContractError(
-            "Channel PRD still has unresolved open questions"
+            "Channel PRD requires current confirmed consensus for Task planning"
         )
 
     source_ref = str(authority.get("source_ref") or "").strip()
@@ -115,17 +98,10 @@ def compile_channel_prd_task_payload(
         authority=authority,
         label="Channel PRD readiness",
     )
-    if not channel_prd_planning_authorized(
-        readiness_verdict=readiness_payload.get("verdict"),
-        risk_accepted=risk_accepted,
-    ):
-        raise ChannelPrdTaskContractError(
-            "Channel PRD readiness artifact does not authorize Task planning"
-        )
-    if _string_items(readiness_payload.get("gaps")) and not risk_accepted:
-        raise ChannelPrdTaskContractError(
-            "Channel PRD readiness artifact still contains blocking gaps"
-        )
+    # Preserve the frozen execution evidence. Historical synthesis questions
+    # and readiness gaps do not revoke the later consensus that permits planning.
+    readiness_verdict = str(readiness_payload.get("verdict") or "unassessed").strip()
+    implementation_start = readiness_payload.get("implementation_start")
 
     prd_body = (
         prd_payload.get("body")

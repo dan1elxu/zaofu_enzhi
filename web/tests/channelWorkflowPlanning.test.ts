@@ -50,8 +50,27 @@ const detail = {
 } as ChannelDetail;
 
 const canonical = canonicalChannelPrd(detail);
+assert(canonical.canonical, "frozen PRD should be canonical");
 assert(canonical.ready, "canonical PRD should be ready");
 assertEqual(canonical.synthesisEventId, "evt-synthesis", "synthesis id");
+
+const historicalOpenQuestions = {
+  ...detail,
+  syntheses: [{ ...detail.syntheses?.[0], open_questions: ["q-historical"] }],
+} as ChannelDetail;
+assert(canonicalChannelPrd(historicalOpenQuestions).canonical, "historical questions must not hide a confirmed PRD");
+assert(canonicalChannelPrd(historicalOpenQuestions).ready, "confirmed PRD permits planning despite historical questions");
+assert(buildChannelWorkflowPlanningRequest({
+  channelId: "ch-prd", detail: historicalOpenQuestions, objective: "", taskId: "",
+}), "confirmed PRD must produce a Task planning request");
+for (const pendingConsensus of [{ revision_pending: true }, { blocked: ["critic"] }]) {
+  const pending = {
+    ...detail,
+    consensus: { main: { ...detail.consensus?.main, ...pendingConsensus } },
+  } as ChannelDetail;
+  assert(!canonicalChannelPrd(pending).canonical, "pending consensus must not appear frozen");
+  assert(!canonicalChannelPrd(pending).ready, "pending consensus must block planning");
+}
 
 const request = buildChannelWorkflowPlanningRequest({
   channelId: "ch-prd",
@@ -122,6 +141,7 @@ const unresolved = {
   },
 } as ChannelDetail;
 assert(!canonicalChannelPrd(unresolved).ready, "unresolved consensus should not be canonical");
+assert(!canonicalChannelPrd(unresolved).canonical, "draft must not be shown as frozen");
 assertEqual(buildChannelWorkflowPlanningRequest({
   channelId: "ch-prd",
   detail: unresolved,
@@ -136,6 +156,17 @@ const implementationBlocked = {
     implementation_start: false,
   }],
 } as ChannelDetail;
+const awaitingImplementationReview = {
+  ...detail,
+  syntheses: [{ ...detail.syntheses?.[0], readiness_verdict: "needs_multi_lens", implementation_start: false }],
+  consensus: { main: { ...detail.consensus?.main, readiness_verdict: "needs_multi_lens", implementation_start: false } },
+} as ChannelDetail;
+assert(canonicalChannelPrd(awaitingImplementationReview).canonical, "signed PRD stays canonical with historical readiness gaps");
+assert(canonicalChannelPrd(awaitingImplementationReview).ready, "confirmed PRD authorizes planning independently of execution readiness");
+assert(buildChannelWorkflowPlanningRequest({
+  channelId: "ch-prd", detail: awaitingImplementationReview, objective: "", taskId: "",
+}), "readiness review must not block Task planning");
+assert(!canonicalChannelPrd(awaitingImplementationReview).implementationStart, "planning must preserve execution readiness");
 assert(
   canonicalChannelPrd(implementationBlocked).ready,
   "implementation_start=false should still allow Task/workflow planning",
@@ -190,8 +221,8 @@ const mismatchedOwnerAcceptance = {
   },
 } as ChannelDetail;
 assert(
-  !canonicalChannelPrd(mismatchedOwnerAcceptance).ready,
-  "a risk acceptance for another readiness artifact must not authorize planning",
+  canonicalChannelPrd(mismatchedOwnerAcceptance).ready,
+  "planning relies on current consensus without requiring execution risk acceptance",
 );
 
 assertEqual(resolveChannelWorkflowBackend({

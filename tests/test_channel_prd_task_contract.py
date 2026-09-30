@@ -3,6 +3,8 @@ from __future__ import annotations
 import hashlib
 from pathlib import Path
 
+import pytest
+
 from zf.core.config.schema import ProjectConfig, ZfConfig
 from zf.core.events import EventLog, EventWriter
 from zf.core.task.contract_validation import validate_task_contract
@@ -13,6 +15,7 @@ from zf.runtime.channel_contract_artifacts import (
     persist_channel_prd_readiness,
 )
 from zf.runtime.channel_reply_prompt import channel_reply_response_contract
+from zf.runtime.channel_readiness import channel_task_execution_authorization_error
 from zf.runtime.control_actions import ControlledActionService
 from zf.runtime.task_contract_snapshot import build_task_contract_snapshot
 from zf.web.proposal_extraction import default_validate_payload
@@ -44,6 +47,7 @@ def _ready_prd_fixture(
     readiness_verdict: str = "ready",
     readiness_gaps: list[str] | None = None,
     risk_accepted: bool = False,
+    open_questions: list[str] | None = None,
 ) -> tuple[Path, EventWriter, ControlledActionService, dict[str, object]]:
     state_dir = tmp_path / ".zf"
     state_dir.mkdir()
@@ -107,6 +111,7 @@ def _ready_prd_fixture(
     )
     semantic = {
         "summary": "Implement strict JSON output from the confirmed PRD.",
+        "open_questions": list(open_questions or []),
         "acceptance_criteria": [
             {
                 "id": "AC-01",
@@ -186,7 +191,8 @@ def _ready_prd_fixture(
         "channel.synthesis.proposed",
         actor="leader-1",
         correlation_id="ch-prd-task",
-        payload={**artifact_payload, "summary": semantic["summary"]},
+        payload={**artifact_payload, "summary": semantic["summary"],
+                 "open_questions": list(open_questions or [])},
     )
     writer.emit(
         "channel.consensus.proposed",
@@ -318,6 +324,50 @@ def test_plan_ready_channel_prd_can_create_task_without_implementation_start(
     assert evidence["readiness_verdict"] == "ready"
     assert evidence["implementation_start"] is False
     assert evidence["declared_implementation_start"] is False
+
+
+@pytest.mark.parametrize("verdict", ["needs_multi_lens", "needs_owner"])
+def test_confirmed_prd_creates_task_despite_historical_readiness_and_questions(
+    tmp_path: Path, verdict: str,
+) -> None:
+    state_dir, writer, service, authority = _ready_prd_fixture(
+        tmp_path, implementation_start=False, readiness_verdict=verdict,
+        readiness_gaps=["Historical review gap."],
+        open_questions=["Historical question resolved before consensus."],
+    )
+    result = _execute(service, writer, "create-task", _task_payload(authority))
+    assert result["ok"] is True, result
+    task = TaskStore(state_dir / "kanban.json").get("TASK-CHANNEL-PRD")
+    assert task is not None
+    assert task.contract.source_ref == authority["source_ref"]
+    assert task.contract.evidence_contract["readiness_verdict"] == verdict
+    assert task.contract.evidence_contract["readiness_risk_accepted"] is False
+    assert task.contract.evidence_contract["implementation_start"] is False
+    assert channel_task_execution_authorization_error(task)
+    assert not any(event.type == "workflow.invoke.requested" for event in writer.event_log.read_all())
+
+
+@pytest.mark.parametrize("invalid", ["blocked", "digest_mismatch", "readiness_tampered"])
+def test_planning_still_requires_current_consensus_and_matching_artifacts(
+    tmp_path: Path, invalid: str,
+) -> None:
+    state_dir, writer, service, authority = _ready_prd_fixture(
+        tmp_path, implementation_start=False, readiness_verdict="needs_multi_lens",
+    )
+    if invalid == "blocked":
+        writer.emit("channel.consensus.blocked", actor="leader-1", payload={
+            "channel_id": "ch-prd-task", "thread_id": "main", "member_id": "leader-1",
+            "blocker_question": "New requirement changes the confirmed scope.",
+        })
+    elif invalid == "digest_mismatch":
+        authority["source_digest"] = "0" * 64
+    else:
+        reached = next(e for e in writer.event_log.read_all() if e.type == "channel.consensus.reached")
+        (state_dir / reached.payload["readiness_ref"]).write_text("{}", encoding="utf-8")
+    result = _execute(service, writer, "create-task", _task_payload(authority))
+    assert result["ok"] is False
+    assert result["status"] == "channel_prd_not_ready"
+    assert TaskStore(state_dir / "kanban.json").list_all() == []
 
 
 def test_ready_channel_prd_compiles_strict_workflow_parent_contract(

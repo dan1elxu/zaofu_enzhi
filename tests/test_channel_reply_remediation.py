@@ -8,6 +8,8 @@ reactor guard, and the orchestrator tick wiring.
 """
 from __future__ import annotations
 
+from tests.channel_dispatch_fixture import channel_dispatches
+
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import time
@@ -408,6 +410,7 @@ def _seed_channel(log: EventLog) -> None:
 
 def test_reactor_guard_allows_higher_generation_redispatch(
     state_dir: Path, orch: Orchestrator,
+    channel_dispatches,
 ) -> None:
     log = EventLog(state_dir / "events.jsonl")
     _seed_channel(log)
@@ -428,6 +431,7 @@ def test_reactor_guard_allows_higher_generation_redispatch(
         },
     )
     orch._on_channel_agent_reply_requested(requested_gen2)
+    channel_dispatches()
     started = [e for e in log.read_all()
                if e.type == "channel.agent.reply.started"
                and e.payload.get("request_id") == REQ]
@@ -465,6 +469,7 @@ def test_reactor_guard_still_dedups_same_generation(
 
 def test_tick_housekeeping_self_heals_failed_reply(
     state_dir: Path, orch: Orchestrator,
+    channel_dispatches,
 ) -> None:
     """End-to-end Tier-1: a failed reply on the ledger + one housekeeping
     tick → remediation re-emits requested (gen 2) and the immediate
@@ -477,6 +482,7 @@ def test_tick_housekeeping_self_heals_failed_reply(
     log.append(_evt("channel.agent.reply.failed", age=980, reason="crash"))
 
     orch._check_channel_reply_remediation()
+    channel_dispatches()
 
     events = log.read_all()
     redispatched = [e for e in events
@@ -493,6 +499,7 @@ def test_tick_housekeeping_self_heals_failed_reply(
 def test_invalid_contribution_self_heals_and_advances_discussion(
     state_dir: Path,
     orch: Orchestrator,
+    channel_dispatches,
 ) -> None:
     """Transport success plus invalid semantics must retry without an operator."""
 
@@ -549,6 +556,7 @@ def test_invalid_contribution_self_heals_and_advances_discussion(
     )
 
     orch.run_once(events=[failed])
+    channel_dispatches()
 
     events = log.read_all()
     generation_two = next(

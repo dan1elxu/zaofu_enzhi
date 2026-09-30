@@ -10,7 +10,7 @@ from typing import Any
 from zf.core.events import EventWriter
 from zf.runtime.channel_digest_key import digest_key
 from zf.runtime.channel_sidecar import hydrate_channel_message_text
-from zf.runtime.sidecar_refs import SidecarRefError
+from zf.runtime.sidecar_refs import SidecarRefError, hydrate_sidecar_ref
 
 
 SEMANTIC_SOURCE_SCHEMA_VERSION = "channel.semantic_sources.v1"
@@ -89,7 +89,7 @@ def build_semantic_source_bundle(
     stage = semantic_stage(trigger.get("refs"))
     session = _discussion_session(channel, thread_id)
     requirement_message_id = str(session.get("requirement_message_id") or "")
-    required = bool(stage and requirement_message_id)
+    required = stage == "consensus_review" or bool(stage and requirement_message_id)
     empty = {
         "schema_version": SEMANTIC_SOURCE_SCHEMA_VERSION,
         "required": required,
@@ -105,6 +105,26 @@ def build_semantic_source_bundle(
     }
     if not required:
         return empty
+
+    if stage == "consensus_review":
+        try:
+            document = _artifact_document(
+                state_dir, trigger.get("refs") or {}, kind="consensus_artifact",
+            )
+        except SidecarRefError as exc:
+            return {**empty, "complete": False, "reason": f"consensus_artifact:{exc.code}"}
+        source_chars = len(document["content"])
+        error = (
+            f"semantic_source_budget_exceeded:{source_chars}>{max_source_chars}"
+            if source_chars > max_source_chars else ""
+        )
+        manifest = [{key: value for key, value in document.items() if key != "content"}]
+        return {
+            **empty, "complete": not error, "reason": error,
+            "manifest": manifest, "manifest_digest": _stable_digest(manifest),
+            "required_message_digests": [document["message_body_digest"]],
+            "documents": [document] if not error else [], "source_chars": source_chars,
+        }
 
     thread_messages = [
         item
@@ -135,7 +155,32 @@ def build_semantic_source_bundle(
     errors: list[str] = []
     source_chars = 0
 
-    for message in thread_messages[start:end]:
+    # A revision consumes the last accepted PRD and the delta since its input
+    # snapshot. Keep concurrent messages posted while that synthesis ran.
+    checkpoint = next((
+        item for item in reversed(_dict_rows(channel.get("syntheses")))
+        if stage == "synthesis"
+        and str(item.get("thread_id") or "main") == thread_id
+        and int(item.get("prd_revision") or 0) > 0
+        and str(session.get("started_at") or "") <= str(item.get("ts") or "")
+        < str(trigger.get("ts") or "")
+    ), {})
+    checkpoint_start = next((
+        index for index, message in enumerate(thread_messages[start:end], start)
+        if checkpoint.get("request_id")
+        and (message.get("refs") or {}).get("synthesis_request_id")
+        == checkpoint["request_id"]
+    ), None)
+    if checkpoint:
+        try:
+            document = _artifact_document(state_dir, checkpoint, kind="prd_checkpoint")
+            manifest.append({key: value for key, value in document.items() if key != "content"})
+            documents.append(document)
+            source_chars += len(document["content"])
+        except SidecarRefError as exc:
+            errors.append(f"prd_checkpoint:{exc.code}")
+
+    for position, message in enumerate(thread_messages[start:end], start):
         if not _is_semantic_source_message(
             message,
             requirement_message_id=requirement_message_id,
@@ -148,6 +193,10 @@ def build_semantic_source_bundle(
             reply_requests=reply_requests,
             messages_by_id=messages_by_id,
         )
+        if checkpoint_start is not None and kind != "requirement" and (
+            position <= checkpoint_start or kind == "synthesis_attempt"
+        ):
+            continue
         counters[kind] = counters.get(kind, 0) + 1
         round_id = (
             "requirement"
@@ -214,6 +263,27 @@ def build_semantic_source_bundle(
     }
 
 
+def _artifact_document(
+    state_dir: Path | None, refs: dict[str, Any], *, kind: str,
+) -> dict[str, Any]:
+    digest = str(refs.get("artifact_digest") or "").removeprefix("sha256:")
+    if state_dir is None or not digest:
+        raise SidecarRefError("binding_missing", "artifact state directory and digest are required")
+    artifact = hydrate_sidecar_ref(Path(state_dir), {
+        "ref": str(refs.get("artifact_ref") or ""), "sha256": digest,
+    })
+    content = (
+        artifact.payload if isinstance(artifact.payload, str)
+        else json.dumps(artifact.payload, ensure_ascii=False)
+    )
+    return {
+        "message_id": "", "event_id": str(refs.get("event_id") or ""),
+        "member_id": "", "role": "artifact", "round": kind, "kind": kind,
+        "message_body_ref": artifact.ref, "message_body_digest": artifact.sha256,
+        "message_body_byte_count": artifact.byte_count, "content": content,
+    }
+
+
 def validate_semantic_source_coverage(
     channel: dict[str, Any],
     request: dict[str, Any],
@@ -264,6 +334,8 @@ def validate_semantic_source_coverage(
 
 def semantic_stage(refs: object) -> str:
     refs = refs if isinstance(refs, dict) else {}
+    if refs.get("consensus_review_id"):
+        return "consensus_review"
     if refs.get("cross_review_request_id"):
         return "cross_review"
     if refs.get("synthesis_request_id"):

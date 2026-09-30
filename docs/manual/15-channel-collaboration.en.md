@@ -3,7 +3,7 @@
 [中文](15-channel-collaboration.md) · [Shortest Channel-to-PRD path](workflows/channel-to-prd.en.md)
 
 > For operators who want people and multiple agents to discuss requirements,
-> produce an Owner-confirmed PRD, and continue through Web, Kanban Agent, or
+> produce a PRD frozen under Owner authorization, and continue through Web, Kanban Agent, or
 > Feishu.
 >
 > Current as of 2026-08-03 against code and tests.
@@ -48,17 +48,23 @@ Channel and Workflow are separate state machines:
 - only a controlled Task/Workflow proposal approved by a human enters Kernel Workflow;
 - Delivery receipts return read-only and do not let Channel own runtime state.
 
-## 3. Three Product Modes
+## 3. Four Product Modes
 
 | Mode | Default trigger | Use case | Engine mapping |
 |---|---|---|---|
 | `conversation` | Default after creation | Natural chat, targeted mentions, continued discussion | `manual_mention` |
 | `clarification` | Explicit selection or template | Resolve open questions and missing decisions | `mention_relay` |
 | `multi_lens` | Explicit Discuss | Independent views, relay/critique, and synthesis | `fanout_then_synthesis` |
+| `auto` | Explicit authorization in the creation Plan | Automatic questions, full review, and PRD freeze; independent planning after freeze | `multi_lens` + auto |
 
 Engine mappings are compatibility details, not additional product modes.
 `max_rounds` bounds explicit discussion; it does not make `conversation` wake
 every member automatically.
+
+The `auto` template or `discussion_mode=auto` reuses `multi_lens` with upfront
+Owner authorization in the creation Plan, automatic question resolution, full
+review, and PRD freeze. The automatic discussion chain ends at freeze;
+Task/Workflow planning remains separate.
 
 ## 4. Built-In Templates
 
@@ -186,7 +192,8 @@ conversation / clarification / multi_lens
   -> explicit Finalize
   -> PRD draft artifact
   -> Continue | Revise | Owner confirm
-  -> channel.consensus.reached(ref, digest, revision)
+  -> channel.consensus.reached (internal consensus)
+  -> channel.prd.frozen(ref, digest, revision)
   -> exact-origin PRD receipt
 ```
 
@@ -195,14 +202,32 @@ Required invariants:
 - the complete PRD body lives in a sanctioned artifact/sidecar;
 - events carry identity, revision, digest, preview/ref, and causation;
 - revision updates use currentness/CAS so an old revision cannot replace a newer confirmed result;
-- only Owner confirm creates the canonical PRD;
+- normal modes require Owner confirm for freeze; `auto` uses approval of the
+  `channel-create-and-start` Plan as upfront authorization for this discussion
+  and freeze, while full-roster signatures and other mechanical gates still apply;
+- `channel.consensus.reached` is the internal pre-freeze consensus event;
+  the following `channel.prd.frozen` occurrence is the immutable canonical PRD
+  handoff and the evaluation entry point;
 - the receipt returns to the exact origin and remains retryable without duplicate confirmation;
 - synthesis, an agent claim, or majority opinion does not replace Owner confirmation.
 
+Every mode hands the same frozen material to independent evaluation through
+`channel.prd.frozen`: the main Judge classifies the task, and three isolated
+subagents use versioned role.md rules for PRD fidelity, discussion effectiveness,
+and each Agent's contribution. The main Judge only summarizes and cannot change
+scores. Each Agent's finding also states required, optional, or not needed, with
+missing evidence marked explicitly. `report.md` stays concise; complete packets,
+rule versions/digests, and raw judgments live in audit files beside it, and new
+evaluation versions retain prior reports. Readiness gates later planning, not
+evaluation. See [PRD Evaluation implementation](../impl/prd-evaluation-implementation.md).
+
 ## 8. Handoff From PRD To Workflow
 
+After a normal or auto Channel freezes a PRD, Task/Workflow delivery uses this
+separate planning and approval path:
+
 ```text
-confirmed PRD
+frozen canonical PRD
   -> existing Task
      or Create Task proposal -> human confirm
   -> Task-bound Workflow Plan
@@ -267,12 +292,15 @@ Check:
 - no unexpected fanout in conversation mode;
 - member, round, budget, and terminal refs for a Discuss operation;
 - PRD draft/confirmed revision, digest, and exact-origin receipt;
+- presence of `channel.prd.frozen`, evaluation triggered from that occurrence,
+  and the concise `report.md` plus audit sidecars;
 - exact-Leader handoff followed by independent Approve;
 - idempotent provider failure, retry, and result receipt;
 - fail-closed behavior for a missing required sidecar.
 
 ## Definition Of Done
 
-A Channel is complete when it remains interactive, the Owner-confirmed PRD is
-traceable, and the source receipt succeeds. Software delivery completion belongs
-to Task, Workflow, Run, and Delivery, not Channel synthesis.
+A Channel is complete when it remains interactive, the PRD frozen under
+per-revision Owner confirmation or upfront auto authorization is traceable, and
+the source receipt succeeds. Software delivery completion belongs to Task,
+Workflow, Run, and Delivery, not Channel synthesis.

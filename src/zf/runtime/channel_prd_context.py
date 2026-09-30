@@ -41,7 +41,7 @@ def canonical_channel_prd_context(
             reached_event_id = str(
                 consensus.get("reached_event_id") or ""
             ).strip()
-            if not artifact_ref or not artifact_digest or not reached_event_id:
+            if not channel_prd_planning_authorized(consensus=consensus):
                 continue
             synthesis = next(
                 (
@@ -75,11 +75,6 @@ def canonical_channel_prd_context(
                 readiness_ref=readiness_ref,
                 readiness_digest=readiness_digest,
             )
-            if not channel_prd_planning_authorized(
-                readiness_verdict=readiness_verdict,
-                risk_accepted=risk_accepted,
-            ):
-                continue
             source_refs = list(dict.fromkeys([
                 *(
                     str(item).strip()
@@ -121,6 +116,7 @@ def canonical_channel_prd_context(
                 "readiness_ref": readiness_ref,
                 "readiness_digest": readiness_digest,
                 "readiness_verdict": readiness_verdict,
+                "planning_authorized": True,
                 "implementation_start": implementation_start is True,
                 "declared_implementation_start": (
                     implementation_start is True
@@ -153,7 +149,7 @@ def canonical_channel_prd_authority(
     channel_id: str,
     thread_id: str = "main",
 ) -> dict[str, Any]:
-    """Return the exact mechanical authority for one ready canonical PRD."""
+    """Return the exact planning authority for one confirmed canonical PRD."""
 
     normalized_thread = str(thread_id or "main")
     ready = canonical_channel_prd_context(Path(state_dir), limit=20)
@@ -174,6 +170,8 @@ def canonical_channel_prd_authority(
         else None
     )
     if item is None or not isinstance(consensus, dict):
+        return {}
+    if not item["planning_authorized"]:
         return {}
     try:
         leader_revision = int(channel.get("leader_revision") or 0)

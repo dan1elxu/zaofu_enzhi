@@ -199,6 +199,9 @@ def test_claude_auth_probe_summarizes_logged_out_json(monkeypatch):
 
 
 def test_codex_headless_uses_codex_cli_auth_probe(monkeypatch):
+    # Keep this CLI-probe regression independent of a host's configured CPA
+    # relay credential; relay readiness has its own focused tests below.
+    monkeypatch.delenv("CPA_API_KEY", raising=False)
     monkeypatch.setattr("zf.runtime.preflight.shutil.which", lambda command: command)
     monkeypatch.setattr(
         "zf.runtime.preflight.subprocess.run",

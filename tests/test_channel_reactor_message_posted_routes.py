@@ -39,6 +39,17 @@ from zf.runtime.transport import TmuxTransport
 CHANNEL_ID = "ch-zaofu"
 
 
+@pytest.fixture(autouse=True)
+def isolate_provider_dispatch(monkeypatch) -> None:
+    # These tests exercise routing ownership, not installed provider CLIs.
+    monkeypatch.setattr(
+        "zf.runtime.channel_router.dispatch_reply_request", lambda **kwargs: None,
+    )
+    monkeypatch.setattr(
+        "zf.runtime.channel_message_ingress.dispatch_channel_replies_background", lambda **kwargs: None,
+    )
+
+
 @pytest.fixture
 def state_dir(tmp_path: Path) -> Path:
     sd = tmp_path / ".zf"

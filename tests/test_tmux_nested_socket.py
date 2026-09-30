@@ -60,6 +60,7 @@ def test_create_session_refreshes_provider_env_without_logging_values(
         return subprocess.CompletedProcess(args, 0, stdout=stdout, stderr="")
 
     monkeypatch.setenv("ANTHROPIC_API_KEY", "provider-secret-value")
+    monkeypatch.setenv("CPA_API_KEY", "cpa-secret-value")
     monkeypatch.setattr("zf.runtime.tmux.subprocess.run", fake_run)
     session = TmuxSession(session_name="zf-provider-env")
 
@@ -68,5 +69,7 @@ def test_create_session_refreshes_provider_env_without_logging_values(
     set_call = next(args for args in calls if args[1] == "set-option")
     new_session_call = next(args for args in calls if args[1] == "new-session")
     assert "ANTHROPIC_API_KEY" in set_call[-1]
+    assert "CPA_API_KEY" in set_call[-1]
     assert calls.index(set_call) < calls.index(new_session_call)
     assert all("provider-secret-value" not in command for command in session.command_log)
+    assert all("cpa-secret-value" not in command for command in session.command_log)

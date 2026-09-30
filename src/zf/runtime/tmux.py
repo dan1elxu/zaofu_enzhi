@@ -37,6 +37,9 @@ _PROVIDER_UPDATE_ENV_KEYS = (
     "OPENAI_API_KEY",
     "OPENAI_BASE_URL",
     "OPENAI_ORG_ID",
+    # CPA relay credentials are provider-scoped and must reach panes through
+    # tmux's environment refresh path. Keep them out of pane command lines.
+    "CPA_API_KEY",
     "HTTP_PROXY",
     "HTTPS_PROXY",
     "NO_PROXY",

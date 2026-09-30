@@ -287,6 +287,8 @@ def _probe_provider_auth(backend: str) -> tuple[bool, str]:
         relay_ready = _codex_relay_authentication_ready()
         if relay_ready:
             return True, relay_ready
+        if str(os.environ.get("CPA_API_KEY") or "").strip():
+            return True, "CPA credential configured via CPA_API_KEY"
     try:
         result = subprocess.run(
             command,

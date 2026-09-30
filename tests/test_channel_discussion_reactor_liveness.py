@@ -21,6 +21,7 @@ from pathlib import Path
 
 import pytest
 
+from tests.channel_dispatch_fixture import channel_dispatches
 from zf.core.config.schema import (
     ProjectConfig,
     RoleConfig,
@@ -424,6 +425,7 @@ def test_non_final_reply_completed_does_not_advance(
 
 def test_synthesis_request_dispatches_live_through_layer2_kernel_path(
     state_dir: Path, config: ZfConfig, transport: TmuxTransport,
+    channel_dispatches,
 ) -> None:
     """A taskless synthesis request is a mechanical Channel side effect.
 
@@ -470,6 +472,7 @@ def test_synthesis_request_dispatches_live_through_layer2_kernel_path(
     )
 
     orch.run_once(events=[requested])
+    channel_dispatches()
 
     events = log.read_all()
     synthesis_messages = [
@@ -556,6 +559,18 @@ def _seed_synthesis_waiting_for_selective_next_round(
         },
         correlation_id=CHANNEL_ID,
     ))
+    log.append(ZfEvent(
+        type="channel.synthesis.requested",
+        actor="channel-discussion",
+        payload={
+            "channel_id": CHANNEL_ID,
+            "thread_id": "main",
+            "request_id": "synth-selective-1",
+            "target_member_id": "pm-1",
+            "source": "runtime",
+        },
+        correlation_id=CHANNEL_ID,
+    ))
     synthesis = ZfEvent(
         type="channel.synthesis.proposed",
         actor="pm-1",
@@ -582,6 +597,7 @@ def test_synthesis_next_round_dispatches_live_without_implicit_budget(
     state_dir: Path,
     config: ZfConfig,
     transport: TmuxTransport,
+    channel_dispatches,
 ) -> None:
     log = EventLog(state_dir / "events.jsonl")
     synthesis = _seed_synthesis_waiting_for_selective_next_round(
@@ -628,6 +644,13 @@ def test_synthesis_next_round_dispatches_live_without_implicit_budget(
     )
 
     orch.run_once(events=[proposed])
+    channel_dispatches()
+    # EventWatcher delivers the background completion in its next batch.
+    completed = [event for event in log.read_all()
+                 if event.type == "channel.agent.reply.completed"]
+    assert {event.payload["target_member_id"] for event in completed} == {"arch-1", "critic-1"}
+    orch.run_once(events=completed)
+    channel_dispatches()
 
     events = log.read_all()
     continued = [
@@ -640,9 +663,15 @@ def test_synthesis_next_round_dispatches_live_without_implicit_budget(
     assert continued[0].payload["synthesis_event_id"] == synthesis.id
     detail = project_channel(state_dir, CHANNEL_ID) or {}
     assert detail["discussion"]["max_rounds_explicit"] is False
-    # The focused fake providers reply inline. Once their contribution route is
-    # correctly selected, this same live reaction advances into phase 2.
-    assert detail["discussions"]["main"]["state"] == "phase2_relay"
+    # The background contributions are delivered in a later watcher batch;
+    # the live reactor records phase 2 and continues to synthesis in that
+    # same batch without waiting for a deadline sweep.
+    assert any(
+        event.payload.get("phase") == "phase2_relay"
+        and event.payload.get("source") == "runtime"
+        for event in events if event.type == "channel.discussion.phase.changed"
+    )
+    assert detail["discussions"]["main"]["state"] == "phase3_synthesis"
     assert detail["discussions"]["main"]["revision"] == 9
     assert detail["discussions"]["main"]["requirement_message_id"] == TRIGGER
     assert channel_requirement_text(state_dir, detail, "main") == (
@@ -665,6 +694,19 @@ def test_synthesis_next_round_dispatches_live_without_implicit_budget(
     assert refs["originating_synthesis_request_id"] == "synth-selective-1"
     assert "synthesis_request_id" not in refs
 
+    # A phase change alone is not progress: the next synthesis must be sent.
+    requests = [event for event in events if event.type == "channel.synthesis.requested"]
+    assert len(requests) == 2
+    next_request = requests[-1]
+    assert next_request.payload["request_id"] != "synth-selective-1"
+    orch.run_once(events=[next_request])
+    channel_dispatches()
+    assert any(
+        event.type == "channel.synthesis.proposed"
+        and event.payload.get("request_id") == next_request.payload["request_id"]
+        for event in log.read_all()
+    )
+
     # Replay of the same proposal may re-drive delivery, never the state move.
     orch.run_once(events=[proposed])
     replayed = log.read_all()
@@ -677,6 +719,9 @@ def test_synthesis_next_round_dispatches_live_without_implicit_budget(
         if event.type == "channel.message.posted"
         and event.payload.get("refs", {}).get("adaptive_next_round_id")
     ]) == 1
+    assert len([
+        event for event in replayed if event.type == "channel.synthesis.requested"
+    ]) == 2
 
 
 def test_adaptive_next_round_uses_contribution_contract_despite_synthesis_lineage() -> None:
@@ -759,6 +804,7 @@ def test_synthesis_next_round_rejects_target_outside_current_roster(
 
 def test_synthesis_replay_routes_message_left_before_reply_request(
     state_dir: Path, config: ZfConfig, transport: TmuxTransport,
+    channel_dispatches,
 ) -> None:
     log = EventLog(state_dir / "events.jsonl")
     writer = EventWriter(log)
@@ -816,6 +862,7 @@ def test_synthesis_replay_routes_message_left_before_reply_request(
     orch = Orchestrator(state_dir, config, transport)
 
     orch.run_once(events=[requested])
+    channel_dispatches()
 
     events = log.read_all()
     assert len([

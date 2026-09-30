@@ -331,6 +331,15 @@ def apply_consensus_review_reply(
         or str(refs.get("artifact_ref") or "")
         != str(consensus.get("artifact_ref") or "")
         or supplied_digest != expected_digest
+        or bool(consensus.get("revision_pending"))
+        or (
+            consensus.get("proposed_event_id")
+            and refs.get("consensus_event_id") != consensus["proposed_event_id"]
+        )
+        or (
+            "prd_revision" in refs
+            and refs["prd_revision"] != consensus.get("prd_revision")
+        )
     ):
         writer.emit(
             "channel.consensus.review.rejected",
@@ -356,6 +365,8 @@ def apply_consensus_review_reply(
         "member_id": member_id,
         "artifact_ref": str(refs.get("artifact_ref") or ""),
         "artifact_digest": expected_digest,
+        "consensus_event_id": str(consensus.get("proposed_event_id") or ""),
+        "prd_revision": int(consensus.get("prd_revision") or 0),
         "review_id": review_id,
         "summary": str(review.get("summary") or "").strip(),
         "evidence_refs": string_refs(review.get("evidence_refs")),

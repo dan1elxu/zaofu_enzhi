@@ -33,10 +33,22 @@ def synthesis_request_in_flight(
         in {"synthesis_questions_opened", "consensus_blocked"}
     ):
         return None
+    completed_request_ids = {
+        str(item.get("request_id") or "")
+        for item in channel.get("syntheses") or []
+        if isinstance(item, dict) and str(item.get("request_id") or "")
+    }
     for item in reversed(channel.get("synthesis_requests") or []):
         if not isinstance(item, dict):
             continue
         if str(item.get("thread_id") or "main") != thread_id:
+            continue
+        request_id = str(item.get("request_id") or "")
+        # A requested synthesis is no longer in flight once its structured
+        # proposal has landed.  This matters after an adaptive next round:
+        # the old request remains in the append-only projection, but phase 2
+        # must be able to issue the next generation.
+        if request_id and request_id in completed_request_ids:
             continue
         if str(item.get("status") or "requested") in {"blocked", "stale_ignored"}:
             continue

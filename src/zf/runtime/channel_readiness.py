@@ -29,17 +29,17 @@ def owner_readiness_risk_accepted(
 
 def channel_prd_planning_authorized(
     *,
-    readiness_verdict: object,
-    risk_accepted: bool,
+    consensus: dict[str, Any],
 ) -> bool:
-    """Return whether a confirmed PRD may create a Task and workflow plan.
+    """Authorize planning from current consensus, independently of execution."""
 
-    ``implementation_start`` is deliberately not part of this boundary. A
-    planning-only PRD can be durable enough to create its immutable Task and
-    route plan while still forbidding actual workflow execution later.
-    """
-
-    return str(readiness_verdict or "").strip() == "ready" or risk_accepted
+    return bool(
+        consensus.get("reached_event_id")
+        and consensus.get("artifact_ref")
+        and consensus.get("artifact_digest")
+        and not consensus.get("revision_pending")
+        and not consensus.get("blocked")
+    )
 
 
 def channel_prd_execution_authorized(

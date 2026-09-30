@@ -1582,11 +1582,14 @@ export function ChannelPage({
     return (
       <section className="channel-control-panel channel-control-card">
         <div className="inline-heading">
-          <h3>Delivery handoff</h3>
-          <span className={`metric-chip ${canonicalPrd.ready ? "" : "chip-warn"}`}>
-            {canonicalPrd.ready ? "canonical PRD" : "PRD pending"}
+          <h3>PRD</h3>
+          <span data-testid="channel-prd-status" className={`metric-chip ${canonicalPrd.ready ? "" : "chip-warn"}`}>
+            {canonicalPrd.canonical ? "PRD 已冻结 · canonical PRD" : "PRD pending"}
           </span>
         </div>
+        {canonicalPrd.canonical ? (
+          <p className="muted">r{canonicalPrd.revision} · 共识已确认 · <code>{canonicalPrd.artifactRef}</code></p>
+        ) : null}
         <div className="channel-control-form-grid">
           <label className="channel-control-field channel-control-field-wide">
             <span>Objective</span>

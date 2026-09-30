@@ -14,6 +14,7 @@ from zf.core.events.log import EventLog
 from zf.runtime import channel_discussion as discussion_driver
 from zf.runtime.channel_discussion import advance_discussion, relay_depth_of
 from zf.runtime.channel_projection import project_channel
+from zf.runtime.channel_reply_contract import emit_structured_reply_events
 from zf.runtime.channel_router import route_channel_message
 
 
@@ -525,8 +526,35 @@ def _run_to_phase3(tmp_path: Path):
     return state_dir, writer
 
 
-def test_synthesis_questions_trigger_next_generation(tmp_path: Path) -> None:
+@pytest.mark.parametrize("auto", [False, True])
+def test_synthesis_questions_trigger_next_generation(tmp_path: Path, auto: bool) -> None:
     state_dir, writer = _run_to_phase3(tmp_path)
+    _set_mode(writer, "multi_lens", auto=auto)
+
+    def reply(request_id: str, questions: list[str]) -> None:
+        channel = project_channel(state_dir, CH)
+        contributions = channel["contributions"]
+        emit_structured_reply_events(
+            state_dir=state_dir,
+            writer=writer,
+            channel=channel,
+            request={"thread_id": "main", "target_member_id": "pm-1"},
+            message={"refs": {"synthesis_request_id": request_id}},
+            reply=json.dumps({"channel_synthesis": {
+                "summary": "Threshold design",
+                "open_questions": questions,
+                "consumed_contribution_refs": [c["artifact_ref"] for c in contributions],
+                "consumed_contribution_digests": [c["artifact_digest"] for c in contributions],
+                "readiness": {
+                    "verdict": "needs_owner" if questions else "ready",
+                    "implementation_start": False,
+                },
+            }}),
+            reply_event_id=f"evt-reply-{request_id}",
+            actor="pm-1",
+            source="test",
+        )
+
     initial_requests = [
         event
         for event in EventLog(state_dir / "events.jsonl").read_all()
@@ -534,26 +562,8 @@ def test_synthesis_questions_trigger_next_generation(tmp_path: Path) -> None:
     ]
     assert len(initial_requests) == 1
 
-    writer.emit(
-        "channel.synthesis.proposed",
-        actor="pm-1",
-        correlation_id=CH,
-        payload={
-            "channel_id": CH,
-            "thread_id": "main",
-            "request_id": initial_requests[0].payload["request_id"],
-            "artifact_ref": "channel-artifacts/ch-disc/draft.md",
-            "artifact_digest": "draft-digest",
-            "open_questions": ["Which threshold is approved?"],
-            "source": "runtime",
-        },
-    )
-    _open_question(
-        writer,
-        "q-synthesis",
-        asked_by="pm-1",
-        question="Which threshold is approved?",
-    )
+    first_request_id = initial_requests[0].payload["request_id"]
+    reply(first_request_id, ["Which threshold is approved?"])
 
     advance_discussion(state_dir, writer, channel_id=CH, thread_id="main")
     detail = project_channel(state_dir, CH)
@@ -564,9 +574,9 @@ def test_synthesis_questions_trigger_next_generation(tmp_path: Path) -> None:
 
     _resolve(
         writer,
-        "q-synthesis",
+        next(q["question_id"] for q in detail["open_questions"] if q["status"] == "open"),
         resolution="answered",
-        actor="operator",
+        actor="owner:auto-resolver" if auto else "operator",
     )
     advance_discussion(state_dir, writer, channel_id=CH, thread_id="main")
 
@@ -587,6 +597,41 @@ def test_synthesis_questions_trigger_next_generation(tmp_path: Path) -> None:
         for event in EventLog(state_dir / "events.jsonl").read_all()
         if event.type == "channel.synthesis.requested"
     ]) == 2
+
+    second_request_id = requests[1].payload["request_id"]
+    reply(second_request_id, [])
+    reply(second_request_id, [])  # Duplicate delivery must not create r3.
+    reply(first_request_id, [])  # A late old result must not replace r2.
+
+    detail = project_channel(state_dir, CH)
+    assert [item["prd_revision"] for item in detail["syntheses"]] == [1, 2]
+    first, second = detail["syntheses"]
+    prd = json.loads((state_dir / second["prd_ref"]).read_text())
+    assert prd["previous_ref"] == first["prd_ref"]
+    assert prd["previous_digest"] == first["prd_digest"]
+    assert prd["body"]["synthesis"]["open_questions"] == []
+    consensus = detail["consensus"]["main"]
+    assert consensus["prd_revision"] == 2
+    assert consensus["artifact_digest"] == second["prd_digest"]
+    stale = [
+        event for event in writer.event_log.read_all()
+        if event.type == "channel.synthesis.stale_ignored"
+    ]
+    assert [event.payload["request_id"] for event in stale] == [first_request_id]
+
+    for member in consensus["required_signers"]:
+        _consensus(writer, "signed", member, member_id=member,
+                   artifact_ref=second["prd_ref"], artifact_digest=second["prd_digest"],
+                   prd_revision=2)
+    advance_discussion(state_dir, writer, channel_id=CH, thread_id="main")
+    if not auto:
+        assert "channel.consensus.reached" not in _types(state_dir)
+        _consensus(writer, "signed", "operator", member_id="operator",
+                   artifact_ref=second["prd_ref"], artifact_digest=second["prd_digest"],
+                   prd_revision=2)
+        advance_discussion(state_dir, writer, channel_id=CH, thread_id="main")
+    assert "channel.consensus.reached" in _types(state_dir)
+    assert project_channel(state_dir, CH)["discussions"]["main"]["last_outcome"] == "consensus"
 
 
 def _consensus(writer: EventWriter, etype: str, actor: str, **payload) -> None:
@@ -673,6 +718,18 @@ def test_late_consensus_blocker_opens_while_phase2_is_already_active(
         and event.payload.get("question_id") == "q-late"
     ]
     assert len(opened) == 1
+
+    for question_id in ("q-first", "q-late"):
+        _resolve(writer, question_id, resolution="answered", actor="operator")
+    advance_discussion(state_dir, writer, channel_id=CH, thread_id="main")
+    assert project_channel(state_dir, CH)["discussions"]["main"]["state"] == "phase3_synthesis"
+
+    # A late blocker already handled in phase2 must not bounce the new synthesis.
+    advance_discussion(state_dir, writer, channel_id=CH, thread_id="main")
+    detail = project_channel(state_dir, CH)
+    assert detail["discussions"]["main"]["state"] == "phase3_synthesis"
+    assert len(detail["consensus"]["main"]["blocked"]) == 2
+    assert "channel.consensus.reached" not in _types(state_dir)
 
 
 def test_consensus_requires_human_confirmation(tmp_path: Path) -> None:

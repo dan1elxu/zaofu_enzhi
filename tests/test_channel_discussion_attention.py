@@ -170,3 +170,16 @@ def test_active_conversation_becomes_quiet_after_reply_cycle_settles() -> None:
     assert resumed["reason"] == "replies_active"
     assert resumed["active_agent_count"] == 1
     assert resumed["can_synthesize"] is False
+
+
+def test_auto_review_does_not_claim_owner_confirmation_is_required() -> None:
+    channel = _channel()
+    channel["discussion"] = {"auto": True, "mode": "multi_lens"}
+    channel["discussions"]["main"]["state"] = "phase3_synthesis"
+    channel["consensus"]["main"]["ts"] = "2026-08-19T02:10:00Z"
+    channel["open_questions"] = {}
+    channel["syntheses"] = [{"thread_id": "main", "ts": "2026-08-19T02:10:00Z"}]
+    projection = project_discussion_attention(channel, [], {"main": []})["main"]
+    assert projection["state"] == "running"
+    assert projection["reason"] != "owner_confirmation_required"
+    assert projection["can_review_result"] is False

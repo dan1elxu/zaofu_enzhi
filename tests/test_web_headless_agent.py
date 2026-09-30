@@ -1020,44 +1020,53 @@ def test_codex_headless_resume_reapplies_provider_security(
     assert result.provider_session_id == "codex-thread-resumed"
 
 
-def test_codex_headless_fails_fast_when_real_codex_sandbox_is_unsupported(
-    tmp_path: Path,
+def test_codex_headless_sandbox_preflight_warns_when_bwrap_probe_fails(
     monkeypatch: pytest.MonkeyPatch,
 ):
     def fake_which(name: str) -> str | None:
         return {
-            "unshare": "/usr/bin/unshare",
+            "bwrap": "/usr/bin/bwrap",
         }.get(name)
 
     def fake_run(argv, **kwargs):
-        assert argv == ["/usr/bin/unshare", "-n", "true"]
+        assert argv == ["/usr/bin/bwrap", "--dev-bind", "/", "/", "true"]
         return subprocess.CompletedProcess(
             argv,
             1,
             stdout="",
-            stderr="unshare: unshare failed: Operation not permitted\n",
+            stderr="bwrap: No permissions to create new namespace\n",
         )
 
     monkeypatch.setattr(headless_agent.shutil, "which", fake_which)
     monkeypatch.setattr(headless_agent.subprocess, "run", fake_run)
-    codex = CodexHeadlessBackend(command="codex")
 
-    result = codex.run_turn(
-        prompt="create a project skill",
-        cwd=tmp_path,
-        system_prompt="system",
-        thread_id="zf-thread",
-        provider_session_id="",
-        on_session_id=lambda _: None,
-        on_message=None,
-        timeout_s=5,
-        permission_profile="project_writer",
+    warning = headless_agent._codex_sandbox_preflight_warning(
+        ["codex"],
+        headless_agent._codex_security_config("project_writer"),
     )
 
-    assert result.ok is False
-    assert result.status == "sandbox_unsupported"
-    assert "Codex sandbox unsupported" in result.error
-    assert "ZF_KANBAN_AGENT_CODEX_HEADLESS_SANDBOX=danger-full-access" in result.error
+    assert "Codex sandbox probe failed" in warning
+
+
+def test_codex_headless_sandbox_preflight_passes_when_bwrap_probe_succeeds(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    def fake_which(name: str) -> str | None:
+        return {"bwrap": "/usr/bin/bwrap"}.get(name)
+
+    def fake_run(argv, **kwargs):
+        assert argv == ["/usr/bin/bwrap", "--dev-bind", "/", "/", "true"]
+        return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(headless_agent.shutil, "which", fake_which)
+    monkeypatch.setattr(headless_agent.subprocess, "run", fake_run)
+
+    error = headless_agent._codex_sandbox_preflight_warning(
+        ["codex"],
+        headless_agent._codex_security_config("project_writer"),
+    )
+
+    assert error == ""
 
 
 def test_codex_headless_project_writer_approves_allowed_patch(
@@ -2685,3 +2694,43 @@ def test_create_task_proposal_requires_title():
     assert proposal["action"] == "create-task"
     assert proposal["valid"] is False
     assert "title is required" in proposal["validation_error"]
+
+def test_headless_subprocess_env_bypasses_proxy_for_codex_base_url(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    codex_home = tmp_path / "codex-home"
+    codex_home.mkdir()
+    (codex_home / "config.toml").write_text(
+        '[model_providers.cpa]\nbase_url = "http://10.0.169.15:8317/v1"\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+    monkeypatch.setenv("HTTP_PROXY", "http://10.0.165.59:19988")
+    monkeypatch.setenv("NO_PROXY", "localhost,127.0.0.1")
+    monkeypatch.delenv("no_proxy", raising=False)
+
+    env = headless_agent._headless_subprocess_env()
+
+    assert "10.0.169.15" in env["NO_PROXY"].split(",")
+    assert env["NO_PROXY"].startswith("localhost,127.0.0.1")
+
+
+def test_headless_subprocess_env_leaves_no_proxy_without_proxy(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    codex_home = tmp_path / "codex-home"
+    codex_home.mkdir()
+    (codex_home / "config.toml").write_text(
+        '[model_providers.cpa]\nbase_url = "http://10.0.169.15:8317/v1"\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+    for key in ("HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy"):
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv("NO_PROXY", "localhost")
+
+    env = headless_agent._headless_subprocess_env()
+
+    assert env["NO_PROXY"] == "localhost"

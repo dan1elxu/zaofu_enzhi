@@ -27,27 +27,30 @@
 | `conversation` | 默认；自然讨论和定向 @mention | 用户或 Leader 决定谁继续回答，不自动 fanout |
 | `clarification` | 需求缺字段、边界或 owner 决策 | 围绕开放问题逐项澄清 |
 | `multi_lens` | 明确需要多个独立视角和综合 | 显式 Discuss 后执行有界 fanout/synthesis |
-| `auto` | 用户明确要求全程无人介入 | 批准 create-and-start Plan 后全自动讨论、冻结 PRD、生成 Task + Workflow Plan |
+| `auto` | 用户明确要求讨论阶段无人介入 | 批准 create-and-start Plan 后自动讨论并冻结 PRD；冻结结束，Task/Workflow Plan 独立规划 |
 
 底层兼容名如 `manual_mention`、`mention_relay`、`fanout_then_synthesis` 是 engine
-映射，不应作为三个并列的新产品模式展示。
+映射，不应作为并列的新产品模式展示。
 
-## Auto 模式：全自动链
+## Auto 模式：自动讨论链（到冻结为止）
 
-`auto` 模板复用 multi_lens 讨论机制，但把三个人工关卡改为前置或自动化：
+`auto` 模板复用 multi_lens 讨论机制，但把讨论阶段的人工关卡改为前置授权或自动化。
+这条链只负责讨论、全文评审和 canonical PRD 冻结；冻结后不自动创建 Task，也不自动
+生成或提交 Workflow Plan。
 
 1. **Owner 确认前置**：批准 `channel-create-and-start` Plan 即完成唯一授权点，
-   之后 consensus 不再要求逐次 human_confirmed（以全 roster 签名为门）。
+   该授权覆盖本次 auto 讨论与冻结，不覆盖冻结后的 Task/Workflow 规划或审批；之后
+   consensus 不再要求逐次 human_confirmed（以全 roster 签名为门）。
 2. **开放问题自动答复**：phase2 relay 中出现开放问题时，channel-auto-chain
    的 resolver 边缘 LLM turn 自动逐条 resolve（`resolved_by=owner:auto-resolver`），
    并在 Channel 中回帖说明。
-3. **PRD 交接自动化**：consensus 达成且 PRD 冻结、readiness 为 ready 后，
-   handoff LLM turn 按 canonical PRD 产出 Task payload 和 Workflow Plan，经
-   `create-task` 受控 action 一步完成 Task 创建与 `workflow.request.proposed`。
+3. **PRD 冻结**：全 roster 签名、问题和全文评审门通过后，先写入
+   `channel.consensus.reached`，再写入带不可变快照的 `channel.prd.frozen`；后者是
+   评测的唯一入口。
 
-终点到 Workflow Plan 发布为止：链不批准、不启动 Workflow。readiness 为
-needs_owner 时链失败并落 `channel.auto_chain.failed`，Owner 可人工接管。
-实现细节见 [Channel Auto 模式](channel-auto-mode.md)。
+链终点是 `channel.prd.frozen`，不批准、不启动 Workflow，也不负责冻结后的
+Task/Workflow Plan。当前 PRD 冻结后可直接发起 Plan Task；旧 readiness 与 synthesis
+问题列表不再拦截规划，readiness 保留给实际执行检查。实现细节见 [Channel Auto 模式](channel-auto-mode.md)。
 
 ## 创建 Channel
 
@@ -83,7 +86,8 @@ origin request
   -> explicit Finalize
   -> PRD draft
   -> Continue | Revise | Owner confirm
-  -> channel.consensus.reached(ref, digest, revision)
+  -> channel.consensus.reached (internal consensus)
+  -> channel.prd.frozen(ref, digest, revision)
   -> exact-origin PRD receipt
 ```
 
@@ -98,15 +102,18 @@ origin request
 - 要求 Finalize 形成 PRD draft；
 - 继续、修订或由 Owner 确认某个 revision。
 
-只有 Owner 确认的 revision 才是 canonical PRD。普通 synthesis、某个 Agent 的总结或
-多数成员口头同意都不能替代 Owner authority。
+普通模式只有 Owner 确认的 revision 才能进入 canonical PRD 冻结；auto 模式以批准
+`channel-create-and-start` Plan 作为本次讨论与冻结的前置 Owner 授权，之后仍须通过
+全 roster 签名和其他机械门禁。`channel.consensus.reached` 是冻结前的内部共识事件；
+随后写入的 `channel.prd.frozen` 才是带有不可变快照的 canonical PRD handoff，也是评测的
+唯一入口。普通 synthesis、某个 Agent 的总结或多数成员口头同意都不能替代 Owner authority。
 
 ## 从 PRD 进入交付
 
-确认 PRD 后仍需独立交接：
+普通或 auto Channel 冻结 PRD 后仍需独立规划和交接：
 
 ```text
-confirmed PRD
+frozen canonical PRD
   -> existing Task
      or Create Task from PRD proposal -> human confirm
   -> Task-bound Workflow Plan
@@ -154,8 +161,9 @@ zf status --workers
 
 ## 完成定义
 
-Channel-to-PRD 完成只表示：Owner 已确认一个有 ref/digest/revision 的 PRD，且来源收到
-回执。只有随后创建真实 Task、批准 Workflow 并由 Kernel 执行，才进入交付闭环。
+Channel-to-PRD 完成只表示：PRD 已按 Owner 逐次确认或 auto 前置授权冻结，有
+ref/digest/revision 和 `channel.prd.frozen` 可追溯，且来源收到回执。之后独立创建真实
+Task、批准 Workflow 并由 Kernel 执行，才进入交付闭环。
 
 ## 相关
 

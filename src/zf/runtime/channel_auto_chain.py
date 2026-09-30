@@ -1,4 +1,4 @@
-"""Automatic Channel pipeline: discuss → freeze PRD → Task + Workflow Plan.
+"""Automatic Channel pipeline: discuss → freeze the canonical PRD.
 
 Owner approval of the ``channel-create-and-start`` Plan is the only human
 step. After that an auto Channel runs without owner intervention:
@@ -9,13 +9,13 @@ step. After that an auto Channel runs without owner intervention:
 2. Consensus — auto sessions reach consensus on the full roster signature
    (see ``channel_discussion._consensus_reached``); readiness still gates
    planning downstream.
-3. Handoff — the Kanban headless agent drafts the Task submit payload and
-   workflow plan options from the frozen PRD; the kernel executes the
-   ``create-task`` controlled action, which creates the Task and publishes
-   the Workflow Plan request.
+3. Completion — ``channel.consensus.reached`` remains the terminal discussion
+   event and is followed by the informational ``channel.prd.frozen`` handoff.
+   The latter records the reviewed, immutable canonical PRD for downstream
+   evaluation; Task and Workflow planning remain explicit owner actions.
 
-The chain stops before Workflow approval/start. Every step is idempotent
-against the event ledger so restarts do not duplicate Tasks or Plans.
+Every step is idempotent against the event ledger so restarts do not duplicate
+discussion or resolution work.
 """
 
 from __future__ import annotations
@@ -67,11 +67,9 @@ def register_auto_chain_handlers(registry: Any, host: Any) -> None:
     functions directly (which would be swallowed as a side-effect TypeError).
     """
     question_handler = partial(react_channel_auto_question_event, host)
-    registry.register(
-        "channel.consensus.reached",
-        partial(react_channel_consensus_reached, host),
-        source="builtin",
-    )
+    # A consensus event freezes the canonical PRD.  Task/workflow handoff is
+    # an explicit downstream owner action, so the auto discussion path does
+    # not schedule it here.
     for event_type in AUTO_CHAIN_QUESTION_EVENT_TYPES:
         registry.register(
             event_type,
@@ -138,7 +136,7 @@ def run_auto_chain(
         return _fail(
             writer, cause, channel_id, thread_id,
             "channel_prd_not_planning_authorized",
-            "canonical PRD is missing or readiness does not authorize planning",
+            "canonical PRD is missing or its consensus is no longer current",
             report_failure=report_failure,
         )
     source_digest = str(authority.get("source_digest") or "")

@@ -142,9 +142,9 @@ const workflowDetail = {
     artifact_digest: "sha256:canonical-prd",
     readiness_ref: "channels/ch-handoff/prd/r1-readiness.json",
     readiness_digest: "sha256:readiness",
-    readiness_verdict: "ready",
-    implementation_start: true,
-    open_questions: [],
+    readiness_verdict: "needs_multi_lens",
+    implementation_start: false,
+    open_questions: ["Historical question already resolved before consensus."],
     source_refs: ["event:evt-requirement"],
   }],
   consensus: {
@@ -155,8 +155,8 @@ const workflowDetail = {
       prd_revision: 7,
       readiness_ref: "channels/ch-handoff/prd/r1-readiness.json",
       readiness_digest: "readiness",
-      readiness_verdict: "ready",
-      implementation_start: true,
+      readiness_verdict: "needs_multi_lens",
+      implementation_start: false,
     },
   },
 } as ChannelDetail;

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from zf.runtime.channel_contracts import channel_discussion_auto_enabled
 from zf.runtime.channel_question_gate import question_dedup_gate_state
 
 
@@ -157,6 +158,7 @@ def project_discussion_attention(
             and consensus.get("artifact_ref")
             and not consensus_reached
             and not owner_confirmed
+            and not channel_discussion_auto_enabled(channel)
         )
 
         state, reason = _attention_state(
@@ -353,8 +355,6 @@ def _attention_state(
             else ("ready", "synthesis_ready")
         )
     if phase == "phase3_synthesis":
-        if has_synthesis and not consensus_reached and not owner_confirmed:
-            return "needs_input", "owner_confirmation_required"
         if consensus_reached:
             return "done", "discussion_completed"
         if synthesis_status in {"requested", "repair_requested"}:

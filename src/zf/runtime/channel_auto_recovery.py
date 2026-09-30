@@ -42,13 +42,11 @@ def _source(channel: dict[str, Any], thread_id: str, purpose: str, *, require_re
 
     if channel.get("status") != "open" or not channel_discussion_auto_enabled(channel):
         return "", ""
-    if purpose == "handoff":
-        consensus = (channel.get("consensus") or {}).get(thread_id) or {}
-        event_id = str(consensus.get("reached_event_id") or "")
-        return (event_id, event_id) if consensus.get("status") == "reached" else ("", "")
     if purpose != "resolve":
         return "", ""
     session = (channel.get("discussions") or {}).get(thread_id) or {}
+    if ((channel.get("consensus") or {}).get(thread_id) or {}).get("reached_event_id"):
+        return "", ""
     questions = _open_questions(channel, thread_id)
     if require_ready and (session.get("state") != "phase2_relay" or not questions
             or question_dedup_gate_state(channel, thread_id=thread_id) != "open"
@@ -73,7 +71,7 @@ def schedule_auto_step(host: Any, channel_id: str, thread_id: str, purpose: str)
     """Persist before spawning; workers acquire their own ordinary file lock."""
     from zf.runtime.channel_projection import project_channel
 
-    if not channel_id or purpose not in {"resolve", "handoff"}:
+    if not channel_id or purpose != "resolve":
         return False
     key = (str(Path(host.state_dir).resolve()), channel_id, thread_id, purpose)
     with _SCHEDULING_LOCK:
@@ -250,9 +248,8 @@ def reconcile_auto_chain(*, state_dir: Path, writer: Any, config: Any,
             continue
         threads = set(channel.get("discussions") or {}) | set(channel.get("consensus") or {})
         for thread_id in threads:
-            for purpose in ("resolve", "handoff"):
-                try:
-                    scheduled += schedule_auto_step(host, channel["channel_id"], thread_id, purpose)
-                except Exception:
-                    logging.getLogger(__name__).exception("auto Channel recovery failed")
+            try:
+                scheduled += schedule_auto_step(host, channel["channel_id"], thread_id, "resolve")
+            except Exception:
+                logging.getLogger(__name__).exception("auto Channel recovery failed")
     return scheduled

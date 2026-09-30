@@ -28,32 +28,37 @@ Do not use it when:
 | `conversation` | Default natural discussion and targeted mentions | The user or Leader chooses who responds; no automatic fanout |
 | `clarification` | Fields, boundaries, or owner decisions are missing | Resolve open questions one by one |
 | `multi_lens` | Several independent views and synthesis are explicitly needed | An explicit Discuss action runs bounded fanout and synthesis |
-| `auto` | The user explicitly asks for a fully automatic discussion | After the create-and-start Plan is approved, discussion, PRD freeze, and Task + Workflow Plan generation run without further owner intervention |
+| `auto` | The user explicitly asks for unattended discussion | After the create-and-start Plan is approved, discussion and PRD freeze run automatically; Task/Workflow planning remains a separate step |
 
 Compatibility engine names such as `manual_mention`, `mention_relay`, and
 `fanout_then_synthesis` map into these modes. They are not additional top-level
 product choices.
 
-## Auto Mode: The Full Automatic Chain
+## Auto Mode: Automatic Discussion Chain (Through Freeze)
 
 The `auto` template reuses the multi_lens discussion machinery but replaces the
-three human gates with upfront delegation or automation:
+discussion-stage human gates with upfront authorization or automation. The chain
+handles discussion, full review, and canonical PRD freeze; it does not create a
+Task or generate or submit a Workflow Plan after freeze.
 
 1. **Owner confirmation upfront**: approving the `channel-create-and-start`
-   Plan is the single authorization point. Consensus afterwards no longer
-   requires per-round human_confirmed; the full roster signature is the gate.
+   Plan is the single authorization point for this discussion and freeze. It
+   does not authorize post-freeze Task/Workflow planning or approval. Consensus
+   afterwards no longer requires per-round human_confirmed; the full roster
+   signature is the gate.
 2. **Automatic question resolution**: when open questions appear during the
    phase2 relay, the channel-auto-chain resolver edge LLM turn resolves each
    one (`resolved_by=owner:auto-resolver`) and posts a summary back to the
    Channel.
-3. **Automatic PRD handoff**: once consensus is reached, the PRD is frozen and
-   readiness is ready, a handoff LLM turn derives the Task payload and Workflow
-   Plan from the canonical PRD; the `create-task` controlled action creates the
-   Task and publishes `workflow.request.proposed` in one step.
+3. **PRD freeze**: after full-roster signatures, question closure, and full
+   review pass, the chain writes `channel.consensus.reached` and then
+   `channel.prd.frozen` with the immutable snapshot. The latter is the only
+   evaluation entry point.
 
-The chain stops at Workflow Plan publication: it never approves or starts a
-Workflow. When readiness is needs_owner the chain fails with
-`channel.auto_chain.failed` and the Owner can take over. Implementation details:
+The chain stops at `channel.prd.frozen`: it never approves or starts a Workflow
+and does not own post-freeze Task/Workflow planning. A currently confirmed PRD
+permits Plan Task; historical readiness and synthesis questions do not block
+planning. Readiness remains an execution check. Implementation details:
 [Channel Auto Mode](channel-auto-mode.md).
 
 ## Create A Channel
@@ -92,7 +97,8 @@ origin request
   -> explicit Finalize
   -> PRD draft
   -> Continue | Revise | Owner confirm
-  -> channel.consensus.reached(ref, digest, revision)
+  -> channel.consensus.reached (internal consensus)
+  -> channel.prd.frozen(ref, digest, revision)
   -> exact-origin PRD receipt
 ```
 
@@ -107,15 +113,21 @@ Inside the discussion you can:
 - request Finalize to create a PRD draft;
 - continue, revise, or let the Owner confirm a revision.
 
-Only an Owner-confirmed revision is the canonical PRD. A synthesis, an agent
-summary, or verbal majority agreement does not replace Owner authority.
+In the normal modes, only an Owner-confirmed revision may enter the canonical
+PRD freeze. In `auto`, approval of the `channel-create-and-start` Plan is the
+upfront Owner authorization for this discussion and freeze; the full-roster
+signature and other mechanical gates still apply. `channel.consensus.reached`
+is the internal pre-freeze consensus event; the following `channel.prd.frozen`
+occurrence is the immutable canonical PRD handoff and the only evaluation entry
+point. A synthesis, an agent summary, or verbal majority agreement does not
+replace Owner authority.
 
 ## Move From PRD To Delivery
 
-The confirmed PRD still needs a separate handoff:
+A frozen PRD from a normal or auto Channel still needs separate planning and handoff:
 
 ```text
-confirmed PRD
+frozen canonical PRD
   -> existing Task
      or Create Task from PRD proposal -> human confirm
   -> Task-bound Workflow Plan
@@ -164,10 +176,11 @@ zf status --workers
 
 ## Definition Of Done
 
-Channel-to-PRD is complete when the Owner has confirmed a PRD with a ref,
-digest, and revision and the origin has received its receipt. Delivery starts
-only after a real Task exists, a Workflow is approved, and the Kernel executes
-it.
+Channel-to-PRD is complete when a PRD is frozen under per-revision Owner
+confirmation or upfront auto authorization, its ref/digest/revision and
+`channel.prd.frozen` occurrence are traceable, and the origin receives its
+receipt. Delivery starts after separate Task creation, Workflow approval, and
+Kernel execution.
 
 ## Related
 

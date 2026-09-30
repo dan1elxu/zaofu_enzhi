@@ -3,17 +3,30 @@
 from __future__ import annotations
 
 import hashlib
+import re
 
 from zf.core.events import ZfEvent
 from zf.runtime.channel_adaptive_round_reactor import (
     react_channel_synthesis_next_round_proposed,
 )
-from zf.runtime.channel_router import route_channel_message
+from zf.runtime.channel_message_ingress import route_reactor_message_after_ingress
 from zf.runtime.channel_sidecar import channel_message_event_payload
 from zf.runtime.channel_synthesis_repair import (
     MAX_SYNTHESIS_REPAIR_ATTEMPTS,
     synthesis_repair_id,
 )
+
+_REVISION_RE = re.compile(r"^[1-9][0-9]*$")
+
+
+def _safe_revision(value: object) -> int:
+    if isinstance(value, bool):
+        return 0
+    if isinstance(value, int):
+        return value if value > 0 else 0
+    if isinstance(value, str) and _REVISION_RE.fullmatch(value):
+        return int(value)
+    return 0
 
 
 def react_channel_synthesis_requested(
@@ -78,28 +91,7 @@ def react_channel_synthesis_requested(
             correlation_id=channel_id,
             payload=message_payload,
         )
-    message_id = str((message.payload or {}).get("message_id") or "")
-    for prior in host.event_log.read_all():
-        prior_payload = (
-            prior.payload if isinstance(prior.payload, dict) else {}
-        )
-        if (
-            prior.type == "channel.agent.reply.requested"
-            and str(prior_payload.get("message_id") or "") == message_id
-        ):
-            return
-    route_channel_message(
-        state_dir=host.state_dir,
-        writer=host.event_writer,
-        message_event=message,
-        message_payload=message.payload,
-        actor="orchestrator-reactor",
-        source="runtime",
-        project_root=getattr(host, "project_root", None),
-        config=getattr(host, "config", None),
-        openclaw_client=getattr(host, "openclaw_client", None),
-        dispatch_inline=True,
-    )
+    _route_runtime_message(host, event, message)
 
 
 def react_channel_synthesis_repair_requested(
@@ -165,28 +157,7 @@ def react_channel_synthesis_repair_requested(
             correlation_id=channel_id,
             payload=message_payload,
         )
-    message_id = str((message.payload or {}).get("message_id") or "")
-    for prior in host.event_log.read_all():
-        prior_payload = (
-            prior.payload if isinstance(prior.payload, dict) else {}
-        )
-        if (
-            prior.type == "channel.agent.reply.requested"
-            and str(prior_payload.get("message_id") or "") == message_id
-        ):
-            return
-    route_channel_message(
-        state_dir=host.state_dir,
-        writer=host.event_writer,
-        message_event=message,
-        message_payload=message.payload,
-        actor="orchestrator-reactor",
-        source="runtime",
-        project_root=getattr(host, "project_root", None),
-        config=getattr(host, "config", None),
-        openclaw_client=getattr(host, "openclaw_client", None),
-        dispatch_inline=True,
-    )
+    _route_runtime_message(host, event, message)
 
 
 def react_channel_synthesis_blocked(
@@ -349,28 +320,7 @@ def react_channel_question_dedup_requested(
             correlation_id=channel_id,
             payload=message_payload,
         )
-    message_id = str((message.payload or {}).get("message_id") or "")
-    for prior in host.event_log.read_all():
-        prior_payload = (
-            prior.payload if isinstance(prior.payload, dict) else {}
-        )
-        if (
-            prior.type == "channel.agent.reply.requested"
-            and str(prior_payload.get("message_id") or "") == message_id
-        ):
-            return
-    route_channel_message(
-        state_dir=host.state_dir,
-        writer=host.event_writer,
-        message_event=message,
-        message_payload=message.payload,
-        actor="orchestrator-reactor",
-        source="runtime",
-        project_root=getattr(host, "project_root", None),
-        config=getattr(host, "config", None),
-        openclaw_client=getattr(host, "openclaw_client", None),
-        dispatch_inline=True,
-    )
+    _route_runtime_message(host, event, message)
 
 
 def react_channel_cross_review_requested(
@@ -443,8 +393,13 @@ def react_channel_consensus_proposed(
     ))
     if not channel_id:
         return
+    from zf.runtime.channel_projection import project_channel
+
+    current = ((project_channel(host.state_dir, channel_id) or {}).get("consensus") or {}).get(thread_id) or {}
+    if current.get("proposed_event_id") != event.id or current.get("status") == "reached":
+        return
     for target_member_id in required_signers:
-        if target_member_id == proposer:
+        if target_member_id == proposer and target_member_id in (current.get("signed") or {}):
             continue
         digest = hashlib.sha1(
             (
@@ -476,6 +431,7 @@ def react_channel_consensus_proposed(
                     "refs": {
                         "consensus_review_id": review_id,
                         "consensus_event_id": event.id,
+                        "prd_revision": _safe_revision(payload.get("prd_revision")),
                         "artifact_ref": str(
                             payload.get("artifact_ref") or ""
                         ),
@@ -527,18 +483,7 @@ def _route_runtime_message(host, event: ZfEvent, message: ZfEvent) -> None:
             and str(prior_payload.get("message_id") or "") == message_id
         ):
             return
-    route_channel_message(
-        state_dir=host.state_dir,
-        writer=host.event_writer,
-        message_event=message,
-        message_payload=message.payload,
-        actor="orchestrator-reactor",
-        source="runtime",
-        project_root=getattr(host, "project_root", None),
-        config=getattr(host, "config", None),
-        openclaw_client=getattr(host, "openclaw_client", None),
-        dispatch_inline=True,
-    )
+    route_reactor_message_after_ingress(host, event=message, payload=message.payload)
 
 
 __all__ = [

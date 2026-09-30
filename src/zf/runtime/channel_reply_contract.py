@@ -755,14 +755,23 @@ def _ignore_superseded_synthesis_reply(
         if event.id == started_event_id:
             started = True
             continue
-        if not started or event.type != "channel.synthesis.proposed":
+        if not started or event.type not in {
+            "channel.synthesis.requested", "channel.synthesis.proposed",
+        }:
             continue
         payload = event.payload if isinstance(event.payload, dict) else {}
         if (
-            str(payload.get("channel_id") or "") == channel_id
-            and str(payload.get("thread_id") or "main") == thread_id
-            and str(payload.get("request_id") or "") != synthesis_request_id
+            str(payload.get("channel_id") or "") != channel_id
+            or str(payload.get("thread_id") or "main") != thread_id
         ):
+            continue
+        request_id = str(payload.get("request_id") or "")
+        if event.type == "channel.synthesis.requested":
+            if request_id == synthesis_request_id:
+                # A controlled new generation may revise earlier proposals,
+                # even though its reply arrives after re-entering phase3.
+                prior = None
+        elif request_id != synthesis_request_id:
             prior = event
     if prior is None:
         return False

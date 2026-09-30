@@ -3,7 +3,7 @@
 > Generated from `src/zf/cli/main.py::build_parser()`; do not edit by hand.
 > Regenerate with `uv run python scripts/manual-docs.py generate`.
 
-The parser currently exposes **70** top-level families and **298** addressable command paths.
+The parser currently exposes **70** top-level families and **299** addressable command paths.
 Descriptions come directly from argparse help text.
 
 ## `zf agents`
@@ -134,6 +134,7 @@ Channel operations
 | Command | Parser description |
 |---|---|
 | `zf channel` | Channel operations |
+| `zf channel review-retry` | Re-review an unchanged PRD after repairing a review failure |
 | `zf channel say` | Post a message to a channel (gated; projected to Feishu) |
 | `zf channel status` | Show one channel's live discussion state (phase, who is running, question progress) |
 

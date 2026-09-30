@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from tests.channel_dispatch_fixture import channel_dispatches
+
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -15,7 +17,7 @@ CHANNEL_ID = "ch-cross-review"
 
 
 def test_cross_review_request_routes_once_and_completes_with_fake_provider(
-    tmp_path: Path,
+    tmp_path: Path, channel_dispatches,
 ) -> None:
     state_dir = tmp_path / ".zf"
     state_dir.mkdir()
@@ -66,6 +68,7 @@ def test_cross_review_request_routes_once_and_completes_with_fake_provider(
     react_channel_cross_review_requested(host, requested)
     react_channel_cross_review_requested(host, requested)
 
+    channel_dispatches()
     events = log.read_all()
     messages = [
         event

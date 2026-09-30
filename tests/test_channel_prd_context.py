@@ -104,6 +104,7 @@ def test_context_exposes_only_consensus_backed_matching_synthesis(
         "readiness_ref": "channels/ch-prd/prd/r1-readiness.json",
         "readiness_digest": "sha256:readiness",
         "readiness_verdict": "ready",
+        "planning_authorized": True,
         "implementation_start": True,
         "declared_implementation_start": True,
         "risk_accepted": False,
@@ -226,6 +227,36 @@ def test_workflow_context_from_payload_is_a_defensive_mapping_copy() -> None:
     assert copied == source
     assert copied is not source
     assert workflow_context_from_payload({"workflow_context": []}) == {}
+
+
+def test_frozen_prd_authorizes_planning_with_historical_readiness(tmp_path: Path) -> None:
+    from tests.channel_prd_fixture import persist_test_prd
+
+    writer = EventWriter(EventLog(tmp_path / "events.jsonl"))
+    channel_id = "ch-pending-readiness"
+    writer.emit("channel.created", actor="test", payload={
+        "channel_id": channel_id, "leader_member_id": "pm", "leader_revision": 1,
+    })
+    artifact = {"channel_id": channel_id, "thread_id": "main",
+                "open_questions": ["Historical question resolved before consensus."],
+                **persist_test_prd(tmp_path, channel_id, verdict="needs_multi_lens")}
+    writer.emit("channel.synthesis.proposed", actor="test", payload=artifact)
+    writer.emit("channel.consensus.proposed", actor="test", payload=artifact)
+    assert canonical_channel_prd_context(tmp_path)["items"] == []
+    freeze = writer.emit("channel.consensus.reached", actor="kernel", payload=artifact)
+    item, = canonical_channel_prd_context(tmp_path)["items"]
+    assert item["consensus_event_id"] == freeze.id
+    assert item["artifact_digest"] == artifact["artifact_digest"]
+    assert item["readiness_verdict"] == "needs_multi_lens"
+    assert item["planning_authorized"] is True
+    assert item["implementation_start"] is False
+    authority = canonical_channel_prd_authority(tmp_path, channel_id=channel_id)
+    assert authority["source_ref"] == artifact["artifact_ref"]
+    assert authority["source_digest"] == artifact["artifact_digest"]
+    writer.emit("channel.consensus.blocked", actor="pm", payload={
+        **artifact, "member_id": "pm", "blocker_question": "New blocking requirement.",
+    })
+    assert canonical_channel_prd_authority(tmp_path, channel_id=channel_id) == {}
 
 
 def test_workflow_context_defaults_target_without_overwriting_explicit_value(

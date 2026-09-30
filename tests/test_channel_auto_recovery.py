@@ -247,24 +247,30 @@ def test_provider_exception_is_reported_after_bounded_retry(setup_auto, monkeypa
     assert _step(host)['status'] == 'failed'
 
 
-def test_handoff_provider_retry_creates_one_task_and_survives_replay(setup_auto, monkeypatch):
-    import json
-    from tests.test_channel_auto_mode import _chain_config, _fake_handoff_turn, _ready_auto_prd
+@pytest.mark.parametrize('readiness', ['ready', 'needs_multi_lens'])
+def test_freeze_never_schedules_handoff_or_recovers_legacy_handoff(setup_auto, monkeypatch, readiness):
+    from tests.test_channel_auto_mode import _ready_auto_prd
 
     host, jobs = setup_auto
-    _ready_auto_prd(host.project_root, host.event_writer, host.state_dir)
-    host.config = _chain_config()
-    successful = _result(ok=True, status='completed', error='', reply=json.dumps(_fake_handoff_turn()[0]))
-    run = _provider(monkeypatch, [_result(), successful])
+    _ready_auto_prd(host.project_root, host.event_writer, host.state_dir, readiness_verdict=readiness)
+    run = _provider(monkeypatch, _result())
     event = host.event_writer.event_log.read_all()[-1]
     registry = EventActionRegistry()
     chain.register_auto_chain_handlers(registry, host)
-    registry.resolve('channel.consensus.reached')[0].handler(event)
-    jobs.pop(0)()
-    step = recovery.latest_step(project_channel(host.state_dir, CH), 'main', 'handoff')
-    assert step['status'] == 'completed', step
-    assert step['attempt'] == 2
-    assert run.call_count == 2
-    registry.resolve('channel.consensus.reached')[0].handler(event)
+    assert not registry.resolve('channel.consensus.reached')
+    step = {'channel_id': CH, 'thread_id': 'main', 'purpose': 'handoff',
+            'source_id': event.id, 'cause_event_id': event.id, 'operation_id': 'legacy',
+            'status': 'failed', 'attempt': 3, 'max_attempts': 3}
+    host.event_writer.emit(recovery.STEP_EVENT, actor='test', payload=step)
+    assert not recovery.schedule_auto_step(host, CH, 'main', 'handoff')
+    assert not recovery._source(project_channel(host.state_dir, CH), 'main', 'resolve', require_ready=False)[0]
+    service = ControlledActionService(host.state_dir, host.event_writer, project_root=host.project_root)
+    requested = host.event_writer.emit('web.action.requested', actor='test', payload={})
+    result = recovery.request_auto_retry(service, requested=requested, action='channel-auto-retry',
+        requested_action='channel-auto-retry', payload=step)
+    assert not result['ok']
+    assert run.call_count == 0
     assert not jobs
-    assert len([e for e in host.event_writer.event_log.read_all() if e.type == 'task.created']) == 1
+    assert not [e for e in host.event_writer.event_log.read_all() if e.type in {
+        'task.created', 'workflow.request.proposed', 'workflow.invoke.requested',
+    }]

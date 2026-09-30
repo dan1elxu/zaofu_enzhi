@@ -67,7 +67,7 @@ def route_reactor_message_after_ingress(
     thread_id = str(payload.get("thread_id") or "main") or "main"
     lock_id = _stable_control_id("channel-ingress", channel_id, thread_id)
     with locked_path(runtime.state_dir / "locks" / lock_id):
-        route_channel_message(
+        result = route_channel_message(
             state_dir=runtime.state_dir,
             writer=runtime.event_writer,
             message_event=event,
@@ -77,6 +77,18 @@ def route_reactor_message_after_ingress(
             project_root=getattr(runtime, "project_root", None),
             config=getattr(runtime, "config", None),
             openclaw_client=getattr(runtime, "openclaw_client", None),
+            dispatch_inline=False,
+        )
+    if result.reply_requests:
+        dispatch_channel_replies_background(
+            state_dir=runtime.state_dir,
+            channel_id=channel_id,
+            actor="orchestrator-reactor",
+            source="runtime",
+            project_root=getattr(runtime, "project_root", None),
+            config=getattr(runtime, "config", None),
+            openclaw_client=getattr(runtime, "openclaw_client", None),
+            max_dispatch=64,
         )
 
 
@@ -599,7 +611,7 @@ def dispatch_channel_replies_background(
     config: Any,
     openclaw_client: Any,
     max_dispatch: int,
-) -> None:
+) -> threading.Thread:
     def run() -> None:
         writer = EventWriter(event_log_from_project(state_dir, config=config))
         try:
@@ -633,6 +645,7 @@ def dispatch_channel_replies_background(
         daemon=True,
     )
     thread.start()
+    return thread
 
 
 def _validate_ingress_message(
