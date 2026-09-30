@@ -871,6 +871,18 @@ export function getChannelConversation(
   return requestJson<ChannelDetail>(path, { bypassCache: Boolean(options.requireFresh) });
 }
 
+export function getChannelEvaluation(
+  channelId: string,
+  projectId?: string,
+): Promise<import("./types").ChannelEvaluationDetail> {
+  // Each refresh owns its response; a pending older request must not be
+  // shared across a new freeze or a return to this Channel.
+  return cachedGetJson<import("./types").ChannelEvaluationDetail>(
+    `${projectPrefix(projectId)}/channels/${encodeURIComponent(channelId)}/evaluation`,
+    { ttlMs: 0 },
+  );
+}
+
 export function searchChannelHistory(
   channelId: string,
   q: string,

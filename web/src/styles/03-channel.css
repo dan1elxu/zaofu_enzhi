@@ -271,6 +271,62 @@
   gap: 6px;
 }
 
+.channel-evaluation-page {
+  display: grid;
+  align-content: start;
+  gap: 14px;
+  padding: 18px clamp(14px, 3vw, 30px) 30px;
+  overflow: auto;
+}
+
+.channel-evaluation-head,
+.channel-evaluation-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.channel-evaluation-head h2,
+.channel-evaluation-card h3 { margin: 0; }
+.channel-evaluation-head h2 { font-size: var(--text-18); }
+.channel-evaluation-card h3 { font-size: var(--text-14); }
+.channel-evaluation-head > div { display: grid; gap: 3px; }
+.channel-evaluation-status { border-radius: 999px; padding: 5px 10px; font-size: var(--text-12); font-weight: 700; }
+.channel-evaluation-status.tone-complete { background: color-mix(in oklab, var(--success) 16%, transparent); color: var(--success); }
+.channel-evaluation-status.tone-active { background: color-mix(in oklab, var(--priority) 16%, transparent); color: var(--priority); }
+.channel-evaluation-status.tone-warning { background: color-mix(in oklab, var(--destructive) 14%, transparent); color: var(--destructive); }
+.channel-evaluation-stage-rail { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 8px; }
+.channel-evaluation-stage { display: grid; gap: 5px; min-width: 0; padding: 10px; border: 1px solid var(--line-soft); border-radius: 10px; background: var(--surface); }
+.channel-evaluation-stage strong, .channel-evaluation-stage span, .channel-evaluation-stage small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.channel-evaluation-stage .channel-evaluation-error { color: var(--destructive); white-space: normal; overflow-wrap: anywhere; }
+.channel-evaluation-stage span, .channel-evaluation-stage small { color: var(--muted-foreground); font-size: var(--text-12); }
+.channel-evaluation-stage.tone-complete { border-color: color-mix(in oklab, var(--success) 45%, var(--line)); }
+.channel-evaluation-stage.tone-warning { border-color: color-mix(in oklab, var(--destructive) 45%, var(--line)); }
+.channel-evaluation-stage.tone-complete > svg { color: var(--success); }
+.channel-evaluation-stage.tone-warning > svg { color: var(--destructive); }
+.channel-evaluation-stage.tone-active > svg { color: var(--priority); }
+.channel-evaluation-grid { display: grid; align-items: start; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+.channel-evaluation-card { min-width: 0; display: grid; align-content: start; gap: 12px; padding: 14px; border: 1px solid var(--line-soft); border-radius: 12px; background: color-mix(in oklab, var(--surface) 90%, transparent); }
+.channel-evaluation-card-head span { color: var(--muted-foreground); font-size: var(--text-12); }
+.channel-evaluation-dimensions { display: grid; gap: 7px; }
+.channel-evaluation-dimensions > div { display: grid; grid-template-columns: minmax(0, 1fr) max-content; gap: 6px 12px; align-items: start; padding-bottom: 10px; border-bottom: 1px solid var(--line-soft); }
+.channel-evaluation-dimensions > div > span { grid-column: 1 / -1; }
+.channel-evaluation-dimensions > div:last-child { border-bottom: 0; padding-bottom: 0; }
+.channel-evaluation-dimensions span, .channel-evaluation-agent span { color: var(--muted-foreground); font-size: var(--text-12); overflow-wrap: anywhere; white-space: normal; }
+.channel-evaluation-agents { display: grid; gap: 7px; }
+.channel-evaluation-agent { display: grid; grid-template-columns: minmax(0, 1fr) max-content max-content; gap: 10px; align-items: center; padding: 8px; border-radius: 8px; background: var(--surface-2); }
+.channel-evaluation-agent > div { min-width: 0; display: grid; gap: 3px; }
+.channel-evaluation-agent em { padding: 3px 7px; border-radius: 999px; background: var(--surface-3); color: var(--muted-foreground); font-size: var(--text-12); font-style: normal; }
+.channel-evaluation-report { padding: 14px; border: 1px solid var(--line-soft); border-radius: 12px; background: var(--surface); }
+.channel-evaluation-report summary { cursor: pointer; font-weight: 700; }
+.channel-evaluation-empty { display: grid; justify-items: center; gap: 7px; padding: 48px 18px; color: var(--muted-foreground); }
+.channel-evaluation-empty.small { justify-items: start; padding: 14px 0; }
+
+@media (max-width: 820px) {
+  .channel-evaluation-stage-rail, .channel-evaluation-grid { grid-template-columns: 1fr; }
+}
+
 .channel-workspace-list.compact {
   gap: 4px;
 }

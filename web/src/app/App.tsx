@@ -2244,6 +2244,7 @@ export function App() {
             <PlanApprovalPanel projectId={activeProjectId} autoOpenPlanId={initial.plan} />
           ) : page === "channels" ? (
               <ChannelRoute
+                projectId={activeProjectId}
                 actionReady={actionGate.actionReady}
                 actionResult={actionResult}
                 channels={channelsPage?.channels ?? []}

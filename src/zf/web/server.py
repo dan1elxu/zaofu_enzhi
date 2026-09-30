@@ -3623,6 +3623,10 @@ def create_app(
 
     app.include_router(build_delivery_trace_router(resolve_ctx=_delivery_trace_ctx))
 
+    from zf.web.channel_evaluation_route import build_channel_evaluation_router
+
+    app.include_router(build_channel_evaluation_router(resolve_ctx=_delivery_trace_ctx))
+
     from zf.web.trace_routes import build_trace_router
 
     app.include_router(build_trace_router(resolve_ctx=_delivery_trace_ctx))

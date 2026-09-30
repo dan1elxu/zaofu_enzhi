@@ -83,7 +83,8 @@ Channel 只读投影可补齐同一 prompt 版本内缺少身份字段的历史�
 
 - CLI：`zf evaluation-watch`；`--once` 只做发现和持久化入队，不启动临时 provider pool。
 - tmux：`zf start` 创建 evaluation watcher；Judge slot 由 scheduler 按需创建/复用。
-- Web：`channel_projection.py` 折叠三个评估事件，Channel summary/detail/conversation 暴露 `evaluation.stages`；Channel 页面显示阶段、slot、attempt、phase、错误和 `inconclusive`。
+- Web：`channel_projection.py` 折叠三个评估事件，Channel summary/detail/conversation 暴露 `evaluation.stages`。Channel 的 **Eval** 页签展示分类、三个子评测和汇总的状态、尝试次数、阶段及错误；分别显示 PRD 忠实度、讨论有效性、逐 Agent 贡献与「必须 / 可选 / 不需要 / 未确定」，并可展开报告。分数保留原始 0～4 整数；未评分项显示 `—`，不计算团队平均分。
+- `GET /api/projects/{project_id}/channels/{channel_id}/evaluation` 是按需读取的只读接口。服务端从该项目的当前 Channel 投影确定冻结和评测身份，校验结果与账本绑定；不接受任意报告路径，也不按文件时间选择结果。响应只含状态、业务摘要和报告正文，详细审计、prompt、原始回复留在运行态 sidecar。缺失或身份不匹配的结果标为不可用。页面随评测事件刷新，切换项目、Channel 或冻结版本时清除旧结果；读取失败可重试，重试不会触发重新评分。
 - 事件注册：`known_types.py` 和 `event_problem_registry.py` 将评估进度与终态标为 projection-only/informational，不唤醒工作流。
 
 ## 验证边界

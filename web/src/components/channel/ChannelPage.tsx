@@ -1,5 +1,10 @@
 // ChannelPage + exclusive closure, extracted verbatim from App.tsx (P1 split).
 import { ChannelEvaluationStatus } from "./ChannelEvaluationStatus";
+import { ChannelEvaluationPage } from "./ChannelEvaluationPage";
+import { getChannelEvaluation } from "../../api/client";
+import type { ChannelEvaluationDetail } from "../../api/types";
+import { LatestRequestGate } from "../../app/latestRequestGate";
+import { ProjectRequestScope } from "../../app/projectRequestScope";
 import { ChannelAutoStatus } from "./ChannelAutoStatus";
 import { search } from "../../api/client";
 import type { ActionResponse, ChannelDetail, ChannelDiscussionAttention, ChannelHistorySearchResult, ChannelSummary, RecentEvent, Task } from "../../api/types";
@@ -10,9 +15,9 @@ import { elapsedSecondsSince, formatElapsed } from "../../components/agent-sessi
 import { channelLiveStreamRows, compactChannelLiveRows, foldChannelLiveStream } from "../agent-session/channelLiveStream";
 import { mergeEventsByIdentity } from "../orchestrator/kanbanSessionEvents";
 import { formatTime } from "../../lib/format";
-import { Archive, ArrowUp, AtSign, Bell, Bold, Boxes, ChevronDown, Code, FileText, GitFork, Hash, Info, Italic, Link, List, ListOrdered, Loader2, MessageSquare, MoreHorizontal, PlayCircle, Plus, Quote, Search, Send, Settings, Smile, SquareCode, Strikethrough, Trash2, Type, Underline, Users, Wrench, X } from "lucide-react";
+import { Archive, ArrowUp, AtSign, Bell, Bold, Boxes, CheckCircle2, ChevronDown, Code, FileText, GitFork, Hash, Info, Italic, Link, List, ListOrdered, Loader2, MessageSquare, MoreHorizontal, PlayCircle, Plus, Quote, Search, Send, Settings, Smile, SquareCode, Strikethrough, Trash2, Type, Underline, Users, Wrench, X } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
-import { Fragment, lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { UIEvent as ReactUIEvent } from "react";
 import type { ChannelPermissionProfile } from "../../app/sharedTypes";
 import { TablePage, agentConversationScrollSignature, asRecordArray, asStringArray, channelIdOf, channelNameOf, recordString, recordValue, scrollElementToBottom, textValue } from "../../app/shared";
@@ -33,7 +38,7 @@ const ChannelEmojiPicker = lazy(() => import("./ChannelEmojiPicker").then((modul
   default: module.ChannelEmojiPicker,
 })));
 
-type ChannelTab = "chat" | "workspace";
+type ChannelTab = "chat" | "workspace" | "evaluation";
 
 type ChannelDrawerKey = "members" | "attention" | "context" | "reports" | "workflow" | "settings";
 
@@ -418,6 +423,7 @@ function escapeHtml(value: string): string {
 
 
 export function ChannelPage({
+  projectId,
   actionReady,
   actionResult,
   channels,
@@ -452,6 +458,7 @@ export function ChannelPage({
   selectedChannelId,
   events = [],
 }: {
+  projectId?: string;
   actionReady: boolean;
   actionResult: ActionResponse | null;
   channels: ChannelSummary[];
@@ -502,6 +509,12 @@ export function ChannelPage({
   const [controlsBusy, setControlsBusy] = useState(false);
   const [researchActionBusyId, setResearchActionBusyId] = useState("");
   const [activeTab, setActiveTab] = useState<ChannelTab>("chat");
+  const [evaluation, setEvaluation] = useState<ChannelEvaluationDetail | null>(null);
+  const [evaluationLoading, setEvaluationLoading] = useState(false);
+  const [evaluationError, setEvaluationError] = useState<string | null>(null);
+  const evaluationRequestGateRef = useRef(new LatestRequestGate());
+  const evaluationProjectScopeRef = useRef(new ProjectRequestScope(projectId || ""));
+  evaluationProjectScopeRef.current.activate(projectId || "");
   const [drawer, setDrawer] = useState<ChannelDrawerKey | null>(null);
   const [channelSwitcherOpen, setChannelSwitcherOpen] = useState(false);
   const [channelSearch, setChannelSearch] = useState("");
@@ -531,6 +544,44 @@ export function ChannelPage({
   const channelTimelineRef = useRef<HTMLDivElement | null>(null);
   const historyPrependAnchorRef = useRef<{ height: number; top: number } | null>(null);
   const historyInputRef = useRef<HTMLInputElement | null>(null);
+  const loadEvaluation = useCallback(async () => {
+    const channelId = selectedChannelId;
+    if (!channelId) return;
+    const scope = evaluationProjectScopeRef.current;
+    const projectTicket = scope.capture(projectId || "");
+    const requestTicket = evaluationRequestGateRef.current.issue();
+    setEvaluationLoading(true);
+    setEvaluationError(null);
+    try {
+      const next = await getChannelEvaluation(channelId, projectId || undefined);
+      if (!scope.isCurrent(projectTicket) || !evaluationRequestGateRef.current.isCurrent(requestTicket)) return;
+      if (selectedChannelId !== channelId) return;
+      setEvaluation(next);
+    } catch (reason) {
+      if (!scope.isCurrent(projectTicket) || !evaluationRequestGateRef.current.isCurrent(requestTicket)) return;
+      setEvaluationError(reason instanceof Error ? reason.message : "无法加载评测");
+    } finally {
+      if (scope.isCurrent(projectTicket) && evaluationRequestGateRef.current.isCurrent(requestTicket)) setEvaluationLoading(false);
+    }
+  }, [projectId, selectedChannelId]);
+  useEffect(() => {
+    setEvaluation(null);
+    setEvaluationError(null);
+    evaluationRequestGateRef.current.issue();
+  }, [projectId, selectedChannelId]);
+  const evaluationIdentityKey = detail?.evaluation
+    ? `${detail.evaluation.workflow_run_id || ""}:${(detail.evaluation.stages || []).map((stage) => `${stage.judge_type}:${stage.job_id || ""}:${stage.request_id || ""}:${stage.trial_id || ""}:${stage.freeze_event_id || ""}:${stage.source_snapshot_digest || ""}`).join("|")}`
+    : "";
+  const evaluationRefreshKey = detail?.evaluation
+    ? `${evaluationIdentityKey}:${(detail.evaluation.stages || []).map((stage) => `${stage.status || ""}:${stage.verdict || ""}:${stage.attempt || 0}:${stage.phase || ""}:${stage.error || ""}:${stage.updated_at || ""}`).join("|")}`
+    : "";
+  useEffect(() => {
+    if (activeTab === "evaluation") setEvaluation(null);
+  }, [evaluationIdentityKey]);
+  useEffect(() => {
+    if (activeTab !== "evaluation") return;
+    void loadEvaluation();
+  }, [activeTab, evaluationRefreshKey, loadEvaluation]);
   const attachmentInputRef = useRef<HTMLInputElement | null>(null);
   const autoOpenedQuestionnaireRef = useRef("");
   const visibleChannels = channels.length
@@ -2590,6 +2641,16 @@ export function ChannelPage({
               <Info size={16} />
               Details
             </button>
+            <button
+              aria-selected={activeTab === "evaluation"}
+              className={`channel-tab ${activeTab === "evaluation" ? "active" : ""}`}
+              data-testid="channel-evaluation-tab"
+              type="button"
+              onClick={() => setActiveTab("evaluation")}
+            >
+              <CheckCircle2 size={16} />
+              Eval
+            </button>
           </div>
         </div>
         <div className="channel-header-actions">
@@ -2668,7 +2729,9 @@ export function ChannelPage({
           <ChannelEvaluationStatus evaluation={detail?.evaluation ?? workspaceDetail?.evaluation} />
           <ChannelAutoStatus rows={detail?.auto_chain ?? workspaceDetail?.auto_chain}
             actionReady={actionReady} onRetry={onRetryAutoStep} />
-          {activeTab === "chat" ? (
+          {activeTab === "evaluation" ? (
+            <ChannelEvaluationPage evaluation={evaluation} loading={evaluationLoading} error={evaluationError} onRetry={() => void loadEvaluation()} />
+          ) : activeTab === "chat" ? (
             <>
               {renderHistorySearchPanel()}
               {discussionBand?.presentation.visible ? (

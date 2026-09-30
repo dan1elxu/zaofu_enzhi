@@ -1987,6 +1987,68 @@ export interface ChannelSummary {
   }>;
 }
 
+export interface ChannelEvaluationDimension {
+  dimension_id?: string;
+  score?: number | null;
+  verdict?: string;
+  rationale?: string;
+  status?: string;
+}
+
+export interface ChannelEvaluationStage {
+  judge_type: string;
+  label?: string;
+  status?: string;
+  verdict?: string;
+  attempt?: number;
+  max_attempts?: number;
+  phase?: string;
+  slot_id?: number;
+  error?: string;
+  updated_at?: string;
+  job_id?: string;
+  request_id?: string;
+  trial_id?: string;
+  freeze_event_id?: string;
+  source_snapshot_digest?: string;
+  result_available?: boolean;
+  result?: {
+    task_type?: string;
+    confidence?: number;
+    dimensions?: ChannelEvaluationDimension[];
+    differences?: string[];
+    agents?: Array<{
+      agent_id?: string;
+      agent_name?: string;
+      score?: number | null;
+      necessity?: string;
+      necessity_status?: string;
+      role_summary?: string;
+      rationale?: string;
+      status?: string;
+    }>;
+    conclusion_zh?: string;
+    next_actions?: string[];
+    team_findings?: Record<string, unknown>;
+    problems?: string[];
+    underperformed_roles?: string[];
+    unnecessary_roles?: string[];
+  };
+}
+
+export interface ChannelEvaluationDetail {
+  schema_version: string;
+  channel_id: string;
+  workflow_run_id?: string;
+  status: string;
+  stages: ChannelEvaluationStage[];
+  report: {
+    available: boolean;
+    markdown?: string;
+    truncated?: boolean;
+  };
+}
+
 export interface ExecutionPatternProjection {
   schema_version: string;
   source: string;

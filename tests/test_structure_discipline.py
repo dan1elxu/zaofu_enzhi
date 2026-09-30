@@ -162,7 +162,9 @@ _OVERSIZED_FILE_CAPS = {
     # Reconciliation 2026-07-26: workflow request identity wiring merged with
     # dev's Kanban collaboration routes at 9320 lines. Freeze at the merged
     # branch size; subsequent route behavior still belongs in a sibling.
-    "src/zf/web/server.py": 9320,
+    # +4 (2026-09-30): Channel Eval 的 import/include_router 入口接线；
+    # 读取、身份校验与结果裁剪均在 channel_evaluation_route.py sibling。
+    "src/zf/web/server.py": 9324,
     # P3 (2026-06-12): 49 fanout/synth coordination methods moved to
     # FanoutCoordinationMixin (orchestrator_fanout.py); both files
     # frozen at new size +10% — the mixin is born oversized and is
