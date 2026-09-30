@@ -9,7 +9,7 @@ idempotent so repeated ``zf start`` runs never stack duplicate windows.
 Judge turns use a bounded set of persistent ``judges-slot-N`` windows.
 Each launch gets an independent provider session. Pane operations are scoped
 to that slot; transcript identity and liveness live in evaluation_turns.
-The provider adapter builds the bypass command and proves TUI readiness
+The launcher restricts Judge permissions and proves TUI readiness
 before the packet reference is sent.
 
 Historical note (2026-09-16): the first implementation waited for the
@@ -27,6 +27,7 @@ import re
 import shlex
 import subprocess
 import time
+import tomllib
 import uuid
 from pathlib import Path
 from threading import Event
@@ -115,27 +116,6 @@ def spawn_evaluation_window(
 # ------------------------------------------------------------- judge page
 
 
-def judge_session_uuid(
-    project_root: Path,
-    workflow_run_id: str,
-    judge_type: str,
-    request_id: str,
-) -> str:
-    """Deterministic request id; Claude uses it as its session id.
-
-    Legacy request identity helper. Live launches use fresh UUIDs and bind
-    the provider's actual session/rollout/turn through a request marker.
-    """
-
-    import uuid
-
-    stable = (
-        f"zaofu-evaluation-judge:{Path(project_root).resolve()}:"
-        f"{workflow_run_id}:{judge_type}:{request_id}"
-    )
-    return str(uuid.uuid5(uuid.NAMESPACE_URL, stable))
-
-
 def _interactive_backend(value: object) -> str:
     """Map a configured provider id to an interactive Judge adapter."""
 
@@ -172,7 +152,7 @@ def resolve_judge_backend(config: Any | None) -> str:
 
 
 def build_judge_role(backend: str = "claude-code") -> Any:
-    """Judge agent role, spawned exactly like an orchestrator bypass worker."""
+    """Judge role with read-only provider permissions."""
 
     from zf.core.config.schema import RoleConfig
 
@@ -182,30 +162,54 @@ def build_judge_role(backend: str = "claude-code") -> Any:
     return RoleConfig(
         name=JUDGE_ROLE_NAME,
         backend=backend,
-        permission_mode="bypass",
+        permission_mode="allowlist",
+        allowed_tools=["Read"],
     )
 
 
 def build_judge_argv(
     *, session_uuid: str, system_prompt: str, backend: str = "claude-code",
+    codex_home: Path | None = None,
 ) -> list[str]:
-    """Orchestrator-parity argv: adapter-built bypass command + judge persona.
+    """Build a read-only provider command without unattended escalation.
 
-    The selected provider adapter owns its flag contract.  Claude supports
-    ``--append-system-prompt``; Codex receives the same persona inline with
-    the packet because its interactive CLI has no equivalent flag.
+    Claude supports ``--append-system-prompt``; Codex receives the same
+    persona inline with the packet and uses explicit sandbox flags instead
+    of the worker adapter's configurable permissions.
     """
 
     from zf.runtime.backend import get_adapter
 
     role = build_judge_role(backend)
+    if role.backend == "codex":
+        # Judge permissions must not inherit worker sandbox overrides or hooks.
+        argv = ["codex", "-a", "never", "-s", "read-only",
+                "--disable", "hooks", "--disable", "apps", "--disable", "plugins",
+                "-c", "check_for_update_on_startup=false"]
+        home = Path(codex_home or os.environ.get("CODEX_HOME") or Path.home() / ".codex")
+        config_path = home / "config.toml"
+        config = tomllib.loads(config_path.read_text(encoding="utf-8")) if config_path.is_file() else {}
+        # CLI overrides merge tables; an empty table leaves inherited MCPs enabled.
+        disabled = ",".join(f"{json.dumps(name)}={{enabled=false}}" for name in config.get("mcp_servers", {}))
+        argv.extend(["-c", f"mcp_servers={{{disabled}}}"])
+        return argv
     argv = get_adapter(role.backend).build_command(
         role,
         session_id=session_uuid,
         is_resume=False,
     )
     if role.backend == "claude-code":
-        argv.extend(["--append-system-prompt", system_prompt])
+        # ``allowedTools`` controls approval; ``--tools`` removes write/shell
+        # tools entirely, and ``dontAsk`` fails closed if a provider attempts
+        # an undeclared action.
+        argv.extend([
+            "--tools", "Read",
+            "--permission-mode", "dontAsk",
+            "--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}',
+            "--settings", '{"disableAllHooks":true}',
+            "--disable-slash-commands",
+            "--append-system-prompt", system_prompt,
+        ])
     return argv
 
 
@@ -574,6 +578,10 @@ def wait_judge_ready(
             blocker = provider_interactive_prompt_marker(screen)
             if blocker:
                 return False, blocker
+            if backend == "codex" and "Update now (runs" in screen:
+                return False, "update_prompt"
+            if backend == "codex" and "do you trust the contents of this directory" in screen.lower():
+                return False, "trust_prompt"
             if re.search(ready_pattern, screen):
                 if post_ready_delay_s > 0:
                     time.sleep(post_ready_delay_s)
@@ -601,6 +609,7 @@ def start_judge_agent(
     window_name: str | None = None,
     codex_home: Path | None = None,
     stop_event: Event | None = None,
+    initial_prompt: str = "",
 ) -> tuple[bool, str]:
     """(Re)start the configured Judge provider; prove readiness.
 
@@ -628,7 +637,11 @@ def start_judge_agent(
         session_uuid=session_uuid,
         system_prompt=system_prompt,
         backend=backend,
+        codex_home=codex_home,
     )
+    if backend == "codex" and initial_prompt:
+        # CLI submission avoids startup/burst-paste swallowing TUI keystrokes.
+        argv.append(initial_prompt)
     if backend == "codex" and codex_home is not None:
         Path(codex_home).mkdir(parents=True, exist_ok=True)
         argv = ["env", f"CODEX_HOME={codex_home}", *argv]
@@ -751,7 +764,6 @@ __all__ = [
     "ensure_workspace_trusted",
     "evaluation_window_enabled",
     "extract_assistant_reply",
-    "judge_session_uuid",
     "judge_window_name",
     "resolve_judge_backend",
     "read_judge_reply",

@@ -1073,7 +1073,7 @@ def run(args: argparse.Namespace) -> int:
 
         # 6b. PRD evaluation observer window (benchmark PRD §8): one extra
         # window in the same workflow session runs `zf evaluation-watch`;
-        # the three Judges live beside orchestrator. Pure infrastructure —
+        # bounded Judge slots live beside orchestrator. Pure infrastructure —
         # it must never block start, so failures only log.
         try:
             from zf.runtime.evaluation_tmux import (

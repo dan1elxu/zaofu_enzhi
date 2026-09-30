@@ -38,6 +38,9 @@ package-dir = {"" = "src"}
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.package-data]
+"zf.runtime" = ["evaluation_roles/*.md"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 norecursedirs = ["tests/e2e/fixtures"]

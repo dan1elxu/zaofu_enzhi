@@ -756,7 +756,10 @@ def test_owner_delegate_requires_exact_scope_expiry_and_authorization(
     allowed: bool,
     reason: str,
 ) -> None:
+    from tests.channel_prd_fixture import persist_test_prd
+
     state_dir, _log, writer, owner_service = _runtime(tmp_path)
+    prd = persist_test_prd(state_dir, "ch-product")
     assert _execute(
         owner_service,
         writer,
@@ -780,12 +783,7 @@ def test_owner_delegate_requires_exact_scope_expiry_and_authorization(
         payload={
             "channel_id": "ch-product",
             "thread_id": "main",
-            "artifact_ref": "channels/ch-product/prd/r1.json",
-            "artifact_digest": "a" * 64,
-            "prd_ref": "channels/ch-product/prd/r1.json",
-            "prd_digest": "a" * 64,
-            "prd_revision": 1,
-            "readiness_verdict": "ready",
+            **prd,
             "source": "test",
         },
     )
@@ -805,8 +803,8 @@ def test_owner_delegate_requires_exact_scope_expiry_and_authorization(
         {
             "channel_id": "ch-product",
             "thread_id": "main",
-            "artifact_ref": "channels/ch-product/prd/r1.json",
-            "artifact_digest": "a" * 64,
+            "artifact_ref": prd["artifact_ref"],
+            "artifact_digest": prd["artifact_digest"],
             "prd_revision": 1,
         },
     )

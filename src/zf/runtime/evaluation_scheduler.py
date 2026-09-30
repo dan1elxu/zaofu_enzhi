@@ -14,12 +14,20 @@ from typing import Any, Callable
 from zf.core.events import EventLog, EventWriter
 from zf.core.state.atomic_io import atomic_write_text
 from zf.runtime.evaluation_turns import EvaluationCancelled
+from zf.runtime.evaluation_prompts import EVALUATION_PROMPT_VERSION
+from zf.runtime.evaluation_packets import evaluation_request_id
 
 QUEUE_RELATIVE_PATH = Path("artifacts/benchmark-evaluations/scheduler.json")
 DEFAULT_SLOT_COUNT = 2
 MAX_SLOT_COUNT = 8
 PROGRESS_EVENT = "benchmark.evaluation.progress"
 TERMINAL = {"completed", "inconclusive"}
+# The observer is the only production producer of queue entries.  Keep this
+# allowlist at the durable queue boundary as well, so a scheduler restart
+# cannot revive entries written by the retired evaluation contract.
+SUPPORTED_JUDGE_TYPES = frozenset({
+    "task_type", "contribution", "discussion", "prd_fidelity", "conclusion",
+})
 
 
 def configured_slot_count() -> int:
@@ -40,7 +48,14 @@ class EvaluationQueueEntry:
     judge_type: str = ""
     source_snapshot_digest: str = ""
     input_ref: str = ""
+    input_digest: str = ""
     freeze_event_id: str = ""
+    # v1 evaluation metadata.  These fields are persisted with the queue so
+    # a resumed observer cannot silently switch role/profile mid-run.
+    evaluator_profile: str = ""
+    task_type: str = ""
+    role_ref: str = ""
+    role_digest: str = ""
     depends_on: list[str] = field(default_factory=list)
     status: str = "queued"
     slot_id: int = -1
@@ -83,14 +98,69 @@ class EvaluationScheduler:
             if self.queue_path.exists():
                 # Fail closed on corrupt state instead of resetting budgets.
                 payload = json.loads(self.queue_path.read_text(encoding="utf-8"))
+                if not isinstance(payload, dict) or payload.get("schema_version") != "benchmark.evaluation.scheduler.v1":
+                    raise ValueError("unsupported evaluation scheduler schema")
+                raw_entries = payload.get("entries")
+                if not isinstance(raw_entries, list):
+                    raise ValueError("evaluation scheduler entries must be a list")
                 entry_fields = {item.name for item in fields(EvaluationQueueEntry)}
-                self._entries = {
-                    raw["job_id"]: EvaluationQueueEntry(**{
+                for raw in raw_entries:
+                    if not isinstance(raw, dict) or not str(raw.get("job_id") or "").strip():
+                        raise ValueError("evaluation scheduler entry requires a job_id")
+                    job_id = str(raw["job_id"])
+                    if job_id in self._entries:
+                        raise ValueError(f"duplicate evaluation scheduler job_id: {job_id}")
+                    depends_on = raw.get("depends_on", [])
+                    if (
+                        not isinstance(depends_on, list)
+                        or any(not isinstance(dep, str) or not dep.strip() for dep in depends_on)
+                        or len(set(depends_on)) != len(depends_on)
+                        or job_id in depends_on
+                    ):
+                        raise ValueError(f"invalid dependencies for evaluation job: {job_id}")
+                    self._entries[job_id] = EvaluationQueueEntry(**{
                         key: value for key, value in raw.items() if key in entry_fields
                     })
-                    for raw in payload["entries"]
-                }
+                for entry in self._entries.values():
+                    if entry.status not in {"queued", "running", "completed", "inconclusive"}:
+                        entry.status = "inconclusive"
+                        entry.slot_id = -1
+                        entry.error = "unsupported evaluation queue status; not dispatched"
+                        continue
+                    if entry.trial_id and entry.source_snapshot_digest:
+                        expected_job = evaluation_request_id(
+                            workflow_run_id=entry.workflow_run_id,
+                            trial_id=entry.trial_id,
+                            judge_type=entry.judge_type,
+                            source_snapshot_digest=entry.source_snapshot_digest,
+                        )
+                        if entry.job_id != expected_job:
+                            entry.status = "inconclusive"
+                            entry.slot_id = -1
+                            entry.error = "evaluation job identity mismatch"
+                            continue
+                    missing = [dep for dep in entry.depends_on if dep not in self._entries]
+                    if missing:
+                        entry.status = "inconclusive"
+                        entry.slot_id = -1
+                        entry.error = "missing evaluation dependencies: " + ", ".join(missing)
+                for job_id in self._cyclic_jobs():
+                    entry = self._entries[job_id]
+                    entry.status = "inconclusive"
+                    entry.slot_id = -1
+                    entry.error = "cyclic evaluation dependencies"
             for entry in self._entries.values():
+                if entry.judge_type not in SUPPORTED_JUDGE_TYPES:
+                    # Preserve the old row for audit/recovery diagnostics, but
+                    # make it terminal before dispatch.  Legacy entries must
+                    # never reach a provider or the canonical runner.
+                    entry.status = "inconclusive"
+                    entry.slot_id = -1
+                    entry.error = (
+                        "unsupported evaluation stage retired; "
+                        f"not dispatched: {entry.judge_type or '<empty>'}"
+                    )
+                    continue
                 if entry.status == "running":
                     # Runner resumes from its persisted provider attempt count.
                     entry.status, entry.slot_id = "queued", -1
@@ -110,10 +180,49 @@ class EvaluationScheduler:
 
     def enqueue(self, entry: EvaluationQueueEntry, *, repair: bool = False) -> bool:
         with self._lock:
+            if entry.judge_type not in SUPPORTED_JUDGE_TYPES:
+                # Do not let callers reintroduce the retired v1 stage names.
+                # Returning False keeps this API non-throwing like duplicate
+                # enqueue handling while making the rejection observable to
+                # the caller.
+                return False
+            if not str(entry.job_id or "").strip() or not str(entry.workflow_run_id or "").strip():
+                return False
+            if entry.trial_id and entry.source_snapshot_digest:
+                expected_job = evaluation_request_id(
+                    workflow_run_id=entry.workflow_run_id,
+                    trial_id=entry.trial_id,
+                    judge_type=entry.judge_type,
+                    source_snapshot_digest=entry.source_snapshot_digest,
+                )
+                if entry.job_id != expected_job:
+                    return False
+            if entry.input_ref:
+                input_ref = Path(entry.input_ref)
+                if input_ref.is_absolute() or ".." in input_ref.parts:
+                    return False
+                try:
+                    (self.state_dir / input_ref).resolve().relative_to(self.state_dir.resolve())
+                except ValueError:
+                    return False
+            if (
+                any(not isinstance(dep, str) or not dep.strip() or dep == entry.job_id
+                    for dep in entry.depends_on)
+                or len(set(entry.depends_on)) != len(entry.depends_on)
+                or any(dep not in self._entries for dep in entry.depends_on)
+            ):
+                return False
             old = self._entries.get(entry.job_id)
             if old is not None and not (repair and old.status in TERMINAL):
                 return False
+            previous = self._entries.get(entry.job_id)
             self._entries[entry.job_id] = entry
+            if self._cyclic_jobs():
+                if previous is None:
+                    self._entries.pop(entry.job_id, None)
+                else:
+                    self._entries[entry.job_id] = previous
+                return False
             self._transition(entry)
             return True
 
@@ -126,11 +235,11 @@ class EvaluationScheduler:
 
     def _dispatch(self) -> None:
         while not self._closed and self._runner and len(self._active) < self.max_slots:
+            self._settle_blocked_entries()
             active_channels = {self._entries[job].channel_id for job in self._active.values()}
             entry = next((item for item in self._entries.values()
                           if item.status == "queued" and item.channel_id not in active_channels
-                          and all(dep in self._entries and self._entries[dep].status in TERMINAL
-                                  for dep in item.depends_on)), None)
+                          and self._dependencies_satisfied(item)), None)
             if entry is None:
                 return
             slot = next(i for i in range(self.max_slots) if i not in self._active)
@@ -142,6 +251,74 @@ class EvaluationScheduler:
             else:
                 assert self._executor is not None
                 self._executor.submit(self._run, entry, slot, self._runner)
+
+    def _dependencies_satisfied(self, entry: EvaluationQueueEntry) -> bool:
+        """Return whether a queued entry may run.
+
+        A failed classifier must never release semantic quality providers.
+        Conclusions remain deterministic and may consume terminal quality
+        failures so they can record an incomplete verdict.
+        """
+        if not entry.depends_on:
+            return True
+        classifier_failed = False
+        for dep_id in entry.depends_on:
+            dep = self._entries.get(dep_id)
+            if dep is None or dep.status not in TERMINAL:
+                return False
+            if entry.judge_type != "conclusion" and dep.judge_type == "task_type":
+                classifier_failed = dep.status != "completed"
+        return not classifier_failed
+
+    def _settle_blocked_entries(self) -> None:
+        """Fail closed dependents of an inconclusive dependency."""
+        changed = True
+        while changed:
+            changed = False
+            for entry in self._entries.values():
+                if entry.status != "queued" or entry.judge_type == "conclusion":
+                    continue
+                missing = [dep for dep in entry.depends_on if dep not in self._entries]
+                failed = [
+                    self._entries[dep] for dep in entry.depends_on
+                    if dep in self._entries and self._entries[dep].status == "inconclusive"
+                ]
+                if missing or failed:
+                    entry.status = "inconclusive"
+                    entry.slot_id = -1
+                    entry.error = (
+                        "missing evaluation dependencies: " + ", ".join(missing)
+                        if missing else
+                        "evaluation dependency inconclusive: " + ", ".join(
+                            dep.job_id for dep in failed
+                        )
+                    )
+                    self._transition(entry)
+                    changed = True
+
+    def _cyclic_jobs(self) -> set[str]:
+        cycles: set[str] = set()
+        visiting: set[str] = set()
+        visited: set[str] = set()
+
+        def visit(job_id: str, path: list[str]) -> None:
+            if job_id in visiting:
+                try:
+                    cycles.update(path[path.index(job_id):])
+                except ValueError:
+                    cycles.add(job_id)
+                return
+            if job_id in visited or job_id not in self._entries:
+                return
+            visiting.add(job_id)
+            for dep in self._entries[job_id].depends_on:
+                visit(dep, path + [job_id])
+            visiting.remove(job_id)
+            visited.add(job_id)
+
+        for job_id in self._entries:
+            visit(job_id, [])
+        return cycles
 
     def _run(self, entry: EvaluationQueueEntry, slot: int, runner: StageRunner) -> None:
         try:
@@ -176,8 +353,12 @@ class EvaluationScheduler:
         EventWriter(EventLog(self.state_dir / "events.jsonl")).emit(
             PROGRESS_EVENT, actor="evaluation-scheduler",
             correlation_id=entry.workflow_run_id,
-            payload={key: value for key, value in asdict(entry).items()
-                     if key not in {"input_ref", "depends_on"}},
+            payload={
+                "evaluation_contract": "channel-prd-eval.v1",
+                "prompt_version": EVALUATION_PROMPT_VERSION,
+                **{key: value for key, value in asdict(entry).items()
+                   if key not in {"input_ref", "depends_on"}},
+            },
         )
 
     def close(self) -> None:

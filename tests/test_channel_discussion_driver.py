@@ -5,8 +5,13 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
+from tests.channel_prd_fixture import persist_test_prd
+
 from zf.core.events import EventWriter
 from zf.core.events.log import EventLog
+from zf.runtime import channel_discussion as discussion_driver
 from zf.runtime.channel_discussion import advance_discussion, relay_depth_of
 from zf.runtime.channel_projection import project_channel
 from zf.runtime.channel_router import route_channel_message
@@ -672,10 +677,11 @@ def test_late_consensus_blocker_opens_while_phase2_is_already_active(
 
 def test_consensus_requires_human_confirmation(tmp_path: Path) -> None:
     state_dir, writer = _run_to_phase3(tmp_path)
-    artifact_ref = "channels/ch-disc/prd/r3.json"
-    artifact_digest = "canonical-r3-digest"
-    readiness_ref = "channels/ch-disc/prd/r3-readiness.json"
-    readiness_digest = "readiness-r3-digest"
+    prd = persist_test_prd(state_dir, CH, revision=3, verdict="needs_multi_lens")
+    artifact_ref = prd["artifact_ref"]
+    artifact_digest = prd["artifact_digest"]
+    readiness_ref = prd["readiness_ref"]
+    readiness_digest = prd["readiness_digest"]
     _consensus(
         writer,
         "proposed",
@@ -690,7 +696,7 @@ def test_consensus_requires_human_confirmation(tmp_path: Path) -> None:
         readiness_verdict="needs_multi_lens",
         implementation_start=False,
         conclusion_ref="channels/ch-disc/conclusions/r3.json",
-        conclusion_digest="conclusion-r3-digest",
+        conclusion_digest=prd["conclusion_digest"],
         source_refs=["event:requirement"],
         product_mode="multi_lens",
         proposed_by="pm-1",
@@ -734,7 +740,7 @@ def test_consensus_requires_human_confirmation(tmp_path: Path) -> None:
         "readiness_verdict": "needs_multi_lens",
         "implementation_start": False,
         "conclusion_ref": "channels/ch-disc/conclusions/r3.json",
-        "conclusion_digest": "conclusion-r3-digest",
+        "conclusion_digest": prd["conclusion_digest"],
         "confirmed_by": "operator",
         "risk_accepted": True,
         "signed_by": ["arch-1", "critic-1", "pm-1"],
@@ -750,6 +756,58 @@ def test_consensus_requires_human_confirmation(tmp_path: Path) -> None:
         detail["consensus"]["main"]["confirmed_readiness_digest"]
         == readiness_digest
     )
+
+
+def test_consensus_recovery_replays_missing_prd_freeze(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state_dir, writer = _run_to_phase3(tmp_path)
+    prd = persist_test_prd(state_dir, CH, revision=1, verdict="ready")
+    _consensus(
+        writer,
+        "proposed",
+        "pm-1",
+        **prd,
+        proposed_by="pm-1",
+    )
+    for member in ("pm-1", "arch-1", "critic-1", "operator"):
+        _consensus(writer, "signed", member, member_id=member)
+
+    original_emit = discussion_driver.emit_prd_frozen
+    attempts = 0
+
+    def fail_once(*args, **kwargs):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise RuntimeError("simulated freeze write failure")
+        return original_emit(*args, **kwargs)
+
+    monkeypatch.setattr(discussion_driver, "emit_prd_frozen", fail_once)
+    with pytest.raises(RuntimeError, match="simulated freeze write failure"):
+        advance_discussion(state_dir, writer, channel_id=CH, thread_id="main")
+
+    events = writer.event_log.read_all()
+    reached = [event for event in events if event.type == "channel.consensus.reached"]
+    assert len(reached) == 1
+    assert not [event for event in events if event.type == "channel.prd.frozen"]
+    assert project_channel(state_dir, CH)["discussions"]["main"]["state"] == (
+        "phase3_synthesis"
+    )
+
+    advance_discussion(state_dir, writer, channel_id=CH, thread_id="main")
+    events = writer.event_log.read_all()
+    freezes = [event for event in events if event.type == "channel.prd.frozen"]
+    assert len([event for event in events if event.type == "channel.consensus.reached"]) == 1
+    assert len(freezes) == 1
+    assert freezes[0].payload["source_event_id"] == reached[0].id
+    assert len([event for event in events if event.type == "channel.discussion.closed"]) == 1
+
+    # Once the canonical freeze exists, another tick is a no-op after closure.
+    advance_discussion(state_dir, writer, channel_id=CH, thread_id="main")
+    events = writer.event_log.read_all()
+    assert len([event for event in events if event.type == "channel.prd.frozen"]) == 1
+    assert len([event for event in events if event.type == "channel.discussion.closed"]) == 1
 
 
 def test_all_mention_without_roster_does_not_start(tmp_path: Path) -> None:
@@ -771,8 +829,9 @@ def test_consensus_reached_does_not_auto_create_task_or_workflow(
     tmp_path: Path,
 ) -> None:
     state_dir, writer = _run_to_phase3(tmp_path)
+    prd = persist_test_prd(state_dir, CH, revision=1, verdict="ready")
     _consensus(writer, "proposed", "pm-1",
-               artifact_ref=".zf/channel-artifacts/clarified.md", proposed_by="pm-1")
+               **prd, proposed_by="pm-1")
     for member in ("pm-1", "arch-1", "critic-1"):
         _consensus(writer, "signed", member, member_id=member)
     _consensus(writer, "signed", "operator", member_id="operator")

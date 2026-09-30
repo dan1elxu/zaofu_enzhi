@@ -2,10 +2,10 @@
 
 Per the evaluation PRD: agents only produce semantic judgments; this module
 owns prompt assembly, the one bounded retry on invalid output (§11), the
-timeout-vs-invalid distinction, deterministic score overrides (§4), sidecar
-persistence under ``artifacts/benchmark-evaluations/`` (§8.3), the two
-``benchmark.evaluation.*.completed`` events, and the ``report.md`` reading
-projection (§9).
+timeout-vs-invalid distinction, deterministic score overrides (§4), provider
+turn execution, and the two ``benchmark.evaluation.*.completed`` events.
+Durable result/report sidecars live in the sibling ``evaluation_artifacts``
+module so path identity and read validation stay isolated from transport.
 """
 
 from __future__ import annotations
@@ -30,19 +30,31 @@ from zf.runtime.evaluation_packets import (
     evaluation_request_id,
     packet_for_prompt,
     stable_digest,
+    write_immutable_packet,
+)
+from zf.runtime.evaluation_artifacts import (
+    _canonical,
+    _read_json,
+    _rel,
+    _safe,
+    _write_turn_sidecars,
+    conclusion_result_path,
+    judge_result_path,
+    read_conclusion_result,
+    read_judge_result,
+    report_path,
+    versioned_report_path,
+    write_conclusion_result,
+    write_judge_result,
+    write_report,
 )
 from zf.runtime.evaluation_prompts import (
+    EVALUATION_PROMPTS,
     EVALUATION_PROMPT_VERSION,
-    STAGE_PROMPTS,
+    JUDGE_TYPES,
     SYSTEM_PROMPT,
 )
-from zf.runtime.evaluation_schemas import (
-    SCHEMA_VERSIONS,
-    communication_score,
-    normalize_judge_output,
-    overall_score,
-    prd_result_score,
-)
+from zf.runtime.evaluation_schemas import SCHEMA_VERSIONS, normalize_judge_output
 from zf.runtime.evaluation_types import (
     EvaluationPacket,
     JudgeRecord,
@@ -50,9 +62,11 @@ from zf.runtime.evaluation_types import (
 
 JUDGE_COMPLETED_EVENT = "benchmark.evaluation.judge.completed"
 CONCLUSION_COMPLETED_EVENT = "benchmark.evaluation.conclusion.completed"
+SUPPORTED_JUDGE_TYPES = frozenset(JUDGE_TYPES)
 
 TERMINAL_JUDGE_STATUSES = frozenset({
     "scored",
+    "ambiguous",
     "evidence_missing",
     "abstain",
     "conflict",
@@ -69,6 +83,7 @@ TERMINAL_JUDGE_STATUSES = frozenset({
 # start" records deduped today's entire run).
 _COMPLETED_JUDGE_STATUSES = frozenset({
     "inconclusive",
+    "ambiguous",
     "scored",
     "evidence_missing",
     "abstain",
@@ -76,7 +91,6 @@ _COMPLETED_JUDGE_STATUSES = frozenset({
     "invalid",
 })
 _COMPLETED_CONCLUSION_STATUSES = frozenset({"complete", "invalid", "incomplete", "inconclusive"})
-
 
 def is_completed_judge_record(record: dict[str, Any] | None) -> bool:
     """True only when the record carries a genuine verdict (not a transport
@@ -117,8 +131,7 @@ def _visible_tmux_backend(**kwargs: Any) -> JudgeTurnObservation:
     """One isolated slot/session/rollout per provider launch."""
     from zf.runtime import evaluation_tmux
 
-    state_dir = Path(kwargs["state_dir"])
-    project_root = Path(kwargs.get("project_root") or Path.cwd())
+    state_dir = Path(kwargs["state_dir"]).resolve()
     config = kwargs.get("config")
     tmux_session = str(getattr(getattr(config, "session", None), "tmux_session", "") or "")
     if not tmux_session:
@@ -129,6 +142,12 @@ def _visible_tmux_backend(**kwargs: Any) -> JudgeTurnObservation:
     launch_id = str(uuid.uuid4())
     launch_dir = state_dir / EVALUATION_ARTIFACT_ROOT / "sessions" / f"slot-{slot_id}" / launch_id
     launch_dir.mkdir(parents=True, exist_ok=True)
+    workspace = launch_dir / "input"
+    workspace.mkdir()
+    packet_path = Path(kwargs["packet_path"])
+    local_packet = workspace / "packet.txt"
+    atomic_write_text(local_packet, packet_path.read_text(encoding="utf-8"))
+    local_packet.chmod(0o400)
     codex_home = None
     if backend == "codex":
         codex_home = state_dir / "workdirs" / "evaluation" / f"slot-{slot_id}" / launch_id
@@ -148,6 +167,7 @@ def _visible_tmux_backend(**kwargs: Any) -> JudgeTurnObservation:
     }
     binding_path = launch_dir / "binding.json"
     atomic_write_text(binding_path, _canonical(binding))
+    prompt = str(kwargs["prompt"]).replace(str(packet_path), str(local_packet))
 
     def observe(observation: JudgeTurnObservation) -> None:
         binding.update(session_id=observation.session_id or binding["session_id"],
@@ -158,26 +178,29 @@ def _visible_tmux_backend(**kwargs: Any) -> JudgeTurnObservation:
             progress(observation)
 
     observation = JudgeTurnObservation(status="provider_error", error="judge did not start")
+    marker = f"evaluation-turn:{launch_id}"
+    if backend == "codex":
+        prompt = " ".join(f"{_CODEX_COMPACT_PERSONA} {prompt}".splitlines())
+    prompt = f"{marker} {prompt}"
+    started_at = time.time()
     try:
         ready, error = evaluation_tmux.start_judge_agent(
-            tmux_session, project_root, session_uuid=launch_id,
+            tmux_session, workspace, session_uuid=launch_id,
             system_prompt=str(kwargs.get("system_prompt") or ""), backend=backend,
             slot_id=slot_id, codex_home=codex_home,
             stop_event=kwargs.get("stop_event"),
+            initial_prompt=prompt if backend == "codex" else "",
             ready_timeout_s=float(os.environ.get("ZF_EVALUATION_JUDGE_START_TIMEOUT_S", "120")),
         )
         if not ready:
             return JudgeTurnObservation(status="provider_error", error=error)
-        prompt = str(kwargs["prompt"])
-        if backend == "codex":
-            prompt = " ".join(f"{_CODEX_COMPACT_PERSONA} {prompt}".splitlines())
-        marker = f"evaluation-turn:{launch_id}"
-        started_at = time.time()
-        evaluation_tmux.send_prompt_to_window(
-            tmux_session, f"{marker} {prompt}", backend=backend, slot_id=slot_id,
-        )
+        if backend != "codex":
+            started_at = time.time()
+            evaluation_tmux.send_prompt_to_window(
+                tmux_session, prompt, backend=backend, slot_id=slot_id,
+            )
         observation = evaluation_tmux.read_judge_reply(
-            project_root, launch_id,
+            workspace, launch_id,
             timeout_s=float(os.environ.get("ZF_EVALUATION_JUDGE_TIMEOUT_S", "1800")),
             backend=backend, started_at=started_at, request_marker=marker,
             codex_sessions_root=codex_home / "sessions" if codex_home else None,
@@ -206,7 +229,7 @@ def _write_judge_prompt_sidecar(
     "[Pasted Content N chars]" placeholder (observed from ~2 KiB up) — the
     model then judges the placeholder, not the packet. Delivering a short
     path reference keeps the TUI input tiny; the judge reads the sidecar
-    itself (bypass-mode provider, read-only persona scoped to the packet).
+    itself from a private input directory with read-only provider permissions.
     """
     directory = (
         Path(state_dir)
@@ -221,8 +244,10 @@ def _write_judge_prompt_sidecar(
     return path
 
 
-def _prompt_file_reference(path: Path, *, judge_type: str) -> str:
-    schema = SCHEMA_VERSIONS.get(judge_type, f"{judge_type}_result.v1")
+def _prompt_file_reference(
+    path: Path, *, judge_type: str, schema_version: str | None = None,
+) -> str:
+    schema = schema_version or SCHEMA_VERSIONS.get(judge_type, f"{judge_type}_result.v2")
     # Single line on purpose: codex's input box treats Enter as newline when
     # the draft contains line breaks (submit needs Ctrl+Enter there), while
     # a single-line draft submits on plain Enter — which is the only submit
@@ -235,6 +260,22 @@ def _prompt_file_reference(path: Path, *, judge_type: str) -> str:
         f"object matching the {schema} schema. Do not inspect any other "
         f"file."
     )
+
+
+def _prompt_template(judge_type: str, packet: Any) -> str:
+    del packet
+    try:
+        return EVALUATION_PROMPTS[judge_type]
+    except KeyError as exc:
+        raise KeyError(f"unknown evaluation prompt stage: {judge_type}") from exc
+
+
+def _schema_version(judge_type: str, packet: Any) -> str:
+    del packet
+    try:
+        return SCHEMA_VERSIONS[judge_type]
+    except KeyError as exc:
+        raise KeyError(f"unknown evaluation judge type: {judge_type}") from exc
 
 
 def run_judge(
@@ -251,10 +292,16 @@ def run_judge(
     log: Any | None = None,
     slot_id: int | None = None,
     channel_id: str = "",
+    expected_role_ref: str = "",
+    expected_role_digest: str = "",
     stop_event: Event | None = None,
 ) -> dict[str, Any]:
     """Run one judge request end to end and emit its completed event."""
 
+    if judge_type not in SUPPORTED_JUDGE_TYPES:
+        raise ValueError(
+            f"unsupported evaluation judge type retired; not dispatched: {judge_type}"
+        )
     log = log or (lambda message: None)
     request_id = evaluation_request_id(
         workflow_run_id=workflow_run_id,
@@ -265,18 +312,75 @@ def run_judge(
     existing = read_judge_result(
         state_dir, workflow_run_id=workflow_run_id, judge_type=judge_type,
         request_id=request_id,
+        expected_trial_id=trial_id,
+        expected_source_snapshot_digest=str(packet.get("source_snapshot_digest") or ""),
+        expected_role_ref=expected_role_ref,
+        expected_role_digest=expected_role_digest,
     )
     if is_completed_judge_record(existing):
         return existing  # §8.2: a real verdict is permanent for this identity
+    raw_existing = _read_json(judge_result_path(
+        state_dir, workflow_run_id=workflow_run_id, judge_type=judge_type,
+        request_id=request_id,
+    ))
+    recovery = _recover_sidecar_attempt(
+        raw_existing, workflow_run_id=workflow_run_id, judge_type=judge_type,
+        request_id=request_id, trial_id=trial_id,
+        source_snapshot_digest=str(packet.get("source_snapshot_digest") or ""),
+    )
+    if recovery is not None and recovery[0] >= recovery[1]:
+        result = _judge_record(
+            judge_type=judge_type, workflow_run_id=workflow_run_id,
+            trial_id=trial_id, request_id=request_id, packet=packet,
+            status="inconclusive", result={},
+            error="invalid judge sidecar; bounded recovery exhausted",
+            provider="deterministic", model="",
+        )
+        result.update(attempt=recovery[0], max_attempts=recovery[1],
+                      retryable=False, inconclusive_after=recovery[1])
+        path = write_judge_result(
+            state_dir, workflow_run_id=workflow_run_id,
+            judge_type=judge_type, request_id=request_id, record=result,
+        )
+        writer.emit(
+            JUDGE_COMPLETED_EVENT, actor="evaluation-runner",
+            correlation_id=workflow_run_id,
+            payload={
+                "schema_version": "benchmark.evaluation.judge.v1",
+                "evaluation_contract": "channel-prd-eval.v1",
+                "request_id": request_id, "channel_id": channel_id,
+                "attempt": result["attempt"], "max_attempts": result["max_attempts"],
+                "judge_type": judge_type, "workflow_run_id": workflow_run_id,
+                "trial_id": trial_id, "run_id": str(packet.get("run_id") or ""),
+                "status": result["status"],
+                "source_snapshot_digest": str(packet.get("source_snapshot_digest") or ""),
+                "prompt_version": EVALUATION_PROMPT_VERSION,
+                "freeze_event_id": str((packet.get("task_details") or {}).get("freeze_event_id") or ""),
+                "artifact_ref": _rel(path, state_dir),
+                "artifact_digest": stable_digest(result), "error": result["error"],
+            },
+        )
+        return result
+    if existing is None and recovery is not None:
+        existing = raw_existing
 
     prompt_view = packet_for_prompt(packet)
-    rendered = STAGE_PROMPTS[judge_type].format(
+    prompt_template = _prompt_template(judge_type, packet)
+    rendered = prompt_template.format(
         task=json.dumps(prompt_view.get("task"), ensure_ascii=False, default=str),
+        task_type=json.dumps(prompt_view.get("task_type") or "", ensure_ascii=False, default=str),
+        role_ref=json.dumps(prompt_view.get("role_ref") or "", ensure_ascii=False, default=str),
         task_details=json.dumps(prompt_view.get("task_details"), ensure_ascii=False, default=str),
         agent_profiles=json.dumps(prompt_view.get("agent_profiles"), ensure_ascii=False, default=str),
         agent_relationships=json.dumps(prompt_view.get("agent_relationships"), ensure_ascii=False, default=str),
-        milestone_results=json.dumps(
-            _prior_judge(prompt_view, "milestone"), ensure_ascii=False, default=str,
+        contribution_result=json.dumps(
+            _prior_judge(prompt_view, "contribution"), ensure_ascii=False, default=str,
+        ),
+        discussion_result=json.dumps(
+            _prior_judge(prompt_view, "discussion"), ensure_ascii=False, default=str,
+        ),
+        prd_fidelity_result=json.dumps(
+            _prior_judge(prompt_view, "prd_fidelity"), ensure_ascii=False, default=str,
         ),
         channel_messages=json.dumps(prompt_view.get("channel_messages"), ensure_ascii=False, default=str),
         channel_frozen_prd=json.dumps(prompt_view.get("channel_frozen_prd"), ensure_ascii=False, default=str),
@@ -292,15 +396,18 @@ def run_judge(
         request_id=request_id,
         rendered=rendered,
     )
-    prompt_ref = _prompt_file_reference(packet_path, judge_type=judge_type)
+    prompt_ref = _prompt_file_reference(
+        packet_path, judge_type=judge_type,
+        schema_version=_schema_version(judge_type, packet),
+    )
 
-    missing = _missing_prd_inputs(packet) if judge_type == "prd_result" else []
+    missing = _missing_prd_inputs(packet) if judge_type == "prd_fidelity" else []
     if missing:
         result = _judge_record(
             judge_type=judge_type, workflow_run_id=workflow_run_id, trial_id=trial_id,
             request_id=request_id, packet=packet, status="evidence_missing",
-            result={"schema_version": SCHEMA_VERSIONS[judge_type], "judge_type": judge_type,
-                    "status": "evidence_missing", "dimensions": [], "prd_result_score": None,
+            result={"schema_version": _schema_version(judge_type, packet), "judge_type": judge_type,
+                    "status": "evidence_missing", "dimensions": [],
                     "missing_evidence": missing}, error="missing evaluation input: " + ", ".join(missing),
             provider="deterministic", model="",
         )
@@ -309,7 +416,7 @@ def run_judge(
         result = _run_request_turns(
             state_dir=state_dir, project_root=project_root, config=config, writer=writer,
             workflow_run_id=workflow_run_id, trial_id=trial_id, judge_type=judge_type,
-            request_id=request_id, packet=packet, prompt_ref=prompt_ref, existing=existing,
+            request_id=request_id, packet=packet, prompt_ref=prompt_ref, packet_path=packet_path, existing=existing,
             backend=backend or _visible_tmux_backend, log=log,
             slot_id=slot_id, channel_id=channel_id, stop_event=stop_event,
         )
@@ -324,6 +431,7 @@ def run_judge(
         correlation_id=workflow_run_id,
         payload={
             "schema_version": "benchmark.evaluation.judge.v1",
+            "evaluation_contract": "channel-prd-eval.v1",
             "request_id": request_id,
             "channel_id": channel_id,
             "attempt": result["attempt"],
@@ -335,6 +443,7 @@ def run_judge(
             "status": status,
             "source_snapshot_digest": str(packet.get("source_snapshot_digest") or ""),
             "prompt_version": EVALUATION_PROMPT_VERSION,
+            "freeze_event_id": str((packet.get("task_details") or {}).get("freeze_event_id") or ""),
             "artifact_ref": _rel(path, state_dir),
             "artifact_digest": stable_digest(result),
             "error": error,
@@ -365,6 +474,31 @@ def _missing_prd_inputs(packet: Any) -> list[str]:
     return missing
 
 
+def _recover_sidecar_attempt(
+    record: dict[str, Any] | None, *, workflow_run_id: str, judge_type: str,
+    request_id: str, trial_id: str, source_snapshot_digest: str,
+) -> tuple[int, int] | None:
+    """Read only the durable retry counters from a malformed sidecar."""
+    if not isinstance(record, dict):
+        return None
+    if (
+        str(record.get("request_id") or "") != request_id
+        or str(record.get("workflow_run_id") or "") != workflow_run_id
+        or str(record.get("judge_type") or "") != judge_type
+        or str(record.get("trial_id") or "") != trial_id
+        or str(record.get("source_snapshot_digest") or "") != source_snapshot_digest
+    ):
+        return None
+    try:
+        attempt = int(record.get("attempt") or 0)
+        maximum = int(record.get("max_attempts") or 2)
+    except (TypeError, ValueError):
+        return None
+    if attempt <= 0 or maximum <= 0 or attempt > maximum:
+        return None
+    return attempt, maximum
+
+
 def run_conclusion(
     *,
     state_dir: Path,
@@ -378,6 +512,7 @@ def run_conclusion(
     log: Any | None = None,
     slot_id: int | None = None,
     channel_id: str = "",
+    freeze_event_id: str = "",
     stop_event: Event | None = None,
 ) -> dict[str, Any]:
     """Run the conclusion agent once all three judges have terminal results."""
@@ -397,12 +532,20 @@ def run_conclusion(
     ):
         return existing
 
-    comm = judges.get("communication") or {}
-    prd = judges.get("prd_result") or {}
-    det_comm = _deterministic(judges, "communication", communication_score)
-    det_prd = _deterministic(judges, "prd_result", prd_result_score)
-    det_overall = overall_score(communication=det_comm, prd_result=det_prd)
-
+    discussion = judges.get("discussion") or {}
+    prd_fidelity = judges.get("prd_fidelity") or {}
+    contribution = judges.get("contribution") or {}
+    classification = (judges.get("task_type") or {}).get("result") or {}
+    role_record = next(
+        (
+            judges.get(stage) or {}
+            for stage in ("contribution", "discussion", "prd_fidelity")
+            if str((judges.get(stage) or {}).get("role_ref") or "").strip()
+            or str((judges.get(stage) or {}).get("role_digest") or "").strip()
+        ),
+        {},
+    )
+    role_result = role_record.get("result") if isinstance(role_record.get("result"), dict) else {}
     packet = {
         "schema_version": "zaofu-prd-evaluation-input.v1",
         "run_id": workflow_run_id,
@@ -411,16 +554,73 @@ def run_conclusion(
         "stage": "conclusion",
         "source_snapshot_digest": stable_digest({key: judges.get(key) for key in sorted(judges)}),
         "prompt_version": EVALUATION_PROMPT_VERSION,
-        "milestone_result": judges.get("milestone"),
-        "communication_result": comm,
-        "prd_result": prd,
+        "contribution_result": contribution,
+        "discussion_result": discussion,
+        "prd_fidelity_result": prd_fidelity,
+        "task_type": str(classification.get("task_type") or role_result.get("task_type") or ""),
+        "task_type_confidence": classification.get("confidence"),
+        "role_ref": str(
+            role_result.get("role_ref")
+            or (role_result.get("role_metadata") or {}).get("role_ref")
+            or role_record.get("role_ref")
+            or role_result.get("role_id")
+            or ""
+        ),
+        "role_digest": str(
+            role_result.get("role_digest")
+            or (role_result.get("role_metadata") or {}).get("role_digest")
+            or role_record.get("role_digest")
+            or ""
+        ),
+        "score_scale": "0-4",
     }
-    failed = {key: judges.get(key) or {} for key in ("milestone", "communication", "prd_result")
+    conclusion_evidence_refs = sorted({
+        ref
+        for value in judges.values()
+        for ref in (value.get("evidence_refs") or [])
+        if isinstance(ref, str) and ref
+    } | {
+        ref
+        for value in judges.values()
+        for item in ((value.get("result") or {}).get("dimensions") or [])
+                    + ((value.get("result") or {}).get("agent_findings") or [])
+        for ref in (item.get("evidence_refs") or [])
+        if isinstance(ref, str) and ref
+    })
+    conclusion_input = EvaluationPacket(
+        schema_version="zaofu-prd-evaluation-input.v1",
+        run_id=workflow_run_id,
+        workflow_run_id=workflow_run_id,
+        trial_id=trial_id,
+        stage="conclusion",
+        source_snapshot_digest=packet["source_snapshot_digest"],
+        prompt_version=EVALUATION_PROMPT_VERSION,
+        task={"task_type": packet.get("task_type") or ""},
+        task_details={
+            "source": "main-judge-aggregation",
+            "task_type": packet.get("task_type") or "",
+            "role_ref": packet.get("role_ref") or "",
+            "freeze_event_id": freeze_event_id,
+        },
+        prior_judges=[
+            judges.get(stage) or {}
+            for stage in ("contribution", "discussion", "prd_fidelity")
+        ],
+        allowed_evidence_refs=conclusion_evidence_refs,
+        task_type=str(packet.get("task_type") or ""),
+        task_type_confidence=packet.get("task_type_confidence"),
+        role_ref=str(packet.get("role_ref") or ""),
+        role_digest=str(packet.get("role_digest") or ""),
+        evaluator_profile="main_judge",
+        subagent_scope="conclusion",
+    )
+    conclusion_input_path, conclusion_input_digest = write_immutable_packet(
+        state_dir, conclusion_input,
+    )
+    packet["input_ref"] = _rel(conclusion_input_path, state_dir)
+    packet["input_digest"] = conclusion_input_digest
+    failed = {key: judges.get(key) or {} for key in ("contribution", "discussion", "prd_fidelity")
               if (judges.get(key) or {}).get("status") != "scored"}
-    if det_comm is None:
-        failed.setdefault("communication", comm)
-    if det_prd is None:
-        failed.setdefault("prd_result", prd)
     if failed:
         error = "; ".join(f"{key}: {value.get('error') or value.get('status')}"
                           for key, value in failed.items())
@@ -434,10 +634,12 @@ def run_conclusion(
             status=status, result={}, error=error, provider="deterministic", model="",
         )
     else:
-        rendered = STAGE_PROMPTS["conclusion"].format(
-            milestone_result=json.dumps(judges.get("milestone"), ensure_ascii=False, default=str),
-            communication_result=json.dumps(comm, ensure_ascii=False, default=str),
-            prd_result=json.dumps(prd, ensure_ascii=False, default=str),
+        rendered = _prompt_template("conclusion", packet).format(
+            task_type=json.dumps(packet.get("task_type") or "", ensure_ascii=False),
+            role_ref=json.dumps(packet.get("role_ref") or "", ensure_ascii=False),
+            contribution_result=json.dumps(contribution, ensure_ascii=False, default=str),
+            discussion_result=json.dumps(discussion, ensure_ascii=False, default=str),
+            prd_fidelity_result=json.dumps(prd_fidelity, ensure_ascii=False, default=str),
         )
         packet_path = _write_judge_prompt_sidecar(
             state_dir, workflow_run_id=workflow_run_id, judge_type="conclusion",
@@ -447,36 +649,43 @@ def run_conclusion(
             state_dir=state_dir, project_root=project_root, config=config, writer=writer,
             workflow_run_id=workflow_run_id, trial_id=trial_id, judge_type="conclusion",
             request_id=request_id, packet=packet, existing=existing,
-            prompt_ref=_prompt_file_reference(packet_path, judge_type="conclusion"),
+            prompt_ref=_prompt_file_reference(
+                packet_path, judge_type="conclusion",
+                schema_version=_schema_version("conclusion", packet),
+            ),
+            packet_path=packet_path,
             backend=backend or _visible_tmux_backend, log=log,
             slot_id=slot_id, channel_id=channel_id, stop_event=stop_event,
         )
     status, error = result["status"], result["error"]
     raw = result["result"]
-    if failed or status != "complete":
-        det_overall = None
     if failed or status == "inconclusive":
-        raw.update(schema_version="conclusion_result.v1", judge_type="conclusion",
-                   status=status, conclusion_zh="Judge 结果未全部通过评分门禁，暂不形成总分。",
+        raw.update(schema_version=_schema_version("conclusion", packet), judge_type="conclusion",
+                   status=status, score_scale="0-4", agent_scores=[],
+                   conclusion_zh="Judge 结果未全部通过评分门禁，暂不形成汇总结论。",
                    team_findings={"discussion_meaningful": False, "discussion_progressed": False,
                                   "prd_ready_for_next_stage": False, "problems": [error],
                                   "underperformed_roles": [], "unnecessary_roles": []},
-                   next_actions=["检查失败状态和缺失证据；修复后重新测评，保留旧报告。"])
+                   next_actions=["检查失败状态和缺失证据；修复后重新测评，保留旧报告。"],
+                   judge_refs=[], evidence_refs=[])
     if raw:
-        milestone = judges.get("milestone") or {}
-        findings = (milestone.get("result") or {}).get("agent_findings") or []
-        raw["agent_scores"] = [{"agent_id": item.get("agent_id"), "score": (
-            item.get("score") if milestone.get("status") == "scored" and item.get("status") == "scored" else None
-        )} for item in findings]
+        contribution = judges.get("contribution") or {}
+        findings = (contribution.get("result") or {}).get("agent_findings") or []
+        raw["agent_scores"] = [{
+            "agent_id": item.get("agent_id"),
+            "score": item.get("score") if contribution.get("status") == "scored" and item.get("status") == "scored" else None,
+            "necessity": item.get("necessity"),
+            "necessity_status": item.get("necessity_status") or "complete",
+        } for item in findings]
         raw["judge_refs"] = [value["request_id"] for value in judges.values() if value.get("request_id")]
         raw["evidence_refs"] = sorted({ref for value in judges.values()
             for item in ((value.get("result") or {}).get("dimensions") or [])
                         + ((value.get("result") or {}).get("agent_findings") or [])
             for ref in item.get("evidence_refs") or [] if item.get("status") == "scored"})
-        raw.update(communication_score=det_comm, prd_result_score=det_prd,
-                   overall_score=det_overall)
-        if status == "complete" and det_overall is None:
-            status = raw["status"] = result["status"] = "incomplete"
+    result["packet_ref"] = packet["input_ref"]
+    result["packet_digest"] = packet["input_digest"]
+    # Keep the immutable input binding in the conclusion sidecar itself; the
+    # semantic scores remain untouched.
     path = write_conclusion_result(state_dir, workflow_run_id, request_id, result)
     writer.emit(
         CONCLUSION_COMPLETED_EVENT,
@@ -484,6 +693,7 @@ def run_conclusion(
         correlation_id=workflow_run_id,
         payload={
             "schema_version": "benchmark.evaluation.conclusion.v1",
+            "evaluation_contract": "channel-prd-eval.v1",
             "channel_id": channel_id,
             "judge_type": "conclusion",
             "attempt": result["attempt"],
@@ -491,10 +701,10 @@ def run_conclusion(
             "request_id": request_id,
             "workflow_run_id": workflow_run_id,
             "trial_id": trial_id,
+            "source_snapshot_digest": str(packet.get("source_snapshot_digest") or ""),
+            "prompt_version": EVALUATION_PROMPT_VERSION,
+            "freeze_event_id": freeze_event_id,
             "status": status,
-            "communication_score": det_comm,
-            "prd_result_score": det_prd,
-            "overall_score": det_overall,
             "artifact_ref": _rel(path, state_dir),
             "artifact_digest": stable_digest(result),
             "error": error,
@@ -503,184 +713,10 @@ def run_conclusion(
     return result
 
 
-def judge_result_path(
-    state_dir: Path,
-    *,
-    workflow_run_id: str,
-    judge_type: str,
-    request_id: str,
-) -> Path:
-    return (
-        Path(state_dir)
-        / EVALUATION_ARTIFACT_ROOT
-        / "judges"
-        / _safe(workflow_run_id)
-        / _safe(judge_type)
-        / f"{_safe(request_id)}.json"
-    )
-
-
-def conclusion_result_path(
-    state_dir: Path, workflow_run_id: str, request_id: str,
-) -> Path:
-    return (
-        Path(state_dir)
-        / EVALUATION_ARTIFACT_ROOT
-        / "conclusions"
-        / _safe(workflow_run_id)
-        / f"{_safe(request_id)}.json"
-    )
-
-
-def report_path(state_dir: Path, workflow_run_id: str) -> Path:
-    return (
-        Path(state_dir)
-        / EVALUATION_ARTIFACT_ROOT
-        / "reports"
-        / _safe(workflow_run_id)
-        / "report.md"
-    )
-
-
-def read_judge_result(
-    state_dir: Path, *, workflow_run_id: str, judge_type: str, request_id: str,
-) -> dict[str, Any] | None:
-    return _read_json(judge_result_path(
-        state_dir, workflow_run_id=workflow_run_id,
-        judge_type=judge_type, request_id=request_id,
-    ))
-
-
-def read_conclusion_result(
-    state_dir: Path, workflow_run_id: str, request_id: str,
-) -> dict[str, Any] | None:
-    return _read_json(conclusion_result_path(state_dir, workflow_run_id, request_id))
-
-
-def write_judge_result(
-    state_dir: Path,
-    *,
-    workflow_run_id: str,
-    judge_type: str,
-    request_id: str,
-    record: dict[str, Any],
-) -> Path:
-    path = judge_result_path(
-        state_dir, workflow_run_id=workflow_run_id,
-        judge_type=judge_type, request_id=request_id,
-    )
-    path.parent.mkdir(parents=True, exist_ok=True)
-    atomic_write_text(path, _canonical(record))
-    return path
-
-
-def write_conclusion_result(
-    state_dir: Path, workflow_run_id: str, request_id: str, record: dict[str, Any],
-) -> Path:
-    path = conclusion_result_path(state_dir, workflow_run_id, request_id)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    atomic_write_text(path, _canonical(record))
-    return path
-
-
-def versioned_report_path(
-    state_dir: Path, workflow_run_id: str, prompt_version: str, *,
-    trial_id: str = "", source_snapshot_digest: str = "",
-) -> Path:
-    suffix = f"-{_safe(trial_id)}-{_safe(source_snapshot_digest)}" if trial_id else ""
-    return report_path(state_dir, workflow_run_id).with_name(f"report-{_safe(prompt_version)}{suffix}.md")
-
-
-def _archive_report(path: Path, body: str) -> Path:
-    # Same identity can acquire a new conclusion after recovering a legacy
-    # timeout. Preserve both bodies, including the first archived report.
-    if path.exists() and path.read_text(encoding="utf-8") != body:
-        path = path.with_name(f"{path.stem}-{stable_digest(body)[:16]}.md")
-    if not path.exists():
-        atomic_write_text(path, body)
-    return path
-
-
-def write_report(
-    state_dir: Path, workflow_run_id: str, body: str, *,
-    prompt_version: str | None = None, trial_id: str = "",
-    source_snapshot_digest: str = "", final: bool = True,
-) -> Path:
-    """Immutable archives + latest projection; preserve legacy latest on upgrade."""
-    from zf.core.state.locks import locked_path
-
-    path = report_path(state_dir, workflow_run_id)
-    with locked_path(path):
-        if path.exists():
-            previous = path.read_text(encoding="utf-8")
-            if previous != body:
-                _archive_report(path.with_name(f"report-snapshot-{stable_digest(previous)[:16]}.md"), previous)
-        if prompt_version and final:
-            _archive_report(versioned_report_path(
-                state_dir, workflow_run_id, prompt_version,
-                trial_id=trial_id, source_snapshot_digest=source_snapshot_digest,
-            ), body)
-        atomic_write_text(path, body)
-    return path
-
-
-def _write_turn_sidecars(
-    state_dir: Path,
-    *,
-    workflow_run_id: str,
-    judge_type: str,
-    request_id: str,
-    attempts_log: list[tuple[int, str, str, str]],
-) -> None:
-    """Persist the exact prompt seen and raw replies returned per attempt.
-
-    These are the human-readable audit trail: the record JSON only carries a
-    prompt_digest and a normalized result, so without these files one cannot
-    re-read what the judge was actually shown (rendered packet included).
-    Each entry is (attempt, system_prompt, user_prompt, raw_reply).
-    """
-
-    if not attempts_log:
-        return
-    if judge_type == "conclusion":
-        directory = conclusion_result_path(
-            state_dir, workflow_run_id, request_id,
-        ).parent
-    else:
-        directory = judge_result_path(
-            state_dir, workflow_run_id=workflow_run_id,
-            judge_type=judge_type, request_id=request_id,
-        ).parent
-    directory.mkdir(parents=True, exist_ok=True)
-    _attempt, system_prompt, user_prompt, _reply = attempts_log[-1]
-    header = (
-        f"# judge turn prompt — {judge_type} {request_id}\n\n"
-        f"attempts: {len(attempts_log)} (below is the final attempt)\n\n"
-        "## system prompt\n\n"
-        f"{system_prompt}\n\n"
-        "## user prompt (rendered packet)\n\n"
-        "---\n\n"
-    )
-    atomic_write_text(
-        directory / f"{request_id}.prompt.md", header + user_prompt + "\n",
-    )
-    replies = [
-        f"## attempt {attempt}\n\n{reply.strip() or '(empty reply)'}\n"
-        for attempt, _system, _prompt, reply in attempts_log
-        if reply.strip()
-    ]
-    if replies:
-        atomic_write_text(
-            directory / f"{request_id}.raw.md",
-            f"# judge raw replies — {judge_type} {request_id}\n\n"
-            + "\n".join(replies),
-        )
-
-
 def _run_request_turns(
     *, state_dir: Path, project_root: Path | None, config: Any | None,
     writer: EventWriter, workflow_run_id: str, trial_id: str, judge_type: str,
-    request_id: str, packet: Any, prompt_ref: str, existing: dict[str, Any] | None,
+    request_id: str, packet: Any, prompt_ref: str, packet_path: Path, existing: dict[str, Any] | None,
     backend: JudgeBackend, log: Any, slot_id: int | None, channel_id: str,
     stop_event: Event | None = None,
 ) -> dict[str, Any]:
@@ -739,7 +775,7 @@ def _run_request_turns(
                 observed = backend(
                     state_dir=state_dir, project_root=project_root, config=config,
                     workflow_run_id=workflow_run_id, judge_type=judge_type,
-                    request_id=request_id, system_prompt=SYSTEM_PROMPT, prompt=prompt,
+                    request_id=request_id, system_prompt=SYSTEM_PROMPT, prompt=prompt, packet_path=packet_path,
                     log=log, attempt=attempt, schema_attempt=schema_attempt,
                     slot_id=slot_id, progress=progress,
                     stop_event=stop_event,
@@ -771,9 +807,15 @@ def _run_request_turns(
             normalized, error = (normalize_judge_output(
                 judge_type=judge_type, raw=parsed,
                 allowed_evidence_refs=list(packet.get("allowed_evidence_refs") or []),
-                expected_agent_ids=participants if judge_type == "milestone" else None,
+                expected_agent_ids=participants if judge_type == "contribution" else None,
                 workflow_bound=bool(packet.get("workflow_bound_prd")),
+                expected_schema_version=_schema_version(judge_type, packet),
             ) if parsed is not None else (None, f"judge returned no single JSON object: {observed.reply[:240]}"))
+            if normalized is not None and judge_type in {"contribution", "discussion", "prd_fidelity"}:
+                role_error = _role_binding_error(normalized.to_dict(), packet)
+                if role_error:
+                    normalized = None
+                    error = role_error
             record.update(status="invalid", error=error)
             if normalized is not None:
                 record.update(result=normalized.to_dict(), status=normalized.status,
@@ -794,6 +836,52 @@ def _run_request_turns(
     _write_turn_sidecars(state_dir, workflow_run_id=workflow_run_id, judge_type=judge_type,
                          request_id=request_id, attempts_log=attempts_log)
     return record
+
+
+def _role_binding_error(result: dict[str, Any], packet: Any) -> str:
+    """Reject a quality result that claims a different frozen evaluator role.
+
+    The selected role is a mechanical input binding.  The provider still
+    echoes task/role metadata in its result for auditability, but those fields
+    must agree with the packet before the score can become reusable.  An outer
+    record role digest alone is insufficient: a model could otherwise return a
+    different role id/version while the report appeared to use the selected
+    role.
+    """
+
+    expected_task = str(packet.get("task_type") or "").strip()
+    expected_ref = str(packet.get("role_ref") or "").strip()
+    details = packet.get("task_details") if hasattr(packet, "get") else {}
+    metadata = details.get("evaluation_metadata") if isinstance(details, dict) else {}
+    metadata = metadata if isinstance(metadata, dict) else {}
+    expected_version = str(metadata.get("role_version") or "").strip()
+    if not expected_task or not expected_ref:
+        # Classifier and test packets that have not selected a role do not
+        # carry a role contract to enforce.
+        return ""
+    result_task = str(result.get("task_type") or "").strip()
+    result_id = str(result.get("role_id") or "").strip()
+    result_version = str(result.get("role_version") or "").strip()
+    if result_task != expected_task:
+        return f"judge role task_type mismatch: expected {expected_task!r}, got {result_task!r}"
+    if result_id != expected_task:
+        return f"judge role_id mismatch: expected {expected_task!r}, got {result_id!r}"
+    if expected_version and result_version != expected_version:
+        return (
+            "judge role_version mismatch: "
+            f"expected {expected_version!r}, got {result_version!r}"
+        )
+    role_metadata = result.get("role_metadata")
+    if not isinstance(role_metadata, dict):
+        role_metadata = {}
+    returned_ref = str(role_metadata.get("role_ref") or "").strip()
+    returned_digest = str(role_metadata.get("role_digest") or "").strip()
+    expected_digest = str(packet.get("role_digest") or "").strip()
+    if returned_ref and returned_ref != expected_ref:
+        return f"judge role_ref mismatch: expected {expected_ref!r}, got {returned_ref!r}"
+    if returned_digest and expected_digest and returned_digest != expected_digest:
+        return "judge role_digest mismatch"
+    return ""
 
 
 def _parse_json_object(text: str) -> dict[str, Any] | None:
@@ -839,7 +927,7 @@ def _judge_record(
     model: str,
 ) -> dict[str, Any]:
     packet_dict = packet.to_dict() if isinstance(packet, EvaluationPacket) else packet
-    return JudgeRecord(
+    record = JudgeRecord(
         schema_version="benchmark.evaluation.record.v1",
         judge_type=judge_type,
         status=status,
@@ -849,7 +937,7 @@ def _judge_record(
         trial_id=trial_id,
         source_snapshot_digest=str(packet_dict.get("source_snapshot_digest") or ""),
         prompt_version=EVALUATION_PROMPT_VERSION,
-        prompt_digest=stable_digest(STAGE_PROMPTS[judge_type]),
+        prompt_digest=stable_digest(_prompt_template(judge_type, packet_dict)),
         provider=provider,
         model=model,
         created_at=datetime.now(timezone.utc).isoformat(),
@@ -857,18 +945,15 @@ def _judge_record(
         result=result or {},
         evidence_refs=list(packet_dict.get("allowed_evidence_refs") or []),
     ).to_dict()
-
-
-def _deterministic(
-    judges: dict[str, dict[str, Any]],
-    judge_type: str,
-    scorer: Any,
-) -> float | None:
-    record = judges.get(judge_type) or {}
-    result = record.get("result") or {}
-    if str(record.get("status") or "") != "scored":
-        return None
-    return scorer(result.get("dimensions") or [])
+    record.update(
+        evaluation_contract="channel-prd-eval.v1",
+        freeze_event_id=str((packet_dict.get("task_details") or {}).get("freeze_event_id") or ""),
+        role_ref=str(packet_dict.get("role_ref") or ""),
+        role_digest=str(packet_dict.get("role_digest") or ""),
+        evaluator_profile=str(packet_dict.get("evaluator_profile") or ""),
+        task_type=str(packet_dict.get("task_type") or ""),
+    )
+    return record
 
 
 def _prior_judge(prompt_view: dict[str, Any], judge_type: str) -> Any:
@@ -876,32 +961,6 @@ def _prior_judge(prompt_view: dict[str, Any], judge_type: str) -> Any:
         if isinstance(item, dict) and item.get("judge_type") == judge_type:
             return item.get("result")
     return None
-
-
-def _read_json(path: Path) -> dict[str, Any] | None:
-    if not path.exists():
-        return None
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return None
-    return payload if isinstance(payload, dict) else None
-
-
-def _canonical(value: Any) -> str:
-    return json.dumps(value, ensure_ascii=False, sort_keys=True, indent=2, default=str) + "\n"
-
-
-def _rel(path: Path, state_dir: Path) -> str:
-    try:
-        return str(Path(path).relative_to(Path(state_dir)))
-    except ValueError:
-        return str(path)
-
-
-def _safe(value: str) -> str:
-    safe = "".join(ch if ch.isalnum() or ch in "._-" else "-" for ch in str(value))
-    return safe.strip(".-") or "unknown"
 
 
 __all__ = [

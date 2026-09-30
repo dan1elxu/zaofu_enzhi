@@ -473,6 +473,9 @@ KNOWN_EVENT_TYPES: frozenset[str] = frozenset({
     "channel.consensus.signed", "channel.consensus.blocked",
     "channel.consensus.review.rejected",
     "channel.consensus.reached",
+    # Canonical PRD freeze handoff.  This is informational and must not
+    # become a second consensus/state transition.
+    "channel.prd.frozen",
     "channel.auto_chain.step",
     "channel.auto_chain.completed",
     "channel.auto_chain.failed",
@@ -835,7 +838,7 @@ KNOWN_EVENT_TYPES: frozenset[str] = frozenset({
     "role.suspended.circuit",        # per-role breaker opened
     # Human
     "human.escalate", "human.note", "human.resolved",
-    # PRD benchmark evaluation (kanban-channel-prd-evaluation.md §8.4):
+    # Channel/PRD benchmark evaluation:
     # informational only — these never wake the workflow or change
     # product state; they exist so runs carry durable eval verdicts.
     "benchmark.evaluation.judge.completed",

@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
+import re
 from typing import Any
 
 from zf.core.events.log import EventLog
@@ -123,6 +124,7 @@ CHANNEL_EVENT_TYPES = {
     "channel.consensus.blocked",
     "channel.consensus.review.rejected",
     "channel.consensus.reached",
+    "channel.prd.frozen",
     "channel.discussion.complexity.decided",
     "channel.discussion.round.opened",
     "channel.moderator.verdict.requested",
@@ -152,6 +154,7 @@ CHANNEL_EVENT_TYPES = {
     "workflow.adjust.rejected",
 }
 DEFAULT_CHANNEL_IDS = {"ch-zaofu", "zaofu"}
+_FREEZE_REVISION_RE = re.compile(r"^[1-9][0-9]*$")
 DEFAULT_PROVIDER_CAPABILITIES = {
     "codex": {"supports_resume": True, "supports_interrupt": True, "supports_stream": False, "cost_class": "medium"},
     "claude-code": {"supports_resume": True, "supports_interrupt": True, "supports_stream": False, "cost_class": "medium"},
@@ -393,6 +396,56 @@ def _with_seq(events: list[ZfEvent]) -> list[tuple[int, ZfEvent]]:
     return [(index, event) for index, event in enumerate(events, 1)]
 
 
+def _record_evaluation_freeze_identity(
+    channel: dict[str, Any],
+    event: ZfEvent,
+    payload: dict[str, Any],
+    seq: int,
+) -> None:
+    """Index canonical freeze occurrences for evaluation event validation."""
+
+    thread_id = str(payload.get("thread_id") or "").strip()
+    if not thread_id:
+        return
+    if "prd_revision" in payload:
+        revision_raw = payload.get("prd_revision")
+    elif "revision" in payload:
+        revision_raw = payload.get("revision")
+    else:
+        revision_raw = None
+    if isinstance(revision_raw, bool):
+        return
+    if isinstance(revision_raw, int):
+        if revision_raw < 1:
+            return
+        revision = revision_raw
+    elif isinstance(revision_raw, str) and _FREEZE_REVISION_RE.fullmatch(revision_raw):
+        revision = int(revision_raw)
+    else:
+        return
+    channel_id = str(channel.get("channel_id") or "").strip()
+    if not channel_id or not event.id:
+        return
+    channel.setdefault("_evaluation_freeze_identities", {})[event.id] = {
+        "seq": seq,
+        "channel_id": channel_id,
+        "thread_id": thread_id,
+        "prd_revision": revision,
+        # The run id is bound by the first valid evaluation event.  Do not
+        # derive it from channel/revision here: a future evaluator may use an
+        # occurrence-specific id while retaining the same freeze contract.
+        "workflow_run_id": str(payload.get("workflow_run_id") or "").strip(),
+    }
+    # A new freeze supersedes the public evaluation view immediately.  Until
+    # its first valid progress event arrives, an older run must not remain
+    # visible as if it described the newly frozen PRD.
+    latest_rank = int(channel.get("_evaluation_latest_rank") or -1)
+    if seq >= latest_rank:
+        channel["_evaluation_latest_rank"] = seq
+        channel["_evaluation_latest_freeze_event_id"] = event.id
+        channel["_evaluation_latest_run"] = str(payload.get("workflow_run_id") or "")
+
+
 def _build(events: list[tuple[int, ZfEvent]], *, state_dir: Path | None = None) -> dict[str, dict[str, Any]]:
     channels: dict[str, dict[str, Any]] = {}
     for seq, event in events:
@@ -413,8 +466,10 @@ def _build(events: list[tuple[int, ZfEvent]], *, state_dir: Path | None = None) 
         # materialize and redact only the bounded rows they actually expose;
         # eagerly redacting every historical event dominated Channel reads.
         channel["linked_events"].append((seq, event))
+        if event.type == "channel.prd.frozen":
+            _record_evaluation_freeze_identity(channel, event, payload, seq)
         if event.type in EVALUATION_EVENTS:
-            fold_evaluation(channel, payload, event_type=event.type, ts=event.ts)
+            fold_evaluation(channel, payload, event_type=event.type, ts=event.ts, seq=seq)
         elif event.type in {"channel.auto_chain.step", "channel.auto_chain.retry.requested"}:
             if payload.get("operation_id") and payload.get("purpose") in {"resolve", "handoff"}:
                 key = f"{payload.get('thread_id') or 'main'}:{payload['purpose']}"
@@ -643,6 +698,10 @@ def _empty_channel(channel_id: str) -> dict[str, Any]:
         "last_event_type": "",
         "updated_at": "",
         "linked_events": [],
+        "_evaluation_freeze_identities": {},
+        "_evaluation_latest_rank": -1,
+        "_evaluation_latest_run": "",
+        "_evaluation_latest_freeze_event_id": "",
         "history_cleared_at": "",
         "history_clear_event_id": "",
         "history_clear_reason": "",
@@ -681,7 +740,16 @@ def _apply_member(channel: dict[str, Any], event: ZfEvent, payload: dict[str, An
         member_type=member_type,
     )
     member["persona"] = _payload_str(payload, "persona") or member["persona"]
-    member["display_name"] = _payload_str(payload, "display_name") or member.get("display_name", "") or member["persona"]
+    # Preserve the configured purpose/name when older callers use ``name``
+    # instead of ``display_name``. Evaluation packets expose this frozen
+    # label so a Judge can distinguish what each Agent is for, while the
+    # public member shape continues to use ``display_name``.
+    member["display_name"] = (
+        _payload_str(payload, "display_name")
+        or _payload_str(payload, "name")
+        or member.get("display_name", "")
+        or member["persona"]
+    )
     for field in (
         "profile_id",
         "profile_provenance",
@@ -2225,7 +2293,10 @@ def _apply_consensus(channel: dict[str, Any], event: ZfEvent, payload: dict[str,
                 _payload_str(payload, "prd_digest")
                 or _payload_str(payload, "artifact_digest")
             ),
-            "prd_revision": int(payload.get("prd_revision") or 0),
+            # Keep malformed revisions representable in the projection so
+            # the discussion gate can reject them deterministically instead
+            # of crashing while folding an untrusted event.
+            "prd_revision": _payload_prd_revision(payload.get("prd_revision")),
             "readiness_ref": _payload_str(payload, "readiness_ref"),
             "readiness_digest": _payload_str(
                 payload, "readiness_digest"
@@ -2252,6 +2323,7 @@ def _apply_consensus(channel: dict[str, Any], event: ZfEvent, payload: dict[str,
             "proposed_event_id": event.id,
             "signed": {},
             "blocked": [],
+            "review_rejections": [],
             "reached_event_id": "",
             "reopened": False,
             "human_confirmed": False,
@@ -2259,6 +2331,14 @@ def _apply_consensus(channel: dict[str, Any], event: ZfEvent, payload: dict[str,
             "revision_pending": False,
             "ts": event.ts,
         })
+        return
+    if event.type in {"channel.consensus.signed", "channel.consensus.blocked"} and any(
+        payload.get(key) not in (None, "") and payload[key] != item.get(current_key)
+        for key, current_key in (
+            ("artifact_ref", "artifact_ref"), ("artifact_digest", "artifact_digest"),
+            ("prd_revision", "prd_revision"), ("consensus_event_id", "proposed_event_id"),
+        )
+    ):
         return
     if event.type == "channel.consensus.signed":
         member_id = _payload_str(payload, "member_id") or event.actor
@@ -2299,6 +2379,15 @@ def _apply_consensus(channel: dict[str, Any], event: ZfEvent, payload: dict[str,
         })
         return
     if event.type == "channel.consensus.reached":
+        if "prd_revision" in payload:
+            revision = _payload_prd_revision(payload.get("prd_revision"))
+            if payload.get("prd_revision") not in (None, "") and revision == 0:
+                # Ignore an invalid reached occurrence.  Keeping the prior
+                # proposal projected lets the discussion driver emit the
+                # deterministic `prd:revision_invalid` rejection instead of
+                # crashing or treating the malformed occurrence as a freeze.
+                item["prd_revision"] = 0
+                return
         for field in (
             "artifact_ref",
             "artifact_digest",
@@ -2334,14 +2423,14 @@ def _apply_consensus(channel: dict[str, Any], event: ZfEvent, payload: dict[str,
                 payload.get("implementation_start") is True
             )
         if payload.get("prd_revision") is not None:
-            item["prd_revision"] = int(payload.get("prd_revision") or 0)
+            item["prd_revision"] = _payload_prd_revision(payload.get("prd_revision"))
         item["reached_event_id"] = event.id
         item["status"] = "reached"
-        item["confirmed_revision"] = int(
+        item["confirmed_revision"] = _payload_prd_revision(
             payload.get("prd_revision")
-            or item.get("prd_revision")
-            or 0
-        )
+            if payload.get("prd_revision") is not None
+            else item.get("prd_revision")
+        ) or 0
         item["revision_pending"] = False
 
 
@@ -2452,7 +2541,7 @@ def _apply_synthesis(channel: dict[str, Any], event: ZfEvent, payload: dict[str,
             _payload_str(payload, "prd_digest")
             or _payload_str(payload, "artifact_digest")
         ),
-        "prd_revision": int(payload.get("prd_revision") or 0),
+        "prd_revision": _payload_prd_revision(payload.get("prd_revision")),
         "previous_prd_ref": _payload_str(payload, "previous_prd_ref"),
         "previous_prd_digest": _payload_str(
             payload, "previous_prd_digest"
@@ -3214,6 +3303,21 @@ def _payload_int(value: object, default: int = 0) -> int:
         return int(value)
     except (TypeError, ValueError):
         return default
+
+
+def _payload_prd_revision(value: object) -> int | None:
+    """Fold canonical revisions while keeping malformed values fail-closed."""
+
+    if value in (None, ""):
+        return None
+
+    if isinstance(value, bool):
+        return 0
+    if isinstance(value, int):
+        return value if value > 0 else 0
+    if isinstance(value, str) and _FREEZE_REVISION_RE.fullmatch(value):
+        return int(value)
+    return 0
 
 
 def _string_list(value: object) -> list[str]:

@@ -5,7 +5,8 @@ from __future__ import annotations
 from zf.core.state.locks import locked_path
 from zf.core.events import ZfEvent
 from zf.runtime.channel_contracts import normalize_product_discussion_mode
-from zf.runtime.channel_consensus_identity import consensus_reached_payload
+from zf.runtime.channel_consensus_identity import consensus_artifact_error, consensus_reached_payload
+from zf.runtime.channel_prd_freeze import emit_prd_frozen
 from zf.runtime.channel_owner_authority import (
     channel_owner_authority_error,
 )
@@ -294,6 +295,13 @@ class ChannelConsensusActionsMixin:
                     "duplicate": True,
                 }
         if decision == "confirm":
+            error = consensus_artifact_error(self.state_dir, consensus)
+            if error:
+                return self._failed(
+                    requested=requested, action=action, requested_action=requested_action,
+                    task_id=_task_id_from_payload(payload), status_code=409,
+                    status="consensus_artifact_invalid", reason=error,
+                )
             readiness_verdict = str(
                 consensus.get("readiness_verdict") or "unassessed"
             )
@@ -406,6 +414,22 @@ class ChannelConsensusActionsMixin:
                         payload.get("accept_readiness_risk")
                     ),
                 ),
+            )
+            emit_prd_frozen(
+                self.writer,
+                consensus_payload=consensus_reached_payload(
+                    consensus,
+                    channel_id=channel_id,
+                    thread_id=thread_id,
+                    source=self.surface,
+                    confirmed_by=self.actor,
+                    risk_accepted=bool(payload.get("accept_readiness_risk")),
+                ),
+                source_event=reached_event,
+                freeze_reason="human_confirmation",
+                actor=self.actor,
+                task_id=reached_event.task_id,
+                correlation_id=channel_id,
             )
         self._completed(
             requested=requested,

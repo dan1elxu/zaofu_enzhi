@@ -1,14 +1,45 @@
 """Typed evaluation data models.
 
 These frozen dataclasses replace bare ``dict[str, Any]`` for the structured
-judge results. They serialize to the same JSON shape used by the sidecars and
-events, so existing artifact readers remain compatible.
+judge results. They serialize to the canonical sidecar and event JSON shape.
 """
 
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
 from typing import Any
+
+
+# ``must``/``optional``/``not_needed`` are the stable vocabulary exposed by
+# the Channel/PRD evaluation contract.  A result that uses another label is
+# invalid; keeping one vocabulary is necessary for comparable reports.
+NECESSITY_VALUES = frozenset({"must", "optional", "not_needed"})
+NECESSITY_UNDETERMINED = "undetermined"
+
+
+def canonical_necessity(value: Any) -> str:
+    """Return the stable necessity value for a judge-provided value.
+
+    Unknown or empty values are returned unchanged (usually as an empty
+    string). Validation of whether ``undetermined`` is appropriate for an
+    item belongs to the schema normalizer, not this small data-model helper.
+    """
+
+    text = str(value or "").strip()
+    return text
+
+
+def necessity_label(value: Any) -> str:
+    """Human-readable Chinese label used by the compact Markdown report."""
+
+    labels = {
+        "must": "必须",
+        "optional": "可选",
+        "not_needed": "不需要",
+        "undetermined": "未确定",
+    }
+    canonical = canonical_necessity(value)
+    return labels.get(canonical, canonical or "未确定")
 
 
 @dataclass(frozen=True)
@@ -21,6 +52,7 @@ class DimensionScore:
     rationale: str = ""
     confidence: float = 0.0
     status: str = ""
+    score_scale: str = "0-4"
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -41,6 +73,7 @@ class DimensionScore:
             rationale=str(value.get("rationale") or ""),
             confidence=_float_or_zero(value.get("confidence")),
             status=str(value.get("status") or ""),
+            score_scale=str(value.get("score_scale") or "0-4"),
         )
 
 
@@ -54,6 +87,8 @@ class AgentFinding:
     rationale: str = ""
     confidence: float = 0.0
     status: str = ""
+    necessity_status: str = "complete"
+    score_scale: str = "0-4"
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -68,33 +103,40 @@ class AgentFinding:
         return cls(
             agent_id=str(value.get("agent_id") or ""),
             score=_float_or_none(value.get("score")),
-            necessity=str(value.get("necessity") or ""),
+            necessity=canonical_necessity(value.get("necessity")),
             role_summary=str(value.get("role_summary") or ""),
             evidence_refs=_string_list(value.get("evidence_refs")),
             rationale=str(value.get("rationale") or ""),
             confidence=_float_or_zero(value.get("confidence")),
             status=str(value.get("status") or ""),
+            necessity_status=str(value.get("necessity_status") or "complete"),
+            score_scale=str(value.get("score_scale") or "0-4"),
         )
 
 
 @dataclass(frozen=True)
-class MilestoneResult:
+class ContributionResult:
     schema_version: str
-    judge_type: str = "milestone"
+    judge_type: str = "contribution"
     status: str = ""
     run_id: str = ""
     source_snapshot_digest: str = ""
     agent_findings: list[AgentFinding] = field(default_factory=list)
     missing_evidence: list[str] = field(default_factory=list)
+    task_type: str = ""
+    role_id: str = ""
+    role_version: str = ""
+    role_metadata: dict[str, Any] = field(default_factory=dict)
+    score_scale: str = "0-4"
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
     @classmethod
-    def from_dict(cls, value: dict[str, Any]) -> "MilestoneResult":
+    def from_dict(cls, value: dict[str, Any]) -> "ContributionResult":
         return cls(
             schema_version=str(value.get("schema_version") or ""),
-            judge_type=str(value.get("judge_type") or "milestone"),
+            judge_type=str(value.get("judge_type") or "contribution"),
             status=str(value.get("status") or ""),
             run_id=str(value.get("run_id") or ""),
             source_snapshot_digest=str(value.get("source_snapshot_digest") or ""),
@@ -104,29 +146,39 @@ class MilestoneResult:
                 if isinstance(item, dict)
             ],
             missing_evidence=_string_list(value.get("missing_evidence")),
+            task_type=str(value.get("task_type") or ""),
+            role_id=str(value.get("role_id") or ""),
+            role_version=str(value.get("role_version") or ""),
+            role_metadata=_dict_value(value.get("role_metadata")),
+            score_scale=str(value.get("score_scale") or "0-4"),
         )
 
 
 @dataclass(frozen=True)
-class CommunicationResult:
+class DiscussionResult:
     schema_version: str
-    judge_type: str = "communication"
+    judge_type: str = "discussion"
     status: str = ""
     run_id: str = ""
     source_snapshot_digest: str = ""
     dimensions: list[DimensionScore] = field(default_factory=list)
     human_intervention_count: int = 0
-    communication_score: float | None = None
+    discussion_score: float | None = None
     missing_evidence: list[str] = field(default_factory=list)
+    task_type: str = ""
+    role_id: str = ""
+    role_version: str = ""
+    role_metadata: dict[str, Any] = field(default_factory=dict)
+    score_scale: str = "0-4"
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
     @classmethod
-    def from_dict(cls, value: dict[str, Any]) -> "CommunicationResult":
+    def from_dict(cls, value: dict[str, Any]) -> "DiscussionResult":
         return cls(
             schema_version=str(value.get("schema_version") or ""),
-            judge_type=str(value.get("judge_type") or "communication"),
+            judge_type=str(value.get("judge_type") or "discussion"),
             status=str(value.get("status") or ""),
             run_id=str(value.get("run_id") or ""),
             source_snapshot_digest=str(value.get("source_snapshot_digest") or ""),
@@ -136,31 +188,41 @@ class CommunicationResult:
                 if isinstance(item, dict)
             ],
             human_intervention_count=int(value.get("human_intervention_count") or 0),
-            communication_score=_float_or_none(value.get("communication_score")),
+            discussion_score=_float_or_none(value.get("discussion_score")),
             missing_evidence=_string_list(value.get("missing_evidence")),
+            task_type=str(value.get("task_type") or ""),
+            role_id=str(value.get("role_id") or ""),
+            role_version=str(value.get("role_version") or ""),
+            role_metadata=_dict_value(value.get("role_metadata")),
+            score_scale=str(value.get("score_scale") or "0-4"),
         )
 
 
 @dataclass(frozen=True)
-class PrdResult:
+class PrdFidelityResult:
     schema_version: str
-    judge_type: str = "prd_result"
+    judge_type: str = "prd_fidelity"
     status: str = ""
     run_id: str = ""
     source_snapshot_digest: str = ""
     dimensions: list[DimensionScore] = field(default_factory=list)
     differences: list[str] = field(default_factory=list)
-    prd_result_score: float | None = None
+    prd_fidelity_score: float | None = None
     missing_evidence: list[str] = field(default_factory=list)
+    task_type: str = ""
+    role_id: str = ""
+    role_version: str = ""
+    role_metadata: dict[str, Any] = field(default_factory=dict)
+    score_scale: str = "0-4"
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
     @classmethod
-    def from_dict(cls, value: dict[str, Any]) -> "PrdResult":
+    def from_dict(cls, value: dict[str, Any]) -> "PrdFidelityResult":
         return cls(
             schema_version=str(value.get("schema_version") or ""),
-            judge_type=str(value.get("judge_type") or "prd_result"),
+            judge_type=str(value.get("judge_type") or "prd_fidelity"),
             status=str(value.get("status") or ""),
             run_id=str(value.get("run_id") or ""),
             source_snapshot_digest=str(value.get("source_snapshot_digest") or ""),
@@ -170,8 +232,13 @@ class PrdResult:
                 if isinstance(item, dict)
             ],
             differences=_string_list(value.get("differences")),
-            prd_result_score=_float_or_none(value.get("prd_result_score")),
+            prd_fidelity_score=_float_or_none(value.get("prd_fidelity_score")),
             missing_evidence=_string_list(value.get("missing_evidence")),
+            task_type=str(value.get("task_type") or ""),
+            role_id=str(value.get("role_id") or ""),
+            role_version=str(value.get("role_version") or ""),
+            role_metadata=_dict_value(value.get("role_metadata")),
+            score_scale=str(value.get("score_scale") or "0-4"),
         )
 
 
@@ -182,15 +249,17 @@ class ConclusionResult:
     status: str = ""
     run_id: str = ""
     source_snapshot_digest: str = ""
-    communication_score: float | None = None
-    prd_result_score: float | None = None
-    overall_score: float | None = None
     agent_scores: list[dict[str, Any]] = field(default_factory=list)
     team_findings: dict[str, Any] = field(default_factory=dict)
     conclusion_zh: str = ""
     next_actions: list[str] = field(default_factory=list)
     judge_refs: list[str] = field(default_factory=list)
     evidence_refs: list[str] = field(default_factory=list)
+    task_type: str = ""
+    role_id: str = ""
+    role_version: str = ""
+    role_metadata: dict[str, Any] = field(default_factory=dict)
+    score_scale: str = "0-4"
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -203,19 +272,59 @@ class ConclusionResult:
             status=str(value.get("status") or ""),
             run_id=str(value.get("run_id") or ""),
             source_snapshot_digest=str(value.get("source_snapshot_digest") or ""),
-            communication_score=_float_or_none(value.get("communication_score")),
-            prd_result_score=_float_or_none(value.get("prd_result_score")),
-            overall_score=_float_or_none(value.get("overall_score")),
             agent_scores=_any_list(value.get("agent_scores")),
             team_findings=value.get("team_findings") or {},
             conclusion_zh=str(value.get("conclusion_zh") or ""),
             next_actions=_string_list(value.get("next_actions")),
             judge_refs=_string_list(value.get("judge_refs")),
             evidence_refs=_string_list(value.get("evidence_refs")),
+            task_type=str(value.get("task_type") or ""),
+            role_id=str(value.get("role_id") or ""),
+            role_version=str(value.get("role_version") or ""),
+            role_metadata=_dict_value(value.get("role_metadata")),
+            score_scale=str(value.get("score_scale") or "0-4"),
         )
 
 
-JudgeResult = MilestoneResult | CommunicationResult | PrdResult | ConclusionResult
+@dataclass(frozen=True)
+class TaskTypeResult:
+    """Bounded task classifier result used before role-specific judges run."""
+
+    schema_version: str
+    judge_type: str = "task_type"
+    status: str = ""
+    task_type: str = "ambiguous"
+    confidence: float = 0.0
+    evidence_refs: list[str] = field(default_factory=list)
+    rationale: str = ""
+    alternative: str = ""
+    missing_evidence: list[str] = field(default_factory=list)
+    role_id: str = ""
+    role_version: str = ""
+    role_metadata: dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, value: dict[str, Any]) -> "TaskTypeResult":
+        return cls(
+            schema_version=str(value.get("schema_version") or ""),
+            judge_type=str(value.get("judge_type") or "task_type"),
+            status=str(value.get("status") or ""),
+            task_type=str(value.get("task_type") or "ambiguous"),
+            confidence=_float_or_zero(value.get("confidence")),
+            evidence_refs=_string_list(value.get("evidence_refs")),
+            rationale=str(value.get("rationale") or ""),
+            alternative=str(value.get("alternative") or ""),
+            missing_evidence=_string_list(value.get("missing_evidence")),
+            role_id=str(value.get("role_id") or ""),
+            role_version=str(value.get("role_version") or ""),
+            role_metadata=_dict_value(value.get("role_metadata")),
+        )
+
+
+JudgeResult = ContributionResult | DiscussionResult | PrdFidelityResult | ConclusionResult | TaskTypeResult
 
 
 @dataclass(frozen=True)
@@ -238,6 +347,15 @@ class EvaluationPacket:
     prior_judges: list[dict[str, Any]] = field(default_factory=list)
     allowed_evidence_refs: list[str] = field(default_factory=list)
     forbidden_refs: list[str] = field(default_factory=list)
+    # Frozen evaluator-selection metadata.  These optional fields keep
+    # pre-role packets readable while allowing the classifier and isolated
+    # subagents to bind one immutable task type/role contract.
+    task_type: str = ""
+    task_type_confidence: float | None = None
+    role_ref: str = ""
+    role_digest: str = ""
+    evaluator_profile: str = ""
+    subagent_scope: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -269,6 +387,12 @@ class EvaluationPacket:
             prior_judges=_any_list(value.get("prior_judges")),
             allowed_evidence_refs=_string_list(value.get("allowed_evidence_refs")),
             forbidden_refs=_string_list(value.get("forbidden_refs")),
+            task_type=str(value.get("task_type") or ""),
+            task_type_confidence=_float_or_none(value.get("task_type_confidence")),
+            role_ref=str(value.get("role_ref") or ""),
+            role_digest=str(value.get("role_digest") or ""),
+            evaluator_profile=str(value.get("evaluator_profile") or ""),
+            subagent_scope=str(value.get("subagent_scope") or ""),
         )
 
 
@@ -365,14 +489,23 @@ def _any_list(value: Any) -> list[Any]:
     return list(value)
 
 
+def _dict_value(value: Any) -> dict[str, Any]:
+    return dict(value) if isinstance(value, dict) else {}
+
+
 __all__ = [
     "AgentFinding",
-    "CommunicationResult",
+    "NECESSITY_UNDETERMINED",
+    "NECESSITY_VALUES",
+    "DiscussionResult",
     "ConclusionResult",
     "DimensionScore",
     "EvaluationPacket",
     "JudgeRecord",
     "JudgeResult",
-    "MilestoneResult",
-    "PrdResult",
+    "ContributionResult",
+    "canonical_necessity",
+    "necessity_label",
+    "PrdFidelityResult",
+    "TaskTypeResult",
 ]

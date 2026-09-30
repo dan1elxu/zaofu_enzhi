@@ -34,7 +34,8 @@ from zf.runtime.channel_contracts import (
     discussion_engine_mode,
     normalize_product_discussion_mode,
 )
-from zf.runtime.channel_consensus_identity import consensus_reached_payload
+from zf.runtime.channel_consensus_identity import consensus_artifact_error, consensus_reached_payload
+from zf.runtime.channel_prd_freeze import emit_prd_frozen
 from zf.runtime.channel_discussion_contribution import valid_phase1_members
 from zf.runtime.channel_synthesis_lock import (
     channel_synthesis_lock_path,
@@ -575,6 +576,18 @@ def advance_discussion(
             emitted.append("channel.discussion.phase.changed")
             return emitted
         if _consensus_reached(channel, session, thread_id, consensus):
+            error = consensus_artifact_error(state_dir, consensus)
+            if error:
+                reason = f"consensus_artifact_invalid:{error}"
+                if not any(row.get("reason") == reason for row in consensus.get("review_rejections") or []):
+                    writer.emit(
+                        "channel.consensus.review.rejected", actor=actor,
+                        correlation_id=channel_id,
+                        payload={"channel_id": channel_id, "thread_id": thread_id,
+                                 "reason": reason, "source": source},
+                    )
+                    emitted.append("channel.consensus.review.rejected")
+                return emitted
             artifact_ref = str(consensus.get("artifact_ref") or "")
             if not consensus.get("reached_event_id"):
                 reached = writer.emit(
@@ -588,7 +601,95 @@ def advance_discussion(
                         source=source,
                     ),
                 )
+                emit_prd_frozen(
+                    writer,
+                    consensus_payload=consensus_reached_payload(
+                        consensus,
+                        channel_id=channel_id,
+                        thread_id=thread_id,
+                        source=source,
+                    ),
+                    source_event=reached,
+                    freeze_reason="consensus_reached",
+                    actor=actor,
+                    task_id=reached.task_id,
+                    correlation_id=channel_id,
+                )
+                try:
+                    freeze_written = _canonical_freeze_exists(
+                        writer.event_log.read_all(),
+                        source_event_id=reached.id,
+                        channel_id=channel_id,
+                        thread_id=thread_id,
+                    )
+                except Exception:
+                    return emitted
+                if not freeze_written:
+                    # Do not close the discussion when the freeze helper did
+                    # not durably append its canonical handoff.
+                    return emitted
                 emitted.append("channel.consensus.reached")
+            else:
+                # A worker/process crash can persist ``consensus.reached``
+                # before the following freeze (or discussion close).  The
+                # projection only retains the reached event id, so recover
+                # from the append-only ledger and never synthesize a new
+                # reached occurrence.
+                reached_event_id = str(consensus.get("reached_event_id") or "")
+                try:
+                    events = writer.event_log.read_all()
+                except Exception:
+                    # A damaged/unavailable ledger is a fail-closed state:
+                    # do not emit a freeze from the folded projection.
+                    return emitted
+                reached = next(
+                    (
+                        event
+                        for event in events
+                        if (
+                            str(event.id or "") == reached_event_id
+                            and event.type == "channel.consensus.reached"
+                            and isinstance(event.payload, dict)
+                            and str(event.payload.get("channel_id") or "") == channel_id
+                            and str(event.payload.get("thread_id") or "") == thread_id
+                        )
+                    ),
+                    None,
+                )
+                if reached is None:
+                    # The projection's pointer is not sufficient evidence to
+                    # recreate the source occurrence. Leave the discussion in
+                    # phase3 so a later repair can reconcile the ledger.
+                    return emitted
+                has_freeze = _canonical_freeze_exists(
+                    events,
+                    source_event_id=str(reached.id or ""),
+                    channel_id=channel_id,
+                    thread_id=thread_id,
+                )
+                if not has_freeze:
+                    emit_prd_frozen(
+                        writer,
+                        # Reuse the immutable source payload.  Rebuilding it
+                        # from the folded consensus could absorb a late
+                        # signature or other post-reach projection change.
+                        consensus_payload=dict(reached.payload),
+                        source_event=reached,
+                        freeze_reason="consensus_reached",
+                        actor=actor,
+                        task_id=reached.task_id,
+                        correlation_id=channel_id,
+                    )
+                    try:
+                        if not _canonical_freeze_exists(
+                            writer.event_log.read_all(),
+                            source_event_id=reached.id,
+                            channel_id=channel_id,
+                            thread_id=thread_id,
+                        ):
+                            return emitted
+                    except Exception:
+                        return emitted
             writer.emit(
                 "channel.discussion.closed",
                 actor=actor,
@@ -743,6 +844,25 @@ def _thread_consensus(channel: dict[str, Any], thread_id: str) -> dict[str, Any]
     return {}
 
 
+def _canonical_freeze_exists(
+    events: list[Any],
+    *,
+    source_event_id: str,
+    channel_id: str,
+    thread_id: str,
+) -> bool:
+    """Return whether the ledger contains the exact freeze handoff."""
+
+    return any(
+        event.type == "channel.prd.frozen"
+        and isinstance(event.payload, dict)
+        and str(event.payload.get("source_event_id") or "") == source_event_id
+        and str(event.payload.get("channel_id") or "") == channel_id
+        and str(event.payload.get("thread_id") or "") == thread_id
+        for event in events
+    )
+
+
 def _open_unseen_consensus_blockers(
     writer: EventWriter,
     channel: dict[str, Any],
@@ -782,7 +902,11 @@ def _consensus_reached(
     thread_id: str,
     consensus: dict[str, Any],
 ) -> bool:
-    if not consensus.get("artifact_ref"):
+    if (
+        not consensus.get("artifact_ref")
+        or consensus.get("revision_pending")
+        or consensus.get("blocked")
+    ):
         return False
     required_signers = {
         str(member_id)
@@ -798,8 +922,8 @@ def _consensus_reached(
     if channel_discussion_auto_enabled(channel):
         # Auto Channels delegate owner confirmation up front through the
         # owner-approved create-and-start Plan; the full roster signature is
-        # the only remaining gate. Readiness still gates planning via
-        # channel_prd_planning_authorized downstream.
+        # the only remaining gate. The confirmed PRD permits later planning;
+        # readiness is retained for the separate workflow execution gate.
         return True
     return bool(consensus.get("human_confirmed"))
 
