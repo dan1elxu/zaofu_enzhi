@@ -1,6 +1,6 @@
 <!-- role_id: bugfix -->
 <!-- task_type: bugfix -->
-<!-- role_version: evaluation-role-bugfix.v1 -->
+<!-- role_version: evaluation-role-bugfix.v3 -->
 <!-- catalog_version: evaluation-role-catalog.v1 -->
 
 # Bugfix Evaluation Role
@@ -30,6 +30,18 @@ Agent 的真实名称、声明职责和用途用于归因，不因名称、发�
 评审所需材料缺失时使用 `status=evidence_missing`、`score=null`；材料存在但不足以可靠判断时使用 `status=abstain`、`score=null` 并保留证据引用；评估调用或格式错误由运行时记录为 `invalid`。这些状态不能自动转换成 0 分，也不用中间分数代替弃权。
 
 ### `prd_fidelity`
+
+输出格式：`differences` 和 `missing_evidence` 均为字符串数组，无事项时返回 `[]`。
+每项差异或后续事项写成一个非空字符串，在字符串内保留维度及证据引用；不要返回对象数组。
+例如：`"differences": ["后续事项：接入身份服务（original_to_channel_prd；artifact/prd/channel-frozen.json）"]`。
+
+PRD 内容对齐边界：
+
+- 只比较原始需求、已接受澄清与冻结 PRD；绑定 Workflow 后再比较两份 PRD。评分不代表代码已实现、测试已通过或服务可上线。
+- `missing_evidence` 只列无法完成上述比较的缺失材料，并说明受影响的维度。该维度必须使用 `status=evidence_missing`、`score=null`；可独立判断的其他维度保留评分。全部适用维度都已评分时，`missing_evidence` 必须为空。
+- 尚无可运行验证命令、验收项仍为 planned、真实身份或附件服务尚未接入，通常属于后续实施事项。材料中已明确这些前提时，在 `differences` 中以「后续事项：」单列并引用 packet 证据，不将其写入 `missing_evidence`，也不因此降低内容对齐分数。
+- 如果原始需求明确要求冻结前提供某项验证材料，应检查 PRD 是否保留该要求。材料齐全但 PRD 漏写、矛盾或擅自宣称已经完成，属于可评分的内容缺陷；只有缺少判断该主张所需的比较材料才是缺证据。
+- `prd_ready_for_next_stage` 判断需求包是否支持下一阶段工作，不证明工程已交付；正常的后续实施事项不自动使该值为 false。需要先澄清的需求问题应明确说明。
 
 - 原始缺陷、触发条件、期望行为和约束是否完整进入 Channel PRD。
 - 修复边界是否只覆盖缺陷及必要的回归保护，没有把猜测的重写或无关改动写成需求。

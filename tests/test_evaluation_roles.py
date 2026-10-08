@@ -45,7 +45,7 @@ def test_select_profile_returns_only_requested_scope() -> None:
     assert profile["scope"] == "contribution"
     assert profile["profile_id"] == "bugfix.contribution"
     assert profile["role_ref"] == "evaluation_roles/bugfix.md"
-    assert profile["role_version"] == "evaluation-role-bugfix.v1"
+    assert profile["role_version"] == "evaluation-role-bugfix.v3"
     assert profile["role_digest"] == profile["digest"]
     assert "## 共同评估契约" in profile["body"]
     assert "## 统一评分锚点" in profile["body"]

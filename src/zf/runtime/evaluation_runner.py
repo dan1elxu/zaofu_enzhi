@@ -57,6 +57,7 @@ from zf.runtime.evaluation_prompts import (
     SYSTEM_PROMPT,
 )
 from zf.runtime.evaluation_schemas import SCHEMA_VERSIONS, normalize_judge_output
+from zf.runtime.evaluation_output import normalize_provider_output
 from zf.runtime.evaluation_types import (
     EvaluationPacket,
     JudgeRecord,
@@ -800,6 +801,7 @@ def _run_request_turns(
         for schema_attempt in (1, 2):
             prompt = prompt_ref if schema_attempt == 1 else f"{_retry_hint(record['error'])} {prompt_ref}"
             record.update(status="running", error="")
+            record.pop("output_repair", None)
             turn_path = path.parent / "attempts" / f"{request_id}-attempt-{attempt}-schema-{schema_attempt}.json"
             turn = {"attempt": attempt, "schema_attempt": schema_attempt,
                     "system_prompt": SYSTEM_PROMPT, "prompt": prompt, "status": "running"}
@@ -851,13 +853,16 @@ def _run_request_turns(
             if not profiles:
                 participants = sorted({item["member_id"] for item in packet.get("channel_messages") or []
                                        if item.get("member_id")})
-            normalized, error = (normalize_judge_output(
+            normalized, error, repair = (normalize_provider_output(
                 judge_type=judge_type, raw=parsed,
                 allowed_evidence_refs=list(packet.get("allowed_evidence_refs") or []),
                 expected_agent_ids=participants if judge_type == "contribution" else None,
                 workflow_bound=bool(packet.get("workflow_bound_prd")),
                 expected_schema_version=_schema_version(judge_type, packet),
-            ) if parsed is not None else (None, f"judge returned no single JSON object: {observed.reply[:240]}"))
+            ) if parsed is not None else (None, f"judge returned no single JSON object: {observed.reply[:240]}", {}))
+            if repair:
+                turn["output_repair"] = record["output_repair"] = repair
+                atomic_write_text(turn_path, _canonical(turn))
             if normalized is not None and judge_type in {"contribution", "discussion", "prd_fidelity"}:
                 role_error = role_binding_error(normalized.to_dict(), packet)
                 if role_error:

@@ -309,6 +309,9 @@
 .channel-evaluation-grid { display: grid; align-items: start; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
 .channel-evaluation-card { min-width: 0; display: grid; align-content: start; gap: 12px; padding: 14px; border: 1px solid var(--line-soft); border-radius: 12px; background: color-mix(in oklab, var(--surface) 90%, transparent); }
 .channel-evaluation-card-head span { color: var(--muted-foreground); font-size: var(--text-12); }
+.channel-evaluation-missing-evidence { padding: 10px 12px; border-left: 3px solid var(--destructive); border-radius: 6px; background: color-mix(in oklab, var(--destructive) 6%, var(--surface)); overflow-wrap: anywhere; font-size: var(--text-12); }
+.channel-evaluation-missing-evidence ul { margin: 6px 0 0; padding-left: 18px; }
+.channel-evaluation-missing-evidence p { margin: 6px 0 0; }
 .channel-evaluation-dimensions { display: grid; gap: 7px; }
 .channel-evaluation-dimensions > div { display: grid; grid-template-columns: minmax(0, 1fr) max-content; gap: 6px 12px; align-items: start; padding-bottom: 10px; border-bottom: 1px solid var(--line-soft); }
 .channel-evaluation-dimensions > div > span { grid-column: 1 / -1; }

@@ -376,6 +376,9 @@ def _normalize_discussion(
     ), ""
 
 
+PRD_DIFFERENCES_SHAPE_ERROR = "differences must be a list of non-empty strings, not objects"
+
+
 def _normalize_prd_fidelity(
     raw: dict[str, Any],
     allowed: set[str],
@@ -401,10 +404,19 @@ def _normalize_prd_fidelity(
     missing = _string_list(
         raw.get("missing_evidence") or raw.get("missing_evidence_keys")
     )
+    if missing and not any(d.status == "evidence_missing" for d in dims):
+        return None, (
+            "PRD missing_evidence requires an evidence_missing dimension with score=null; "
+            "put non-comparison follow-ups in differences"
+        )
     status = _result_status(dims, missing)
     prd_ready_for_next_stage = raw.get("prd_ready_for_next_stage")
     if type(prd_ready_for_next_stage) is not bool:
         return None, "prd_ready_for_next_stage must be a boolean"
+    try:
+        differences = _string_list(raw.get("differences"))
+    except (TypeError, ValueError):
+        return None, PRD_DIFFERENCES_SHAPE_ERROR
     return PrdFidelityResult(
         schema_version=str(raw["schema_version"]),
         judge_type="prd_fidelity",
@@ -412,7 +424,7 @@ def _normalize_prd_fidelity(
         run_id=str(raw.get("run_id") or ""),
         source_snapshot_digest=str(raw.get("source_snapshot_digest") or ""),
         dimensions=dims,
-        differences=_string_list(raw.get("differences")),
+        differences=differences,
         prd_fidelity_score=prd_fidelity_score(
             dims, workflow_bound=workflow_bound, score_scale=score_scale,
         ) if status == "scored" else None,

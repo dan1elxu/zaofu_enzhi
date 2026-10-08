@@ -179,7 +179,7 @@ def _judge_reply(judge_type: str, message_ref: str = "", with_bound: bool = Fals
     if judge_type == "contribution":
         return json.dumps({
             "schema_version": "contribution_result.v2", "judge_type": "contribution",
-            "task_type": "bugfix", "role_id": "bugfix", "role_version": "evaluation-role-bugfix.v1",
+            "task_type": "bugfix", "role_id": "bugfix", "role_version": "evaluation-role-bugfix.v3",
             "role_metadata": {}, "score_scale": "0-4",
             "agent_findings": [{
                 "agent_id": agent_id, "status": "scored", "score": 3,
@@ -192,7 +192,7 @@ def _judge_reply(judge_type: str, message_ref: str = "", with_bound: bool = Fals
     if judge_type == "discussion":
         return json.dumps({
             "schema_version": "discussion_result.v2", "judge_type": "discussion",
-            "task_type": "bugfix", "role_id": "bugfix", "role_version": "evaluation-role-bugfix.v1",
+            "task_type": "bugfix", "role_id": "bugfix", "role_version": "evaluation-role-bugfix.v3",
             "role_metadata": {}, "score_scale": "0-4",
             "dimensions": [{
                 "dimension_id": dimension, "status": "scored", "score": 3,
@@ -213,7 +213,7 @@ def _judge_reply(judge_type: str, message_ref: str = "", with_bound: bool = Fals
             refs.append("artifact/prd/workflow-bound.json")
         return json.dumps({
             "schema_version": "prd_fidelity_result.v2", "judge_type": "prd_fidelity",
-            "task_type": "bugfix", "role_id": "bugfix", "role_version": "evaluation-role-bugfix.v1",
+            "task_type": "bugfix", "role_id": "bugfix", "role_version": "evaluation-role-bugfix.v3",
             "role_metadata": {}, "score_scale": "0-4",
             "dimensions": [{
                 "dimension_id": dimension, "status": "scored", "score": 3,

@@ -9,6 +9,7 @@ type Evaluation = {
   schema_version: string;
   channel_id: string;
   workflow_run_id: string;
+  evaluation_origin?: "manual_regrade";
   status: string;
   stages: Array<Record<string, unknown>>;
   report: { available: boolean; markdown?: string; truncated?: boolean };
@@ -120,6 +121,95 @@ test("Eval error exposes retry and recovers the latest response", async ({ page 
   await page.getByTestId("channel-evaluation-retry").click();
   await expect(page.getByTestId("channel-evaluation-page")).toContainText("需求与讨论基本一致");
   expect(attempts).toBeGreaterThanOrEqual(2);
+});
+
+for (const partialScore of [false, true]) {
+  test(`missing PRD evidence remains visible with partial score=${partialScore}`, async ({ page }) => {
+    // Historical results remain visible under their original judgment;
+    // the current output gate does not rewrite persisted scores or reasons.
+    const payload = evaluationPayload("incomplete");
+    const fidelity = payload.stages.find((stage) => stage.judge_type === "prd_fidelity")!;
+    fidelity.status = "evidence_missing";
+    fidelity.result = {
+      missing_evidence: ["G-VERIFY-01：缺少可运行验证入口及真实身份、附件依赖接入证据。"],
+      dimensions: partialScore ? [
+        { dimension_id: "original_to_channel_prd", score: 4, status: "scored", rationale: "已完成需求内容对齐。" },
+      ] : [],
+    };
+    await mockEvaluation(page, async (route) => route.fulfill({
+      contentType: "application/json", body: JSON.stringify(payload),
+    }));
+    await openEvaluation(page);
+    const card = page.getByTestId("channel-evaluation-page").locator(".channel-evaluation-card")
+      .filter({ has: page.getByRole("heading", { name: "PRD 忠实度", exact: true }) });
+    await expect(card).toBeVisible();
+    await expect(card).toContainText("缺少证据");
+    await expect(card.getByTestId("channel-evaluation-missing-evidence")).toContainText("G-VERIFY-01");
+    await expect(card).toContainText("真实身份、附件依赖接入证据");
+    await expect(card).toContainText(partialScore ? "4/4" : "本项尚未完成评分");
+    await expect(card).not.toContainText("0/4");
+  });
+}
+
+test("implementation follow-ups appear separately from scored PRD fidelity", async ({ page }) => {
+  const payload = evaluationPayload();
+  const fidelity = payload.stages.find((stage) => stage.judge_type === "prd_fidelity")!;
+  fidelity.result = {
+    dimensions: [{ dimension_id: "original_to_channel_prd", score: 4, status: "scored" }],
+    missing_evidence: [],
+    differences: ["后续事项：开发阶段补充验证入口、接入身份及附件服务。"],
+  };
+  await mockEvaluation(page, async (route) => route.fulfill({
+    contentType: "application/json", body: JSON.stringify(payload),
+  }));
+  await openEvaluation(page);
+  const evalPage = page.getByTestId("channel-evaluation-page");
+  await expect(evalPage).toContainText("4/4");
+  await expect(evalPage.getByTestId("channel-evaluation-missing-evidence")).toHaveCount(0);
+  await expect(evalPage.getByTestId("channel-evaluation-differences")).toContainText("后续事项：开发阶段");
+  await page.setViewportSize({ width: 390, height: 844 });
+  expect(await page.evaluate(() => document.documentElement.scrollWidth - innerWidth)).toBeLessThanOrEqual(1);
+});
+
+test("a finished regrade automatically replaces the open report and status", async ({ page }) => {
+  let latest = false;
+  let captureStream!: (route: Route) => void;
+  const stream = new Promise<Route>((resolve) => { captureStream = resolve; });
+  await page.route("**/api/projects/*/stream?*", async (route) => {
+    if (latest) await route.abort();
+    else captureStream(route);
+  });
+  await page.route("**/api/projects/*/channels/ch-1/conversation?*", async (route) => {
+    const response = await route.fetch();
+    const body = await response.json();
+    await route.fulfill({ response, json: { ...body, seq: latest ? 1_000_000 : body.seq } });
+  });
+  await mockEvaluation(page, async (route) => {
+    const payload = evaluationPayload(latest ? "complete" : "incomplete", channelId, latest ? "NEW_REGRADE" : "OLD_REPORT");
+    const fidelity = payload.stages.find((stage) => stage.judge_type === "prd_fidelity")!;
+    fidelity.status = latest ? "scored" : "evidence_missing";
+    if (latest) {
+      payload.workflow_run_id = "regrade-new";
+      payload.evaluation_origin = "manual_regrade";
+    }
+    await route.fulfill({ json: payload });
+  });
+  await openEvaluation(page);
+  const evalPage = page.getByTestId("channel-evaluation-page");
+  await expect(evalPage).toContainText("OLD_REPORT");
+  await evalPage.locator(".channel-evaluation-report summary").click();
+  latest = true;
+  await (await stream).fulfill({
+    contentType: "text/event-stream",
+    body: `id: 1000000\ndata: ${JSON.stringify({
+      type: "benchmark.evaluation.conclusion.completed", seq: 1_000_000,
+      payload: { channel_id: channelId, evaluation_origin: "manual_regrade" },
+    })}\n\n`,
+  });
+  await expect(evalPage).toContainText("最新重评");
+  await expect(evalPage.locator(".channel-evaluation-report")).toContainText("NEW_REGRADE");
+  await expect(evalPage).not.toContainText("OLD_REPORT");
+  await expect(page.getByTestId("channel-evaluation-status").locator("summary")).not.toContainText("缺少证据");
 });
 
 test("Eval tab keeps narrow layouts within the viewport", async ({ page }) => {

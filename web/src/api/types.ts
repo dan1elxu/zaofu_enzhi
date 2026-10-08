@@ -2017,6 +2017,7 @@ export interface ChannelEvaluationStage {
     confidence?: number;
     dimensions?: ChannelEvaluationDimension[];
     differences?: string[];
+    missing_evidence?: string[];
     agents?: Array<{
       agent_id?: string;
       agent_name?: string;
@@ -2040,6 +2041,7 @@ export interface ChannelEvaluationDetail {
   schema_version: string;
   channel_id: string;
   workflow_run_id?: string;
+  evaluation_origin?: "manual_regrade";
   status: string;
   stages: ChannelEvaluationStage[];
   report: {

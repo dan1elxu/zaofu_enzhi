@@ -106,6 +106,41 @@ def test_unknown_evidence_never_produces_score():
         assert normalized.discussion_score is None
 
 
+def test_prd_fidelity_rejects_global_missing_evidence_with_all_dimensions_scored():
+    raw = raw_result("prd_fidelity")
+    raw["missing_evidence"] = ["工程验证尚未接入"]
+    normalized, error = normalize(raw)
+    assert normalized is None
+    assert "evidence_missing dimension" in error
+
+
+def test_prd_followup_shape_error_identifies_field_for_bounded_repair():
+    from zf.runtime.evaluation_runner import _retry_hint
+
+    raw = raw_result("prd_fidelity")
+    raw["differences"] = [{"description": "后续事项：接入服务"}]
+    normalized, error = normalize(raw)
+    assert normalized is None
+    assert "differences must be a list of non-empty strings" in _retry_hint(error)
+    raw["differences"] = ["后续事项：接入服务"]
+    normalized, error = normalize(raw)
+    assert not error and normalized is not None
+    assert normalized.differences == raw["differences"]
+    assert normalized.dimensions[0].score == raw["dimensions"][0]["score"]
+
+
+def test_prd_comparison_missing_evidence_keeps_only_independent_score():
+    raw = raw_result("prd_fidelity", bound=True)
+    raw["missing_evidence"] = ["channel_to_workflow_prd：缺少该边界的确认记录"]
+    raw["dimensions"][1].update(score=None, status="evidence_missing")
+    normalized, error = normalize(raw, workflow_bound=True)
+    assert not error and normalized is not None
+    assert normalized.status == "evidence_missing"
+    assert normalized.dimensions[0].score == 4
+    assert normalized.dimensions[1].score is None
+    assert normalized.prd_fidelity_score is None
+
+
 @pytest.mark.parametrize("change", ["missing", "duplicate", "unknown", "malformed"])
 def test_discussion_requires_exact_dimensions(change):
     raw = raw_result()

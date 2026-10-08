@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import re
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Iterator
 
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import JSONResponse
@@ -51,6 +51,99 @@ def build_channel_evaluation(state_dir: Path, channel_id: str) -> dict[str, Any]
     public = channel.get("evaluation")
     if not isinstance(public, dict):
         return _empty_response(channel_id)
+    for candidate in _completed_regrades(state_dir, channel_id, public):
+        response = _build_generation(state_dir, channel_id, candidate)
+        if response["report"]["available"]:
+            response["evaluation_origin"] = "manual_regrade"
+            return response
+    return _build_generation(state_dir, channel_id, public)
+
+
+def _completed_regrades(
+    state_dir: Path, channel_id: str, current: dict[str, Any],
+) -> Iterator[dict[str, Any]]:
+    """Newest completed replays of the exact current input, in ledger order."""
+    from zf.runtime.evaluation_projection import EVALUATION_EVENTS, fold_evaluation, public_evaluation
+    from zf.runtime.evaluation_regrade import _load_source_context, _validate_regrade_chain
+
+    rows = {row["judge_type"]: row for row in current.get("stages", [])}
+    freeze_id = str(rows.get("prd_fidelity", {}).get("freeze_event_id") or "")
+    if not freeze_id or not current.get("workflow_run_id"):
+        return
+    events = [
+        event for event in EventLog(Path(state_dir) / "events.jsonl").read_all()
+        if event.type in EVALUATION_EVENTS
+        and event.payload.get("evaluation_origin") == "manual_regrade"
+        and event.payload.get("channel_id") == channel_id
+        and event.payload.get("freeze_event_id") == freeze_id
+    ]
+    # First completion establishes report order; a duplicate late receipt
+    # must not make an older replay current again.
+    completed_runs = dict.fromkeys(
+        str(event.payload.get("workflow_run_id") or "") for event in events
+        if event.type == "benchmark.evaluation.conclusion.completed"
+    )
+    for run_id in reversed(completed_runs):
+        if not run_id:
+            continue
+        audit_path = _safe_bound_path(state_dir, report_path(state_dir, run_id).with_name("regrade.json"))
+        if audit_path is None:
+            continue
+        try:
+            audit = json.loads(audit_path.read_text(encoding="utf-8"))
+            # The terminal event/report may precede the final audit bookkeeping.
+            # The verified full report below is the publication gate.
+            if (not isinstance(audit, dict) or audit.get("status") not in {"running", "completed"}
+                    or audit.get("workflow_run_id") != run_id):
+                continue
+            source_ref = str(audit.get("original_context_ref") or "")
+            source, digest = _load_source_context(state_dir, source_ref)
+            if source.get("channel_id") != channel_id or source.get("workflow_run_id") != current["workflow_run_id"]:
+                continue
+            # A later Workflow PRD binding changes fidelity's input identity.
+            # Regrading an older binding must not replace that newer view.
+            if any(
+                packet.get(key) != rows.get(stage, {}).get(key)
+                for stage, packet in source["packets"].items()
+                for key in ("workflow_run_id", "trial_id", "source_snapshot_digest")
+            ):
+                continue
+            clone = _validate_regrade_chain(
+                state_dir, source=source, source_ref=source_ref, source_digest=digest,
+                regrade_id=str(audit.get("regrade_id") or ""), audit=audit,
+            )
+            freeze = clone["freeze"]
+            if freeze.get("event_id") != freeze_id:
+                continue
+            replay: dict[str, Any] = {"_evaluation_freeze_identities": {
+                freeze_id: {**freeze, "seq": 1, "workflow_run_id": run_id},
+            }}
+            for seq, item in enumerate(events, 1):
+                if item.payload.get("workflow_run_id") == run_id:
+                    # Only this validated replay gets an isolated projection;
+                    # the canonical Channel projection and ledger stay intact.
+                    fold_evaluation(
+                        replay, {**item.payload, "evaluation_origin": ""},
+                        event_type=item.type, ts=item.ts, seq=seq,
+                    )
+            public = public_evaluation(replay)
+            stages = {row["judge_type"]: row for row in public.get("stages", [])}
+            if set(stages) != set(STAGES) or stages["conclusion"].get("status") not in {"complete", "incomplete"}:
+                continue
+            if any(
+                stages[stage].get("status") not in {"scored", "evidence_missing", "abstain", "conflict", "ambiguous"}
+                or any(stages[stage].get(key) != packet.get(key) for key in (
+                    "workflow_run_id", "trial_id", "source_snapshot_digest",
+                ))
+                for stage, packet in clone["packets"].items()
+            ):
+                continue
+        except (OSError, ValueError, TypeError, KeyError):
+            continue
+        yield public
+
+
+def _build_generation(state_dir: Path, channel_id: str, public: dict[str, Any]) -> dict[str, Any]:
     workflow_run_id = str(public.get("workflow_run_id") or "")
     public_stages = public.get("stages")
     if not workflow_run_id or not isinstance(public_stages, list):
@@ -307,8 +400,9 @@ def _conclusion_completion_bound(
 
 def _business_summary(stage: str, value: Any) -> dict[str, Any]:
     result = value if isinstance(value, dict) else {}
+    missing = {"missing_evidence": _string_list(result.get("missing_evidence"))}
     if stage == "task_type":
-        return _pick(result, "task_type", "confidence", "status")
+        return {**_pick(result, "task_type", "confidence", "status"), **missing}
     if stage == "contribution":
         agents = []
         for item in result.get("agent_findings") or []:
@@ -317,7 +411,7 @@ def _business_summary(stage: str, value: Any) -> dict[str, Any]:
                     item, "agent_id", "agent_name", "score", "necessity",
                     "necessity_status", "role_summary", "rationale", "status",
                 ))
-        return {"status": str(result.get("status") or ""), "agents": agents}
+        return {"status": str(result.get("status") or ""), "agents": agents, **missing}
     if stage in {"discussion", "prd_fidelity"}:
         dimensions = []
         for item in result.get("dimensions") or []:
@@ -325,7 +419,7 @@ def _business_summary(stage: str, value: Any) -> dict[str, Any]:
                 dimensions.append(_pick(
                     item, "dimension_id", "score", "verdict", "rationale", "status",
                 ))
-        summary = {"status": str(result.get("status") or ""), "dimensions": dimensions}
+        summary = {"status": str(result.get("status") or ""), "dimensions": dimensions, **missing}
         if stage == "prd_fidelity":
             summary["differences"] = _string_list(result.get("differences"))
         else:
@@ -502,7 +596,7 @@ def _input_digest_for_record(
             and str(payload.get("request_id") or payload.get("job_id") or "") == request_id
             and str(payload.get("trial_id") or "") == trial_id
             and payload.get("source_snapshot_digest") == record.get("source_snapshot_digest")
-            and not payload.get("evaluation_origin")
+            and payload.get("evaluation_origin") in {None, "", "manual_regrade"}
             and payload.get("evaluation_contract") == "channel-prd-eval.v1"
             and payload.get("prompt_version") == EVALUATION_PROMPT_VERSION
         ):

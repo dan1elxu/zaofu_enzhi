@@ -42,7 +42,7 @@ zf evaluation-regrade --input-ref artifacts/benchmark-evaluations/queue-inputs/<
 
 `--input-ref` 从配置的 state dir 下 `artifacts/benchmark-evaluations/scheduler.json` 对应行的 `input_ref` 取得，精确选择需要复核的冻结/Workflow 绑定版本。`--regrade-id` 可省略，届时生成新 UUID；需要重复测试时使用新 id。
 
-手动重评分从已入队的 immutable context 读取材料，不重新扫描 Channel；首次手动执行使用当前 prompt 和 role catalog，随后将该次规则快照固化用于恢复。它使用 `artifacts/benchmark-evaluations/regrades/<id>/scheduler.json`、新的 workflow/request identity 和 `reports/regrade-<id>/report.md`，来源保存在报告旁的 `regrade.json`。同一 state dir 同时只运行一个手动重评，独占 `judges-slot-8`，与普通 slot 0～7 隔离。原报告、Judge sidecar 和 Channel 当前评测投影保持不变。相同 `regrade-id` 与同一输入幂等返回；中断后需再次手动执行恢复，同一 id 指向其他输入会失败。手动事件带 `evaluation_origin=manual_regrade`，不会进入 canonical Channel projection。
+手动重评分从已入队的 immutable context 读取材料，不重新扫描 Channel；首次手动执行使用当前 prompt 和 role catalog，随后将该次规则快照固化用于恢复。它使用 `artifacts/benchmark-evaluations/regrades/<id>/scheduler.json`、新的 workflow/request identity 和 `reports/regrade-<id>/report.md`，来源保存在报告旁的 `regrade.json`。同一 state dir 同时只运行一个手动重评，独占 `judges-slot-8`，与普通 slot 0～7 隔离。原报告、Judge sidecar 和 canonical Channel projection 保留；Web Eval 页在新报告完整生成并通过身份、账本与正文校验后，自动展示最新重评，标注「最新重评」。选择按结论完成事件的账本顺序，且原输入必须匹配当前 Channel、freeze 及全部阶段的输入身份；旧 revision/thread/Workflow 绑定的重评不能覆盖新版本。运行中、传输或格式失败、文件损坏时继续显示上一份有效报告；合法的缺证据或弃权报告仍可展示。页面随 Channel 事件刷新。相同 `regrade-id` 与同一输入幂等返回；中断后需再次手动执行恢复，同一 id 指向其他输入会失败。手动事件带 `evaluation_origin=manual_regrade`，不会进入自动调度队列。
 
 每个 Judge 结果和 attempt 记录评测配置，报告旁 `audit/<identity>/evaluation.json` 汇集各阶段及 conclusion 的审计元数据：provider/backend、transcript 可观察到的 model、timeout/tool/retry budget、prompt/system/role digest、`sample_count=1` 及配置摘要。timeout/tool budget 在 request 执行前读取，传入实际执行器，返回后不重读环境；这不是对外部 provider 隐藏配置或随机性的完整复现保证。未观察到的 model/sampling 写 `unknown`，尚未配置的 token/cost budget 写 `null`；transport/schema retry 不计为额外 sample。上述细节不写入简洁的 `report.md`。
 
@@ -67,6 +67,10 @@ Channel 只读投影可补齐同一 prompt 版本内缺少身份字段的历史�
 
 三个 role.md 进一步给出每个评估区块的 0～4 分锚点和边界案例：不按发言量奖励贡献，未采纳但排除了错误方案的分析仍可计入；贡献与必要性独立判断。评审材料缺失用 `evidence_missing`，材料存在但无法可靠判断用 `abstain`；材料齐全而 PRD 漏写约束/验收属于可评分的缺陷。
 
+三个 role.md 从 v2 起明确区分内容忠实度与工程条件：可运行命令、真实身份/附件服务接入、planned 验收项等后续实施前提，由 Judge 放入 `differences` 并以「后续事项：」标注；页面单列「PRD 差异与后续事项」，报告也保留这些说明。它们本身不使忠实度缺证据或降分。`missing_evidence` 只用于缺少比较材料的维度，该维度必须无分数；若 Judge 所有维度都已评分却又声明缺证据，机械校验拒绝该矛盾输出，使用既有的有界格式修复机会，不替 Judge 改分或猜测原因。`prd_ready_for_next_stage` 表示需求包是否支持下一阶段工作，不等于实现已交付。role v3 补充了 `differences` / `missing_evidence` 字符串数组的类型及示例；通用 prompt 版本保持 v8，已有冻结沿用首次入队规则和历史结果，不自动重评。
+
+`evaluation_output.py` 在 provider 输出入口处理一种已观察到的纯格式偏差：`differences` 对象必须恰好含 `dimension_id`、`description`、`evidence_refs`，维度适用、说明非空、每条引用都在本次 packet allowlist 内，才会完整保留三者并机械转为字符串。其他字段原样送回完整 schema、评分、证据和 role 校验；规范结果仍只接受字符串数组。含未知字段、非法引用或其他判断矛盾时不套用转换，沿用原来的有界修复。原始回复留在 attempt/raw sidecar，转换方法及前后 JSON digest 以 `channel-prd-evaluation.output-repair.v1` 写入 Judge 与 attempt sidecar，不进入简洁报告。此转换不调用模型、不重读材料、不改任何分数；`server_overloaded` 仍视为供应商失败，不能用部分回复补分，也不会无限重试。
+
 机械门禁只能保证结构、证据引用和计算约束；不能证明语义评分绝对正确。以下人工校准方法尚未接入自动回放工具。
 
 ## Golden cases 人工校准
@@ -84,6 +88,7 @@ Channel 只读投影可补齐同一 prompt 版本内缺少身份字段的历史�
 - CLI：`zf evaluation-watch`；`--once` 只做发现和持久化入队，不启动临时 provider pool。
 - tmux：`zf start` 创建 evaluation watcher；Judge slot 由 scheduler 按需创建/复用。
 - Web：`channel_projection.py` 折叠三个评估事件，Channel summary/detail/conversation 暴露 `evaluation.stages`。Channel 的 **Eval** 页签展示分类、三个子评测和汇总的状态、尝试次数、阶段及错误；分别显示 PRD 忠实度、讨论有效性、逐 Agent 贡献与「必须 / 可选 / 不需要 / 未确定」，并可展开报告。分数保留原始 0～4 整数；未评分项显示 `—`，不计算团队平均分。
+- 三项评测卡片保留缺证据状态；只读 API 从已校验的结果中返回脱敏后的 `missing_evidence`，页面逐项显示「缺少的证据」。没有维度分数时仍显示卡片和缺失说明，部分维度已评分时保留原分数；未记录具体缺失项时明确提示，不推测缺失原因。
 - `GET /api/projects/{project_id}/channels/{channel_id}/evaluation` 是按需读取的只读接口。服务端从该项目的当前 Channel 投影确定冻结和评测身份，校验结果与账本绑定；不接受任意报告路径，也不按文件时间选择结果。响应只含状态、业务摘要和报告正文，详细审计、prompt、原始回复留在运行态 sidecar。缺失或身份不匹配的结果标为不可用。页面随评测事件刷新，切换项目、Channel 或冻结版本时清除旧结果；读取失败可重试，重试不会触发重新评分。
 - 事件注册：`known_types.py` 和 `event_problem_registry.py` 将评估进度与终态标为 projection-only/informational，不唤醒工作流。
 

@@ -32,17 +32,20 @@ def _backend(**kwargs):
     ), ""
 
 
-def _client_with_evaluation(tmp_path: Path, monkeypatch, backend=_backend) -> tuple[TestClient, Path, str]:
+def _client_with_evaluation(
+    tmp_path: Path, monkeypatch, backend=_backend, *, expected_errors: list[str] | None = None,
+    with_workflow_bind: bool = False,
+) -> tuple[TestClient, Path, str]:
     monkeypatch.setenv("ZF_WORKSPACE_HOME", str(tmp_path / "workspace-home"))
     state_dir = tmp_path / ".zf"
     state_dir.mkdir()
     (state_dir / "kanban.json").write_text("[]", encoding="utf-8")
     (state_dir / "feature_list.json").write_text("[]", encoding="utf-8")
-    _seed_channel_state(state_dir)
+    _seed_channel_state(state_dir, with_workflow_bind=with_workflow_bind)
     scheduler = EvaluationScheduler(state_dir, inline=True)
     try:
         result = observer.observe_once(state_dir=state_dir, scheduler=scheduler, backend=backend)
-        assert result["errors"] == []
+        assert result["errors"] == (expected_errors or [])
     finally:
         scheduler.close()
     client = TestClient(create_app(state_dir))
@@ -94,6 +97,49 @@ def test_channel_evaluation_rejects_symlinked_sidecar(tmp_path: Path, monkeypatc
     discussion = next(item for item in payload["stages"] if item["judge_type"] == "discussion")
     assert discussion["result_available"] is False
     assert payload["report"]["available"] is False
+
+
+@pytest.mark.parametrize("stage", ["contribution", "discussion", "prd_fidelity"])
+def test_missing_evidence_is_visible_redacted_and_preserves_partial_scores(
+    tmp_path: Path, monkeypatch, stage: str,
+) -> None:
+    missing = "缺少判断该项所需的已确认需求澄清原文。"
+
+    def backend(**kwargs):
+        raw, model = _backend(**kwargs)
+        reply = json.loads(raw)
+        if kwargs["judge_type"] == stage:
+            reply["missing_evidence"] = [
+                missing, "补充 /home/operator/private/evidence.json API_KEY=missing-evidence-test-key",
+            ]
+            scores = reply["agent_findings" if stage == "contribution" else "dimensions"]
+            scores[0].update(score=None, status="evidence_missing", rationale=missing)
+        return json.dumps(reply, ensure_ascii=False), model
+
+    client, state_dir, project_id = _client_with_evaluation(
+        tmp_path, monkeypatch, backend, expected_errors=[f"{stage}: evidence_missing"],
+        with_workflow_bind=True,
+    )
+    before = (state_dir / "events.jsonl").read_bytes()
+
+    response = client.get(f"/api/projects/{project_id}/channels/ch-1/evaluation")
+
+    assert response.status_code == 200
+    payload = response.json()
+    item = next(item for item in payload["stages"] if item["judge_type"] == stage)
+    assert item["status"] == "evidence_missing"
+    assert item["result_available"] is True
+    assert item["result"]["missing_evidence"][0] == missing
+    assert item["result"]["missing_evidence"] == payload["scores"][stage]["missing_evidence"]
+    scores = item["result"]["agents" if stage == "contribution" else "dimensions"]
+    assert scores[0]["score"] is None and scores[0]["status"] == "evidence_missing"
+    assert all(score["score"] == 3 and score["status"] == "scored" for score in scores[1:])
+    assert payload["status"] == "incomplete"
+    assert "/home/operator/" not in response.text
+    assert "missing-evidence-test-key" not in response.text
+    assert "[REDACTED_SECRET]" in response.text
+    assert (state_dir / "events.jsonl").read_bytes() == before
+
 
 def test_channel_evaluation_rejects_same_header_report_tamper(tmp_path: Path, monkeypatch) -> None:
     client, state_dir, project_id = _client_with_evaluation(tmp_path, monkeypatch)

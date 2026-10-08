@@ -576,12 +576,13 @@ export function ChannelPage({
     ? `${evaluationIdentityKey}:${(detail.evaluation.stages || []).map((stage) => `${stage.status || ""}:${stage.verdict || ""}:${stage.attempt || 0}:${stage.phase || ""}:${stage.error || ""}:${stage.updated_at || ""}`).join("|")}`
     : "";
   useEffect(() => {
-    if (activeTab === "evaluation") setEvaluation(null);
+    setEvaluation(null);
+    evaluationRequestGateRef.current.issue();
   }, [evaluationIdentityKey]);
   useEffect(() => {
     if (activeTab !== "evaluation") return;
     void loadEvaluation();
-  }, [activeTab, evaluationRefreshKey, loadEvaluation]);
+  }, [activeTab, evaluationRefreshKey, detail?.seq, loadEvaluation]);
   const attachmentInputRef = useRef<HTMLInputElement | null>(null);
   const autoOpenedQuestionnaireRef = useRef("");
   const visibleChannels = channels.length
@@ -2726,7 +2727,7 @@ export function ChannelPage({
       ) : null}
       <div className={`channel-shell ${drawer ? "has-drawer" : ""}`}>
         <main className="channel-main">
-          <ChannelEvaluationStatus evaluation={detail?.evaluation ?? workspaceDetail?.evaluation} />
+          <ChannelEvaluationStatus evaluation={evaluation ? { stages: evaluation.stages.map((stage) => ({ ...stage })) } : detail?.evaluation ?? workspaceDetail?.evaluation} />
           <ChannelAutoStatus rows={detail?.auto_chain ?? workspaceDetail?.auto_chain}
             actionReady={actionReady} onRetry={onRetryAutoStep} />
           {activeTab === "evaluation" ? (

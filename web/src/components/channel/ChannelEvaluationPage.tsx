@@ -34,7 +34,7 @@ export function ChannelEvaluationPage({ evaluation, loading, error, onRetry }: {
   return (
     <section className="channel-evaluation-page" data-testid="channel-evaluation-page">
       <div className="channel-evaluation-head">
-        <div><h2>PRD 评测</h2><span className="muted">{taskType ? `任务类型：${evaluationTaskTypeLabel(taskType)}` : "当前冻结"}</span></div>
+        <div><h2>PRD 评测</h2><span className="muted">{taskType ? `任务类型：${evaluationTaskTypeLabel(taskType)}` : "当前冻结"}{evaluation.evaluation_origin === "manual_regrade" ? " · 最新重评" : ""}</span></div>
         <span className={`channel-evaluation-status tone-${stageTone(evaluation.status)}`}>{evaluationStatusLabel(evaluation.status)}</span>
       </div>
       {error ? <div className="notice">{error} {onRetry ? <button className="icon-button" data-testid="channel-evaluation-retry" type="button" onClick={onRetry}>重试</button> : null}</div> : null}
@@ -45,6 +45,12 @@ export function ChannelEvaluationPage({ evaluation, loading, error, onRetry }: {
         <ScoreCard title="PRD 忠实度" stage={fidelity} />
         <ScoreCard title="讨论有效性" stage={discussion} />
       </div>
+      {!evaluationResultUnavailable(fidelity) && fidelity?.result?.differences?.length ? (
+        <section className="channel-evaluation-card" data-testid="channel-evaluation-differences">
+          <h3>PRD 差异与后续事项</h3>
+          <ul>{fidelity.result.differences.map((item, index) => <li key={index}>{item}</li>)}</ul>
+        </section>
+      ) : null}
       <ContributionCard stage={contribution} />
       <ConclusionCard stage={conclusion} />
       {evaluation.report.available && evaluation.report.markdown ? (
@@ -65,12 +71,23 @@ function StageNode({ stage }: { stage: ChannelEvaluationStage }) {
 
 function ScoreCard({ title, stage }: { title: string; stage?: ChannelEvaluationStage }) {
   const dimensions = stage?.result?.dimensions || [];
-  return <section className="channel-evaluation-card"><div className="channel-evaluation-card-head"><h3>{title}</h3><span>{evaluationResultUnavailable(stage) ? "结果文件不可用" : evaluationStatusLabel(stage?.status || "unavailable")}</span></div>{evaluationResultUnavailable(stage) ? <p className="muted">评测已结束，但结果文件不可用。</p> : dimensions.length ? <div className="channel-evaluation-dimensions">{dimensions.map((dimension) => <div key={dimension.dimension_id}><strong>{evaluationDimensionLabel(dimension.dimension_id)}</strong><b>{evaluationScore(dimension.score, dimension.status || stage?.status)}</b><span>{dimension.verdict || ""}{dimension.rationale ? `：${dimension.rationale}` : ""}</span></div>)}</div> : <p className="muted">暂无可用维度结果。</p>}</section>;
+  return <section className="channel-evaluation-card"><div className="channel-evaluation-card-head"><h3>{title}</h3><span>{evaluationResultUnavailable(stage) ? "结果文件不可用" : evaluationStatusLabel(stage?.status || "unavailable")}</span></div><MissingEvidence stage={stage} />{evaluationResultUnavailable(stage) ? <p className="muted">评测已结束，但结果文件不可用。</p> : dimensions.length ? <div className="channel-evaluation-dimensions">{dimensions.map((dimension) => <div key={dimension.dimension_id}><strong>{evaluationDimensionLabel(dimension.dimension_id)}</strong><b>{evaluationScore(dimension.score, dimension.status || stage?.status)}</b><span>{dimension.verdict || ""}{dimension.rationale ? `：${dimension.rationale}` : ""}</span></div>)}</div> : <p className="muted">{stage?.status === "evidence_missing" ? "本项尚未完成评分。" : "暂无可用维度结果。"}</p>}</section>;
+}
+
+function MissingEvidence({ stage }: { stage?: ChannelEvaluationStage }) {
+  if (evaluationResultUnavailable(stage)) return null;
+  const missing = stage?.result?.missing_evidence || [];
+  if (!missing.length && stage?.status !== "evidence_missing") return null;
+  return <div className="channel-evaluation-missing-evidence" data-testid="channel-evaluation-missing-evidence">
+    <strong>缺少的证据</strong>
+    {missing.length ? <ul>{missing.map((item, index) => <li key={index}>{item}</li>)}</ul>
+      : <p>{stage?.error || "评测未记录具体缺失项。"}</p>}
+  </div>;
 }
 
 function ContributionCard({ stage }: { stage?: ChannelEvaluationStage }) {
   const agents = stage?.result?.agents || [];
-  return <section className="channel-evaluation-card"><div className="channel-evaluation-card-head"><h3>Agent 贡献</h3><span>{evaluationResultUnavailable(stage) ? "结果文件不可用" : evaluationStatusLabel(stage?.status || "unavailable")}</span></div>{evaluationResultUnavailable(stage) ? <p className="muted">评测已结束，但结果文件不可用。</p> : agents.length ? <div className="channel-evaluation-agents">{agents.map((agent) => <div className="channel-evaluation-agent" key={agent.agent_id}><div><strong>{agent.agent_name || agent.agent_id || "Agent"}</strong><span>{agent.role_summary || "暂无作用说明"}</span>{agent.rationale ? <span>理由：{agent.rationale}</span> : null}</div><b>{evaluationScore(agent.score, agent.status || stage?.status)}</b><em>{necessityLabel(agent.necessity)}</em></div>)}</div> : <p className="muted">暂无 Agent 贡献结果。</p>}</section>;
+  return <section className="channel-evaluation-card"><div className="channel-evaluation-card-head"><h3>Agent 贡献</h3><span>{evaluationResultUnavailable(stage) ? "结果文件不可用" : evaluationStatusLabel(stage?.status || "unavailable")}</span></div><MissingEvidence stage={stage} />{evaluationResultUnavailable(stage) ? <p className="muted">评测已结束，但结果文件不可用。</p> : agents.length ? <div className="channel-evaluation-agents">{agents.map((agent) => <div className="channel-evaluation-agent" key={agent.agent_id}><div><strong>{agent.agent_name || agent.agent_id || "Agent"}</strong><span>{agent.role_summary || "暂无作用说明"}</span>{agent.rationale ? <span>理由：{agent.rationale}</span> : null}</div><b>{evaluationScore(agent.score, agent.status || stage?.status)}</b><em>{necessityLabel(agent.necessity)}</em></div>)}</div> : <p className="muted">暂无 Agent 贡献结果。</p>}</section>;
 }
 
 function ConclusionCard({ stage }: { stage?: ChannelEvaluationStage }) {
