@@ -17,6 +17,7 @@ export function ChannelConsensusControl({ selection, artifactRef, consensus, act
   const [attempt, setAttempt] = useState(0);
   const needsRisk = ["needs_owner", "needs_multi_lens"].includes(String(consensus.readiness_verdict));
   const planningOnly = consensus.readiness_verdict === "ready" && consensus.implementation_start === false;
+  const reviewBlocked = Array.isArray(consensus.blocked) && consensus.blocked.length > 0;
   useEffect(() => {
     if (!needsRisk && !planningOnly) return;
     const controller = new AbortController();
@@ -46,17 +47,21 @@ export function ChannelConsensusControl({ selection, artifactRef, consensus, act
           <p>{readiness.reason}</p>
           {readiness.gaps.length ? <><p>未解决项</p><ul>{readiness.gaps.map((item, index) => <li key={index}>{describe(item)}</li>)}</ul></> : null}
           {readiness.risks.length ? <><p>风险</p><ul>{readiness.risks.map((item, index) => <li key={index}>{describe(item)}</li>)}</ul></> : null}
-          <label><input type="checkbox" checked={accepted} disabled={!actionReady || busy}
-            onChange={event => setAccepted(event.target.checked)} />{planningOnly ? "我允许在分别批准 Task 和 Workflow 后执行，并接受本版本列明的风险。" : "我接受本版本上列未解决项和风险；Task 创建及 Workflow 启动仍需分别批准。"}</label>
+          {!reviewBlocked ? <label><input type="checkbox" checked={accepted} disabled={!actionReady || busy}
+            onChange={event => setAccepted(event.target.checked)} />{planningOnly ? "我允许在分别批准 Task 和 Workflow 后执行，并接受本版本列明的风险。" : "我接受本版本上列未解决项和风险；Task 创建及 Workflow 启动仍需分别批准。"}</label> : null}
         </>}
     </section> : null}
-    <span className="channel-discussion-qtext">{consensus.human_confirmed
-      ? "Owner confirmed; waiting for required signatures" : "Canonical PRD awaiting owner decision"}</span>
-    <input className="filter-input" placeholder="Blocker" value={blocker} onChange={event => setBlocker(event.target.value)} />
-    <button className="icon-button primary" type="button"
-      disabled={!actionReady || busy || Boolean(consensus.human_confirmed) || (needsRisk && (!readiness || !accepted || Boolean(error))) || (planningOnly && accepted && (!readiness || Boolean(error)))}
-      onClick={() => void onDecision("confirm", "", (needsRisk || planningOnly) && accepted)}>{needsRisk || (planningOnly && accepted) ? "接受风险并确认" : "Confirm"}</button>
-    <button className="icon-button" type="button" disabled={!actionReady || busy || !blocker.trim()}
-      onClick={() => void onDecision("block", blocker.trim(), false).then(() => setBlocker(""))}>Block</button>
+    <span className="channel-discussion-qtext">{reviewBlocked
+      ? "Review blockers require another PRD revision"
+      : consensus.human_confirmed
+        ? "Owner confirmed; waiting for required signatures" : "Canonical PRD awaiting owner decision"}</span>
+    {!reviewBlocked ? <>
+      <input className="filter-input" placeholder="Blocker" value={blocker} onChange={event => setBlocker(event.target.value)} />
+      <button className="icon-button primary" type="button"
+        disabled={!actionReady || busy || Boolean(consensus.human_confirmed) || (needsRisk && (!readiness || !accepted || Boolean(error))) || (planningOnly && accepted && (!readiness || Boolean(error)))}
+        onClick={() => void onDecision("confirm", "", (needsRisk || planningOnly) && accepted)}>{needsRisk || (planningOnly && accepted) ? "接受风险并确认" : "Confirm"}</button>
+      <button className="icon-button" type="button" disabled={!actionReady || busy || !blocker.trim()}
+        onClick={() => void onDecision("block", blocker.trim(), false).then(() => setBlocker(""))}>Block</button>
+    </> : null}
   </div>;
 }

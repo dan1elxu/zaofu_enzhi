@@ -27,6 +27,32 @@ export interface ChannelDiscussionControlPolicy {
   startLabel: "Start discussion" | "Restart discussion";
 }
 
+export function selectDiscussionStartSource<T extends Record<string, unknown>>(
+  messages: T[], threadId: string, restart: boolean, requirementMessageId: string,
+): T | undefined {
+  const candidates = messages.filter((message) => (
+    String(message.thread_id || "main") === threadId
+    && (message.role === "user" || message.member_id === "operator")
+    && [message.text, message.message, message.summary].some((value) => typeof value === "string" && value.trim())
+  ));
+  const isReviewPrompt = (message: T) => {
+    const refs = message.refs && typeof message.refs === "object"
+      ? message.refs as Record<string, unknown> : {};
+    return Boolean(refs.consensus_review_id || refs.source_requirement_message_id);
+  };
+  if (restart) {
+    const markedSource = [...candidates].reverse().find((message) => {
+      const refs = message.refs && typeof message.refs === "object"
+        ? message.refs as Record<string, unknown> : {};
+      return refs.evaluation_source_document === true;
+    });
+    if (markedSource) return markedSource;
+    const pinned = candidates.find((message) => message.message_id === requirementMessageId);
+    if (pinned && !isReviewPrompt(pinned)) return pinned;
+  }
+  return [...candidates].reverse().find((message) => !isReviewPrompt(message));
+}
+
 function countLabel(count: number, singular: string, plural = `${singular}s`): string {
   return `${count} ${count === 1 ? singular : plural}`;
 }
@@ -66,6 +92,10 @@ export function presentChannelDiscussionAttention(
   if (attention.reason === "context_pack_rejected") {
     return { label: "评审来源需要处理", summary: "来源上下文未通过检查，后续评审尚未派发。请查看 Activity 中的具体原因。",
       tone: "blocked", action: "activity", actionLabel: "查看原因", visible: true };
+  }
+  if (attention.reason === "discussion_stalled") {
+    return { label: "PRD review blocked", summary: "Review revisions need diagnosis before another discussion",
+      tone: "blocked", action: "restart", actionLabel: "Review blocker", visible: true };
   }
   if (["synthesis_superseded", "synthesis_missing"].includes(attention.reason)) {
     return { label: "综合尚未完成", summary: attention.reason === "synthesis_superseded"

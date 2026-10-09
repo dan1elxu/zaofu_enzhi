@@ -39,6 +39,7 @@ import {
   channelDiscussionControlPolicy,
   presentChannelDiscussionAttention,
   selectChannelDiscussionAttention,
+  selectDiscussionStartSource,
 } from "./channelDiscussionAttention";
 
 const ChannelEmojiPicker = lazy(() => import("./ChannelEmojiPicker").then((module) => ({
@@ -936,17 +937,13 @@ export function ChannelPage({
   const automationReports = workspaceDetail?.automation_reports ?? [];
   const resultReceipts = workspaceDetail?.result_receipts ?? [];
   const discussionMode = recordString(workspaceDetail?.discussion ?? {}, "mode", "conversation");
-  const latestThreadRequirement = [...messages]
-    .reverse()
-    .map((message) => message as unknown as Record<string, unknown>)
-    .find((message) => (
-    recordString(message, "thread_id", "main") === controlThreadId
-    && (
-      recordString(message, "role") === "user"
-      || recordString(message, "member_id") === "operator"
-    )
-    && Boolean(channelMessageText(message))
-    ));
+  const currentDiscussion = workspaceDetail?.discussions?.[controlThreadId] ?? {};
+  const latestThreadRequirement = selectDiscussionStartSource(
+    messages.map((message) => message as unknown as Record<string, unknown>),
+    controlThreadId,
+    Boolean(discussionBand?.attention?.can_restart),
+    recordString(currentDiscussion, "requirement_message_id"),
+  );
   const latestThreadRequirementText = latestThreadRequirement
     ? channelMessageText(latestThreadRequirement)
     : "";
@@ -954,7 +951,7 @@ export function ChannelPage({
     ? recordString(latestThreadRequirement, "message_id")
     : "";
   const currentDiscussionState = recordString(
-    workspaceDetail?.discussions?.[controlThreadId] ?? {},
+    currentDiscussion,
     "state",
     "idle",
   );
