@@ -12,6 +12,20 @@ from zf.runtime.agent_session_stream import AgentSessionStreamEmitter
 from zf.runtime.live_delta_bus import live_delta_bus_for_writer
 from zf.web.headless_agent import HeadlessMessage
 from zf.web.headless_control_stream import HeadlessControlStreamFilter
+from zf.web.headless_turn_outcome import classify_headless_turn
+
+
+def classify_headless_result(result: Any) -> dict[str, Any]:
+    return classify_headless_turn(
+        status=getattr(result, "status", "failed"),
+        error=getattr(result, "error", ""),
+        incomplete=bool(getattr(result, "incomplete", False)),
+        completion_reason=getattr(result, "completion_reason", ""),
+    )
+
+
+def classify_headless_failure(reason: object) -> dict[str, Any]:
+    return classify_headless_turn(status="failed", error=reason)
 
 
 class HeadlessDeltaEmitter:

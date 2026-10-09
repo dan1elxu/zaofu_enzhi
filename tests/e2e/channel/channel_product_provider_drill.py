@@ -17,12 +17,18 @@ from zf.core.config.schema import (
 )
 from zf.core.events import EventWriter
 from zf.core.events.log import EventLog
+from zf.core.workspace.project_initializer import ProjectInitializer
 from zf.runtime.channel_projection import project_channel
 from zf.runtime.channel_result_receipts import (
     reconcile_channel_result_receipts,
 )
 from zf.runtime.control_actions import ControlledActionService
 from zf.web.server import create_app
+
+if __package__:
+    from .evidence import EvidenceEventLog
+else:
+    from evidence import EvidenceEventLog
 
 
 CHANNEL_ID = "ch-real-provider-product"
@@ -222,7 +228,7 @@ def _real_plan_to_proposal(
             )
 
         terminal = _wait_for_turn_terminal(
-            EventLog(state_dir / "events.jsonl"),
+            EvidenceEventLog(state_dir / "events.jsonl"),
             turn_id,
         )
         if terminal.type == "kanban.agent.turn.failed":
@@ -234,7 +240,7 @@ def _real_plan_to_proposal(
         reply_event = next(
             (
                 event
-                for event in EventLog(state_dir / "events.jsonl").read_all()
+                for event in EvidenceEventLog(state_dir / "events.jsonl").read_all()
                 if event.id == reply_event_id
                 and event.type == "kanban.agent.reply"
             ),
@@ -303,15 +309,27 @@ def _real_plan_to_proposal(
         }
 
 
+def _prepare_state(project_root: Path, state_dir: Path) -> None:
+    if state_dir.exists():
+        raise FileExistsError("real provider drill requires a fresh state directory")
+    project_root.mkdir(parents=True, exist_ok=True)
+    ProjectInitializer().initialize(
+        cwd=project_root,
+        explicit_state_dir=state_dir,
+        with_instruction_docs=False,
+        with_git_hooks=False,
+        workspace_register=False,
+    )
+
+
 def run_drill(
     *,
     project_root: Path,
     state_dir: Path,
     backend: str,
 ) -> dict:
-    project_root.mkdir(parents=True, exist_ok=True)
-    state_dir.mkdir(parents=True, exist_ok=True)
-    log = EventLog(state_dir / "events.jsonl")
+    _prepare_state(project_root, state_dir)
+    log = EvidenceEventLog(state_dir / "events.jsonl")
     writer = EventWriter(log)
     config = ZfConfig(
         channel=ChannelConfig(
@@ -591,7 +609,7 @@ def run_drill(
         backend=backend,
         authority=authority,
     )
-    final_events = log.read_all()
+    final_events = log.read_all(final=True)
     if any(
         event.type in {"task.created", "workflow.invoke.requested"}
         for event in final_events

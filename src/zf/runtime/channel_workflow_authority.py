@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from zf.runtime.channel_projection import project_channel
+from zf.runtime.channel_setup_readiness import channel_control_anchor_status
 
 
 _CHANNEL_AUTHORITY_KEYS = (
@@ -94,6 +95,10 @@ def channel_workflow_authority_error(
     channel = project_channel(Path(state_dir), channel_id) or {}
     if not channel:
         return "Channel workflow planning origin does not exist"
+    anchor_status = channel_control_anchor_status(channel)
+    if anchor_status["setup_pending"]:
+        blockers = ", ".join(anchor_status["setup_blockers"])
+        return f"Channel control anchors are not ready: {blockers}"
     leader_member_id = str(channel.get("leader_member_id") or "")
     if not leader_member_id:
         return "Channel has no active Leader binding"

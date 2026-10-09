@@ -34,7 +34,6 @@ export function ownerReportPayload(
   return {
     channel_id: channelId,
     thread_id: threadId,
-    owner_id: "owner:operator",
     member_id: "operator",
     period: "current",
     reason: "generated from channel detail",

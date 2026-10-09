@@ -112,6 +112,10 @@ def normalize_channel_task_submit_payload(
         "task_id",
         "title",
         "workflow_plan",
+        "channel_prd_scope",
+        "verification",
+        "verification_tiers",
+        "validation",
     }
     unknown = sorted(set(raw_payload) - allowed_keys)
     if unknown:
@@ -165,6 +169,15 @@ def normalize_channel_task_submit_payload(
             "Channel Task proposal revisions/priority must be integers",
         )
     objective = str(raw_payload.get("objective") or title).strip()
+    binding_scope = raw_payload.get("channel_prd_scope", "full_product")
+    if binding_scope not in ("full_product", "approved_task"):
+        return {}, {}, "channel_prd_scope must be full_product or approved_task"
+    if binding_scope == "approved_task":
+        for field in ("objective", "acceptance", "acceptance_criteria", "verification", "verification_tiers"):
+            if not raw_payload.get(field):
+                return {}, {}, f"approved_task requires {field}"
+        if raw_payload.get("validation") is not None and not isinstance(raw_payload["validation"], dict):
+            return {}, {}, "validation must be a mapping"
     scope = _string_values(raw_payload.get("scope"))
     invalid_scope = [
         entry for entry in scope if not scope_entry_is_path_like(entry)
@@ -196,6 +209,7 @@ def normalize_channel_task_submit_payload(
         "source_mode": "channel_prd",
         "source_title": title,
         "evidence_contract": {
+            "channel_prd_binding_scope": binding_scope,
             "channel_id": str(authority["channel_id"]),
             "thread_id": str(authority["thread_id"]),
             "channel_member_id": str(authority["channel_member_id"]),
@@ -204,6 +218,14 @@ def normalize_channel_task_submit_payload(
             "source_digest": str(authority["source_digest"]),
         },
     }
+    if binding_scope == "approved_task":
+        if isinstance(raw_payload.get("acceptance_criteria"), list):
+            contract["acceptance_criteria"] = deepcopy(raw_payload["acceptance_criteria"])
+        contract.update({
+            "verification": raw_payload["verification"],
+            "verification_tiers": deepcopy(raw_payload["verification_tiers"]),
+            "validation": deepcopy(raw_payload.get("validation") or {}),
+        })
     payload: dict[str, Any] = {
         "title": title,
         "priority": priority,
@@ -234,6 +256,7 @@ def normalize_channel_task_submit_payload(
         "source_ref": str(authority["source_ref"]),
         "source_digest": str(authority["source_digest"]),
         "prd_revision": prd_revision,
+        "channel_prd_scope": binding_scope,
     }, ""
 
 

@@ -11,6 +11,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import time
+import threading
 
 import pytest
 
@@ -33,6 +34,7 @@ from zf.runtime.orchestrator import Orchestrator
 from zf.runtime.tmux import TmuxSession
 from zf.runtime.transport import TmuxTransport
 from zf.runtime.wake_patterns import WAKE_PATTERNS
+from tests.channel_wait import wait_for_channel
 
 CH = "ch-remed"
 REQ = "reply-req-1"
@@ -85,6 +87,33 @@ def test_bounded_continuation_exhaustion_is_terminal() -> None:
 
     assert classified["retryable"] is False
     assert classified["failure_class"] == "provider_incomplete"
+
+
+@pytest.mark.parametrize(
+    ("status", "reason", "category", "retryable"),
+    [
+        ("failed", "ordinary failure", "failed", True),
+        ("timeout", "provider exceeded deadline", "timeout", True),
+        ("rate_limited", "retry after 10s", "rate_limit", True),
+        ("dispatch_exception", "executor stopped", "dispatch", True),
+        ("cancelled", "cancelled by operator", "cancelled", False),
+    ],
+)
+def test_failure_categories_drive_retry_policy(status, reason, category, retryable):
+    result = classify_channel_reply_failure(status=status, reason=reason)
+    assert result["failure_category"] == category
+    assert result["retryable"] is retryable
+
+
+def test_rate_limit_waits_for_retry_after_before_redispatch():
+    events = [
+        _evt("channel.agent.reply.requested", age=100),
+        _evt("channel.agent.reply.started", age=90),
+        _evt("channel.agent.reply.failed", age=5, failure_status="rate_limited", reason="retry after 30s"),
+    ]
+    assert channel_reply_remediation_candidates(events, now=NOW) == []
+    events[-1] = _evt("channel.agent.reply.failed", age=40, failure_status="rate_limited", reason="retry after 30s")
+    assert channel_reply_remediation_candidates(events, now=NOW)[0]["kind"] == "redispatch"
 
 
 def test_contract_failure_is_immediate_redispatch_candidate():
@@ -428,6 +457,9 @@ def test_reactor_guard_allows_higher_generation_redispatch(
         },
     )
     orch._on_channel_agent_reply_requested(requested_gen2)
+    wait_for_channel(lambda: any(e.type == "channel.agent.reply.started"
+                                and e.payload.get("run_generation") == 2
+                                for e in log.read_all()))
     started = [e for e in log.read_all()
                if e.type == "channel.agent.reply.started"
                and e.payload.get("request_id") == REQ]
@@ -478,6 +510,9 @@ def test_tick_housekeeping_self_heals_failed_reply(
 
     orch._check_channel_reply_remediation()
 
+    wait_for_channel(lambda: any(e.type == "channel.agent.reply.completed"
+                                and e.payload.get("request_id") == REQ
+                                for e in log.read_all()))
     events = log.read_all()
     redispatched = [e for e in events
                     if e.type == "channel.agent.reply.requested"
@@ -550,6 +585,9 @@ def test_invalid_contribution_self_heals_and_advances_discussion(
 
     orch.run_once(events=[failed])
 
+    wait_for_channel(lambda: any(e.type == "channel.finding.recorded"
+                                and e.payload.get("run_generation") == 2
+                                for e in log.read_all()))
     events = log.read_all()
     generation_two = next(
         event
@@ -662,3 +700,61 @@ def test_tick_registration_present_in_run_once() -> None:
         "run_once housekeeping must register _check_channel_reply_remediation"
     )
     assert hasattr(Orchestrator, "_check_channel_reply_remediation")
+
+
+@pytest.mark.parametrize("entry", ["requested", "remediation"])
+def test_runtime_dispatch_returns_while_provider_turn_is_blocked(
+    state_dir: Path, orch: Orchestrator, monkeypatch: pytest.MonkeyPatch, entry: str,
+) -> None:
+    from zf.runtime import channel_adapter
+
+    log = EventLog(state_dir / "events.jsonl")
+    _seed_channel(log)
+    log.append(_evt("channel.agent.reply.requested", status="pending", age=1000))
+    log.append(_evt("channel.agent.reply.started", gen=1, age=990))
+    log.append(_evt("channel.agent.reply.failed", gen=1, age=980, reason="timeout"))
+    entered, release, returned = threading.Event(), threading.Event(), threading.Event()
+    original = channel_adapter.build_fake_channel_reply
+
+    def blocked_provider(*args, **kwargs):
+        entered.set()
+        assert release.wait(3), "test provider release missing"
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(channel_adapter, "build_fake_channel_reply", blocked_provider)
+    errors: list[Exception] = []
+
+    def invoke() -> None:
+        try:
+            if entry == "requested":
+                requested = orch.event_writer.emit(
+                    "channel.agent.reply.requested", actor="orchestrator-remediation",
+                    correlation_id=CH, payload={
+                        "channel_id": CH, "thread_id": "main", "request_id": REQ,
+                        "message_id": "msg-1", "target_member_id": TARGET,
+                        "status": "pending", "run_generation": 2,
+                    },
+                )
+                orch._on_channel_agent_reply_requested(requested)
+            else:
+                orch._check_channel_reply_remediation()
+        except Exception as exc:
+            errors.append(exc)
+        finally:
+            returned.set()
+
+    caller = threading.Thread(target=invoke)
+    caller.start()
+    try:
+        assert entered.wait(2), "retry provider never started"
+        assert returned.wait(.5), "provider turn blocked the runtime caller"
+        assert not errors
+        started = [e for e in log.read_all() if e.type == "channel.agent.reply.started"
+                   and int(e.payload.get("run_generation") or 1) == 2]
+        assert len(started) == 1
+    finally:
+        release.set()
+        caller.join(4)
+    wait_for_channel(lambda: any(e.type == "channel.agent.reply.completed"
+                                and e.payload.get("run_generation") == 2
+                                for e in log.read_all()))

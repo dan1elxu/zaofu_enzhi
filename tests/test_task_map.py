@@ -9,6 +9,7 @@ from zf.runtime.task_map import (
     validate_source_index_payload,
     validate_task_map_payload,
 )
+from zf.runtime.verification_path_refs import command_path_refs
 
 
 def test_resolve_artifact_file_maps_dot_zf_to_configured_state_dir(
@@ -655,6 +656,17 @@ def test_pinned_oci_image_ref_is_not_treated_as_repository_path() -> None:
     })
 
     assert result.passed is True, result.errors
+
+
+def test_docker_playwright_runtime_flags_are_not_task_paths() -> None:
+    command = (
+        'docker run --rm --network host --mount "type=bind,src=$PWD,dst=/work" '
+        '--mount "type=bind,src=/path/to/zaofu/web/node_modules,'
+        'dst=/opt/zaofu-node_modules,readonly" --workdir /work '
+        '--env NODE_PATH=/opt/zaofu-node_modules mcp/playwright:latest '
+        'node --test verification/browser-acceptance.mjs'
+    )
+    assert command_path_refs(command) == ["verification/browser-acceptance.mjs"]
 
 
 def test_task_map_validation_accepts_package_root_relative_node_commands() -> None:

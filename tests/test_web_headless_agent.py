@@ -183,6 +183,9 @@ def test_system_prompt_requires_exact_artifact_lineage_for_create_task(
     assert "runner/config, and evidence-producer paths" in prompt
     assert "omit Playwright/evidence paths" in prompt
     assert "target_root" in prompt
+    assert "needed lenses" in prompt
+    assert "Profile registration" in prompt
+    assert "continue the original thread" in prompt
 
 
 def test_chat_plan_payload_rejects_discussion_and_response_together() -> None:
@@ -254,6 +257,11 @@ def test_chat_orchestrator_injects_canonical_channel_prd_context(
     assert '"canonical_channel_prds"' in prompt
     assert '"artifact_ref": "channel-artifacts/ch-prd/prd.md"' in prompt
     assert '"artifact_digest": "sha256:canonical"' in prompt
+    messages = [event for event in EventLog(state_dir / "events.jsonl").read_all()
+                if event.type == "user.message"]
+    assert messages
+    assert '"requirement_source_messages"' in prompt
+    assert messages[-1].id in prompt
 
 
 def test_chat_orchestrator_binds_agent_selected_channel_prd_plan(
@@ -1371,6 +1379,9 @@ def test_chat_orchestrator_can_use_claude_headless_backend(
     assert turn_completed.payload["timing"]["provider_duration_ms"] >= 0
     assert turn_completed.payload["timing"]["time_to_first_output_ms"] >= 0
     assert turn_completed.payload["timing"]["plan_projection_duration_ms"] >= 0
+    assert turn_completed.payload["outcome"] == "completed"
+    assert turn_completed.payload["failure_class"] == "none"
+    assert turn_completed.payload["retryable"] is False
 
 
 def test_chat_orchestrator_failed_turn_carries_timing(
@@ -1405,6 +1416,9 @@ def test_chat_orchestrator_failed_turn_carries_timing(
     assert failed.payload["timing"]["provider_duration_ms"] >= 0
     assert failed.payload["timing"]["time_to_first_output_ms"] is None
     assert failed.payload["timing"]["plan_projection_duration_ms"] is None
+    assert failed.payload["outcome"] == "failed"
+    assert failed.payload["failure_class"] == "provider_error"
+    assert failed.payload["retryable"] is True
 
 
 def _bus_rows(state_dir: Path, type_: str = ""):

@@ -56,6 +56,7 @@ from zf.runtime.workflow_inputs import (
 )
 
 from zf.runtime.control_actions_channel_msg import ChannelMessageActionsMixin
+from zf.runtime.control_actions_channel_evaluation import ChannelEvaluationActionsMixin
 from zf.runtime.control_actions_channel_consensus import (
     ChannelConsensusActionsMixin,
 )
@@ -113,6 +114,7 @@ class ControlledActionService(
     ProposalExecutionActionsMixin,
     ChannelConsensusActionsMixin,
     ChannelMessageActionsMixin,
+    ChannelEvaluationActionsMixin,
     ChannelTemplateActionsMixin,
     ChannelAdminActionsMixin,
     ProductActionsMixin,
@@ -392,6 +394,11 @@ class ControlledActionService(
                 action=action,
                 requested_action=requested_action,
                 payload=payload,
+            )
+        if action == "channel-prd-evaluate":
+            return self._channel_prd_evaluate(
+                requested=requested, action=action,
+                requested_action=requested_action, payload=payload,
             )
         if action == "automation-run":
             return self._automation_run(

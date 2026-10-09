@@ -26,7 +26,6 @@ from zf.core.verification.evidence import (
     build_done_evidence_payload,
     validate_terminal_done_evidence,
 )
-from zf.runtime.channel_adapter import dispatch_reply_request
 from zf.runtime.channel_message_ingress import route_reactor_message_after_ingress
 from zf.runtime.channel_synthesis_reactor import (
     react_channel_consensus_proposed,
@@ -192,7 +191,7 @@ _BUILTIN_HANDLER_METHODS: tuple[tuple[str, str], ...] = (
     ("channel.cross_review.completed", "_on_channel_discussion_event"),
     ("channel.cross_review.rejected", "_on_channel_discussion_event"),
     ("channel.questions.frozen", "_on_channel_discussion_event"),
-    ("channel.consensus.proposed", "_on_channel_consensus_proposed"),
+    ("channel.consensus.proposed", "_on_channel_consensus_proposed"), ("channel.prd_evaluation.requested", "_on_channel_prd_evaluation_requested"),
     ("channel.consensus.signed", "_on_channel_discussion_event"),
     ("channel.consensus.blocked", "_on_channel_discussion_event"),
     ("cost.budget.exceeded", "_on_cost_budget_exceeded"),
@@ -5865,12 +5864,11 @@ class EventReactorMixin(OrchestratorAgentReactorMixin, DurableCallWorkflowMixin)
         return None
 
     def _on_channel_discussion_event(self, event: ZfEvent) -> WorkflowRuntimeDecision | None:
-        """Tick the doc-122 discussion state machine on ledger / reply /
-        consensus events arriving over async transports (`zf emit`). The tick
-        is idempotent against the folded projection, so double invocation via
-        the inline router path is a no-op.
+        """Tick doc-122 discussion on ledger, reply and consensus events.
+        The folded projection makes inline-router double invocation idempotent.
         """
-        if event.actor in {"orchestrator-reactor", "channel-discussion"}:
+        from zf.runtime.channel_review_rework import discussion_tick_is_self_loop
+        if discussion_tick_is_self_loop(event):
             return None
         payload = event.payload if isinstance(event.payload, dict) else {}
         channel_id = str(payload.get("channel_id") or event.correlation_id or "")
@@ -5928,12 +5926,10 @@ class EventReactorMixin(OrchestratorAgentReactorMixin, DurableCallWorkflowMixin)
         return self._on_channel_discussion_event(event)
 
     def _on_channel_agent_reply_requested(self, event: ZfEvent) -> WorkflowRuntimeDecision | None:
-        """Raw `zf emit channel.agent.reply.requested` dispatches to the
-        target member's backend via `dispatch_reply_request`. The inline
-        router path (`route_channel_message` → `dispatch_reply_request`)
-        already emits `channel.agent.reply.started` before this handler
-        sees the event, so the started-event idempotency check keeps the
-        handler a no-op on that path and only fires on raw operator emits.
+        """Drain durable requests without waiting for a provider turn.
+
+        Already-started generations remain idempotent; background dispatch
+        owns the existing capacity and per-request claims.
         """
         if event.actor == "orchestrator-reactor":
             return None
@@ -5957,16 +5953,17 @@ class EventReactorMixin(OrchestratorAgentReactorMixin, DurableCallWorkflowMixin)
                 and _reply_run_generation(prior_payload) >= requested_generation
             ):
                 return None
-        dispatch_reply_request(
+        from zf.runtime.channel_message_ingress import dispatch_channel_replies_background
+
+        dispatch_channel_replies_background(
             state_dir=self.state_dir,
-            writer=self.event_writer,
             channel_id=channel_id,
-            request_id=request_id,
             actor="orchestrator-reactor",
             source="runtime",
             project_root=getattr(self, "project_root", None),
             config=getattr(self, "config", None),
             openclaw_client=getattr(self, "openclaw_client", None),
+            max_dispatch=64,
         )
         return None
 
@@ -5985,29 +5982,16 @@ class EventReactorMixin(OrchestratorAgentReactorMixin, DurableCallWorkflowMixin)
         if not any(event.type.startswith("channel.agent.reply.") for event in events):
             return
 
-        def _dispatch(channel_id: str, request_id: str) -> None:
-            dispatch_reply_request(
-                state_dir=self.state_dir,
-                writer=self.event_writer,
-                channel_id=channel_id,
-                request_id=request_id,
-                actor="orchestrator-remediation",
-                source="runtime",
-                project_root=getattr(self, "project_root", None),
-                config=getattr(self, "config", None),
-                openclaw_client=getattr(self, "openclaw_client", None),
-            )
-
         remediate_channel_replies(
             self.event_writer,
             events=events,
-            dispatch=_dispatch,
         )
         from zf.runtime.channel_reply_remediation import (
             resume_pending_channel_reply_queues,
         )
 
-        resume_pending_channel_reply_queues(self, events)
+        # Include generations just emitted by remediation in this drain.
+        resume_pending_channel_reply_queues(self, self.event_log.read_all())
 
     def _on_worker_completed(self, event: ZfEvent) -> WorkflowRuntimeDecision | None:
         """Route provider/worker self-completion through completion audit.

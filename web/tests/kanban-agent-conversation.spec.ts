@@ -773,7 +773,7 @@ test("KBA-WORKFLOW Create Task leads to Plan, then Approve, then invoke", async 
     event.type === "operator.action.proposed"
     && eventPayloadContains(event, "workflow-start")
   ))).toHaveLength(1);
-  await expect(approve).toContainText("Workflow started", {
+  await expect(approve).toContainText("Workflow start requested", {
     timeout: 30_000,
   });
   await captureAgent(page, "07-task-workflow-started");

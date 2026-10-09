@@ -23,6 +23,7 @@ from zf.web.channel_task_plan import (
     selected_channel_task_authority,
 )
 from zf.web.channel_setup_plan import normalize_channel_setup_submit_payload
+from zf.web.plan_requirement_sources import bind_requirement_sources
 from zf.web.plan_workflow_submit import (
     normalize_task_workflow_submit_payload,
 )
@@ -115,7 +116,9 @@ def normalize_plan_request(
     if bool(question.get("isSecret") or question.get("is_secret")):
         validation_errors.append("secret input is not supported")
 
-    context = plan_context or {}
+    context, source_error = bind_requirement_sources(raw, plan_context or {})
+    if source_error:
+        validation_errors.append(source_error)
     task_binding_digests = {
         str(key): str(value)
         for key, value in (

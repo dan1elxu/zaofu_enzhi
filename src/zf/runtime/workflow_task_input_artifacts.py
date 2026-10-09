@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from zf.core.state.atomic_io import atomic_write_text
+from zf.runtime.sidecar_refs import hydrate_sidecar_ref
 from zf.runtime.workflow_request_acceptance import (
     assert_task_workflow_input_coverage,
     task_workflow_input_contract_digest,
@@ -20,6 +21,30 @@ class MaterializedTaskInput:
     source_refs: dict[str, str]
     contract_ref: str
     contract_digest: str
+
+
+def materialize_channel_prd_reader_source(
+    *, state_dir: Path, workflow_dir: Path, input_contract: Mapping[str, Any],
+) -> str:
+    """Expose the verified canonical PRD body as a project-local reader target."""
+    evidence = input_contract.get("evidence_contract")
+    if not isinstance(evidence, Mapping) or not str(evidence.get("channel_id") or ""):
+        return ""
+    ref = str(input_contract.get("source_ref") or "")
+    digest = str(evidence.get("channel_prd_digest") or evidence.get("source_digest") or "")
+    if not ref or not digest:
+        raise ValueError("Channel PRD reader source requires canonical ref and digest")
+    document = hydrate_sidecar_ref(
+        state_dir, {"ref": ref, "sha256": digest, "content_type": "application/json"},
+        purpose="workflow-channel-prd-reader", actor="workflow-intake",
+    ).payload
+    body = document.get("body") if isinstance(document, dict) else {}
+    markdown = body.get("markdown") if isinstance(body, dict) else ""
+    if not isinstance(markdown, str) or not markdown.strip():
+        raise ValueError("canonical Channel PRD Markdown is unavailable")
+    path = workflow_dir / "channel-prd-source.md"
+    atomic_write_text(path, markdown.rstrip() + "\n")
+    return str(path)
 
 
 def materialize_task_workflow_input(

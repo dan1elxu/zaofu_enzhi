@@ -1,8 +1,4 @@
-"""P0.3 — channel.owner_report must verify the requesting owner_id is a channel
-member with `report_owner` permission. Mirrors the rejection pattern of
-channel.member.add.rejected: 403 + channel.owner_report.rejected event +
-_completed(status='rejected'), no owner_report.requested event written.
-"""
+"""Owner reports authorize the actual caller against canonical or legacy grants."""
 
 from __future__ import annotations
 
@@ -74,6 +70,34 @@ def _request_owner_report(
 
 
 class TestOwnerReportPermissionGate:
+    @pytest.mark.parametrize("owner,delegates,expected", [
+        ("web", [], 202),
+        ("owner:alice", [{"actor_ref": "web", "scope": ["report_owner"],
+                          "authorization_ref": "owner-grant", "expires_at": "2099-01-01T00:00:00Z"}], 202),
+        ("owner:alice", [{"actor_ref": "web", "scope": ["report_owner"],
+                          "authorization_ref": "owner-grant", "expires_at": "2000-01-01T00:00:00Z"}], 403),
+        ("owner:alice", [{"actor_ref": "web", "scope": ["confirm_prd"],
+                          "authorization_ref": "owner-grant", "expires_at": "2099-01-01T00:00:00Z"}], 403),
+        ("owner:alice", [], 403),
+    ])
+    def test_report_uses_actual_actor_and_canonical_owner(self, state_dir, monkeypatch, owner, delegates, expected):
+        monkeypatch.setenv("ZF_WEB_ACTION_TOKEN", "test-token")
+        EventLog(state_dir / "events.jsonl").append(ZfEvent(
+            type="channel.created", actor="web", payload={
+                "channel_id": "ch-owner", "owner_actor_ref": owner, "owner_delegates": delegates,
+            },
+        ))
+        # Supplying an authorized member/owner in JSON must never impersonate it.
+        _seed_member(state_dir, channel_id="ch-owner", member_id=owner)
+        client = TestClient(create_app(state_dir))
+        r = _request_owner_report(client, channel_id="ch-owner", owner_id=owner)
+        assert r.status_code == expected, r.text
+        if expected == 202:
+            r = client.post("/api/actions/channel-owner-report", headers={"x-zf-web-token": "test-token"},
+                            json={"channel_id": "ch-owner", "thread_id": "main"})
+            assert r.status_code == 202, r.text
+            assert r.json()["owner_id"] == owner
+
     def test_rejects_when_owner_id_not_a_member(self, state_dir, monkeypatch):
         monkeypatch.setenv("ZF_WEB_ACTION_TOKEN", "test-token")
         client = TestClient(create_app(state_dir))
@@ -118,7 +142,7 @@ class TestOwnerReportPermissionGate:
         _seed_member(
             state_dir,
             channel_id="ch-zaofu",
-            member_id="owner:min",
+            member_id="web",
             member_type="owner_delegate",
         )
 
@@ -147,6 +171,16 @@ class TestOwnerReportPermissionGate:
         assert len(rejected) == 1
         evt = rejected[0]
         assert evt.correlation_id == "ch-zaofu"
-        assert evt.payload["owner_id"] == "ghost:nobody"
+        assert evt.payload["owner_id"] == "web"
         assert evt.payload["channel_id"] == "ch-zaofu"
         assert "report_owner" in evt.payload["reason"]
+
+
+    def test_canonical_owner_does_not_need_a_synthetic_member(self, state_dir, monkeypatch):
+        monkeypatch.setenv("ZF_WEB_ACTION_TOKEN", "test-token")
+        EventLog(state_dir / "events.jsonl").append(ZfEvent(type="channel.created", actor="web", payload={
+            "channel_id": "ch-real-owner", "owner_actor_ref": "web"}))
+        client = TestClient(create_app(state_dir))
+        response = _request_owner_report(client, channel_id="ch-real-owner", owner_id="owner:operator")
+        assert response.status_code == 202, response.text
+        assert response.json()["owner_id"] == "web"

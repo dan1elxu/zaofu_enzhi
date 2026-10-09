@@ -32,6 +32,16 @@ function recordString(row: Record<string, unknown> | null | undefined, key: stri
   return String(value);
 }
 
+// Labels may hide transport details; identities must retain discussion scope.
+export function channelThreadId(value: string): string {
+  return value.trim() || "main";
+}
+
+function channelThreadTitle(detail: ChannelDetail | null): string {
+  const name = String(detail?.name || "").replace(/^#\s*/, "").trim();
+  return name || "讨论";
+}
+
 function ensureThread(threads: Map<string, AgentSessionThread>, id: string, title?: string): AgentSessionThread {
   const threadId = id || "main";
   const existing = threads.get(threadId);
@@ -145,9 +155,21 @@ function channelRunSortKey(row: Record<string, unknown>): string {
 
 export function buildChannelConversation(detail: ChannelDetail | null, selectedChannelId: string, activeThreadId = "main"): AgentConversation {
   const threads = new Map<string, AgentSessionThread>();
-  ensureThread(threads, "main", "main");
-  const rawThreads = recordValue(detail?.threads);
-  for (const key of Object.keys(rawThreads ?? {})) ensureThread(threads, key);
+  const logicalActiveThreadId = channelThreadId(activeThreadId);
+  const rawThreads = detail?.threads;
+  if (Array.isArray(rawThreads)) {
+    for (const item of rawThreads) {
+      const row = recordValue(item);
+      const rawId = recordString(row, "thread_id") || recordString(row, "id");
+      if (rawId) ensureThread(threads, channelThreadId(rawId), recordString(row, "title"));
+    }
+  } else {
+    const rawThreadRecord = recordValue(rawThreads);
+    for (const [key, value] of Object.entries(rawThreadRecord ?? {})) {
+      const metadata = recordValue(value);
+      ensureThread(threads, channelThreadId(key), recordString(metadata, "title"));
+    }
+  }
   const messages = (detail?.messages ?? detail?.recent_messages ?? []).filter((item): item is Record<string, unknown> => Boolean(recordValue(item)));
   const memberIds = new Set(
     (detail?.members ?? [])
@@ -183,7 +205,7 @@ export function buildChannelConversation(detail: ChannelDetail | null, selectedC
   const providerRuns = rawProviderRuns.filter((item) => !isStaleFailedChannelRun(item, memberIds, latestCompletedByTarget));
   const requestById = new Map(requests.map((item) => [recordString(item, "request_id"), item]));
   for (const message of messages) {
-    const threadId = recordString(message, "thread_id", "main");
+    const threadId = channelThreadId(recordString(message, "thread_id", "main"));
     const role = recordString(message, "role") || (recordString(message, "member_id") ? "assistant" : "user");
     const messageId = recordString(message, "message_id") || recordString(message, "event_id") || `${threadId}-${messages.indexOf(message)}`;
     const rawText = recordString(message, "text") || recordString(message, "message") || recordString(message, "summary");
@@ -252,7 +274,7 @@ export function buildChannelConversation(detail: ChannelDetail | null, selectedC
     thread.updatedAt = recordString(message, "ts") || thread.updatedAt;
   }
   for (const request of requests) {
-    const threadId = recordString(request, "thread_id", "main");
+    const threadId = channelThreadId(recordString(request, "thread_id", "main"));
     const requestId = recordString(request, "request_id") || recordString(request, "event_id");
     const runId = recordString(request, "run_id") || recordString(request, "provider_run_id") || requestId;
     const thread = ensureThread(threads, threadId);
@@ -266,13 +288,16 @@ export function buildChannelConversation(detail: ChannelDetail | null, selectedC
       providerSessionId: recordString(request, "provider_session_id"),
     });
     if (status !== "completed") {
+      const reason = recordString(request, "reason");
       upsertPart(run, {
         id: `reply-${requestId}-status`,
         runId: run.id,
         kind: status === "failed" ? "error" : status === "streaming" || status === "submitted" ? "thinking" : "status",
         state: status,
-        title: channelStatusTitle(status),
-        summary: recordString(request, "reason") || channelStatusSummary(status, recordString(request, "target_member_id")),
+        title: status === "failed" ? channelFailureTitle(reason) : channelStatusTitle(status),
+        summary: status === "failed"
+          ? channelFailureSummary(reason, recordString(request, "target_member_id"))
+          : reason || channelStatusSummary(status, recordString(request, "target_member_id")),
         updatedAt: recordString(request, "updated_at") || recordString(request, "created_at"),
       });
     }
@@ -288,7 +313,7 @@ export function buildChannelConversation(detail: ChannelDetail | null, selectedC
   for (const route of blockedRoutes) {
     const messageId = recordString(route, "message_id");
     if (!messageId) continue;
-    const threadId = recordString(route, "thread_id", "main");
+    const threadId = channelThreadId(recordString(route, "thread_id", "main"));
     const reason = recordString(route, "reason");
     // bizsim r4:auto_route_not_allowed 是 agent 回帖的防风暴守卫
     // (doc 64 §5,by design)——渲染为中性说明而非 error;红色告警留给
@@ -342,7 +367,7 @@ export function buildChannelConversation(detail: ChannelDetail | null, selectedC
   for (const providerRun of providerRuns) {
     const runId = recordString(providerRun, "run_id") || recordString(providerRun, "provider_run_id");
     if (!runId) continue;
-    const threadId = recordString(providerRun, "thread_id", "main");
+    const threadId = channelThreadId(recordString(providerRun, "thread_id", "main"));
     const requestId = recordString(providerRun, "request_id") || runId;
     const thread = ensureThread(threads, threadId);
     const turn = ensureTurn(
@@ -365,9 +390,20 @@ export function buildChannelConversation(detail: ChannelDetail | null, selectedC
       const rawKind = recordString(part, "kind", "status");
       const rawState = recordString(part, "state", status);
       const kind = channelPartKind(rawKind);
+      if (kind === "error") {
+        // The reply-request pass creates a provisional failure part before
+        // provider_runs arrives. The provider error is authoritative; remove
+        // the provisional line so one failed run does not show two failures.
+        run.parts = run.parts.filter((existing) => !existing.id.startsWith("reply-") || existing.kind !== "error");
+      }
+      const failureReason = recordString(providerRun, "reason")
+        || recordString(part, "summary")
+        || (recordString(part, "content").trim().toLowerCase() === "failed" ? "" : recordString(part, "content"));
       const title = isChannelFinalResult(rawKind)
         ? channelPartTitle(rawKind)
-        : recordString(part, "title") || channelPartTitle(rawKind);
+        : kind === "error"
+          ? channelFailureTitle(failureReason)
+          : recordString(part, "title") || channelPartTitle(rawKind);
       const hasFinalReply = run.parts.some((item) =>
         item.kind === "text"
         && item.state === "completed"
@@ -381,8 +417,15 @@ export function buildChannelConversation(detail: ChannelDetail | null, selectedC
         kind,
         state: channelRunStatus(rawState),
         title,
-        summary: stripChannelResultHeading(recordString(part, "summary")),
-        content: kind === "text" ? stripChannelResultHeading(recordString(part, "content")) : recordString(part, "content"),
+        summary: kind === "error"
+          ? channelFailureSummary(
+            stripChannelResultHeading(failureReason),
+            recordString(providerRun, "target_member_id") || recordString(providerRun, "member_id"),
+          )
+          : stripChannelResultHeading(recordString(part, "summary")),
+        content: kind === "error"
+          ? ""
+          : kind === "text" ? stripChannelResultHeading(recordString(part, "content")) : recordString(part, "content"),
         seq: Number(part.seq || 0) || undefined,
         toolCallId: recordString(part, "tool_call_id") || undefined,
         toolName: recordString(part, "tool_name") || undefined,
@@ -420,7 +463,7 @@ export function buildChannelConversation(detail: ChannelDetail | null, selectedC
     );
     const key = resultEventId || digest;
     if (!key) continue;
-    const threadId = recordString(update, "thread_id", "main");
+    const threadId = channelThreadId(recordString(update, "thread_id", "main"));
     const thread = ensureThread(threads, threadId);
     const existing = resultCards.get(key);
     if (status === "research_adopted" && existing) {
@@ -456,7 +499,18 @@ export function buildChannelConversation(detail: ChannelDetail | null, selectedC
     resultCards.set(key, card);
     thread.updatedAt = recordString(update, "ts") || thread.updatedAt;
   }
-  return { id: `channel:${selectedChannelId}`, surface: "channel_group", activeThreadId, threads: finalizeThreads(threads, activeThreadId) };
+  if (!threads.size) ensureThread(threads, "main", channelThreadTitle(detail));
+  for (const thread of threads.values()) {
+    if (thread.id.startsWith("kanban:")) thread.title = channelThreadTitle(detail);
+  }
+  const actualActiveThreadId = threads.has(logicalActiveThreadId)
+    ? logicalActiveThreadId : threads.keys().next().value || "main";
+  return {
+    id: `channel:${selectedChannelId}`,
+    surface: "channel_group",
+    activeThreadId: actualActiveThreadId,
+    threads: finalizeThreads(threads, actualActiveThreadId),
+  };
 }
 
 // A blocked agent reply only warrants the anti-storm notice when it actually
@@ -511,6 +565,22 @@ function channelStatusTitle(status: AgentSessionStatus): string {
   if (status === "cancelled") return "Cancelled";
   if (status === "stale") return "Stale";
   return "Waiting";
+}
+
+function channelFailureTitle(reason: string): string {
+  const text = reason.toLowerCase();
+  if (text.includes("capacity") || text.includes("rate limit") || text.includes("429") || text.includes("限流") || text.includes("容量")) {
+    return "Provider 容量/限流";
+  }
+  if (text.includes("timeout") || text.includes("timed out") || text.includes("超时")) return "执行超时";
+  if (text.includes("cancel") || text.includes("取消")) return "已取消";
+  return "普通失败";
+}
+
+function channelFailureSummary(reason: string, memberId: string): string {
+  const detail = reason.trim();
+  const label = channelFailureTitle(detail);
+  return detail ? `${label}：${detail}` : `${memberId ? `@${memberId} ` : ""}${label}`;
 }
 
 function channelStatusSummary(status: AgentSessionStatus, memberId: string): string {

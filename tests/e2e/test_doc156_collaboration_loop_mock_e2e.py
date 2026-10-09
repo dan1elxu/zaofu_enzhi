@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from tests.channel_wait import wait_for_channel
+
 import hashlib
 import json
 import time
@@ -701,6 +703,7 @@ def test_four_lens_discussion_cross_review_and_signoff_closes(
     for request in review_requests:
         react_channel_cross_review_requested(host, request)
         react_channel_cross_review_requested(host, request)
+    wait_for_channel(lambda: all(r["status"] == "completed" for r in project_channel(state_dir, channel_id)["cross_reviews"]))
     detail = project_channel(state_dir, channel_id)
     assert {
         (review["target_member_id"], review["status"])
@@ -741,6 +744,7 @@ def test_four_lens_discussion_cross_review_and_signoff_closes(
         host,
         synthesis_request,
     )
+    wait_for_channel(lambda: any(e.type == "channel.consensus.proposed" for e in log.read_all()))
     consensus = next(
         event
         for event in reversed(log.read_all())
@@ -754,6 +758,7 @@ def test_four_lens_discussion_cross_review_and_signoff_closes(
     ]
     react_channel_consensus_proposed(host, consensus)
     react_channel_consensus_proposed(host, consensus)
+    wait_for_channel(lambda: len([e for e in log.read_all() if e.type == "channel.consensus.signed"]) == 4)
     signed = {
         event.payload.get("member_id")
         for event in log.read_all()

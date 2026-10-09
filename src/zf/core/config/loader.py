@@ -326,7 +326,7 @@ _KNOWN_COST_KEYS = frozenset({
     "pricing_refresh_timeout_seconds",
     "backend_accounting_modes",
 })
-_KNOWN_CHANNEL_KEYS = frozenset({"agent_profiles"})
+_KNOWN_CHANNEL_KEYS = frozenset({"agent_profiles", "semantic_source_max_chars"})
 _KNOWN_CHANNEL_AGENT_PROFILE_KEYS = frozenset({
     "revision",
     "persona",
@@ -4541,7 +4541,10 @@ def _build_channel(data: object) -> ChannelConfig:
             )
         except (TypeError, ValueError) as exc:
             raise ConfigError(f"{context}: {exc}") from exc
-    return ChannelConfig(agent_profiles=profiles)
+    budget = data.get("semantic_source_max_chars", 120_000)
+    if type(budget) is not int or not 1 <= budget <= 1_000_000:
+        raise ConfigError("channel.semantic_source_max_chars must be an integer between 1 and 1000000")
+    return ChannelConfig(agent_profiles=profiles, semantic_source_max_chars=budget)
 
 
 _FEISHU_ROUTE_TARGETS = {

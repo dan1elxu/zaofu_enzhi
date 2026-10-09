@@ -154,6 +154,19 @@ const channelConversation: AgentConversation = {
   threads: [{ ...thread, id: "main" }],
 };
 
+const workflowRequestConversation: AgentConversation = {
+  id: "workflow-request", surface: "kanban_agent", activeThreadId: "main",
+  threads: [{ id: "main", title: "main", status: "idle", turns: [{
+    id: "workflow-request-turn", threadId: "main", runs: [], cards: [{
+      id: "workflow-receipt", kind: "approve", title: "Start workflow", status: "completed",
+      proposal: { action: "workflow-start", requestedAction: "workflow-start", payload: {
+        task_id: "TASK-FIXTURE", route_id: "prd:standard",
+      }, reason: "Approved by Owner", valid: true },
+      payload: { resolution: "executed", status: "pending_consumer" },
+    }],
+  }] }],
+};
+
 const COMPOSER_STATES: ComposerStatus[] = ["idle", "submitted", "streaming", "error"];
 
 function fixturePlan(
@@ -367,6 +380,9 @@ export function AgentSessionFixturePage() {
       </div>
 
       <h3 style={{ marginTop: 24 }}>Preparing choices — control JSON hidden</h3>
+      <div data-testid="fx-workflow-request">
+        <AgentSessionTimeline activeThreadId="main" conversation={workflowRequestConversation} compact />
+      </div>
       <div data-testid="fx-kanban-preparing">
         <AgentSessionTimeline
           activeThreadId="main"

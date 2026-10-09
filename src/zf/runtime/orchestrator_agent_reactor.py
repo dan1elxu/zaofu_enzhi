@@ -3,10 +3,17 @@
 from __future__ import annotations
 
 from zf.core.events.model import ZfEvent
+from zf.runtime.channel_prd_evaluation_reactor import react_channel_prd_evaluation_requested
 from zf.runtime.workflow_runtime_types import WorkflowRuntimeDecision
 
 
 class OrchestratorAgentReactorMixin:
+    def _on_channel_prd_evaluation_requested(
+        self, event: ZfEvent,
+    ) -> WorkflowRuntimeDecision | None:
+        react_channel_prd_evaluation_requested(self, event)
+        return None
+
     def _on_orchestrator_stage_barrier_admitted(
         self,
         event: ZfEvent,

@@ -131,6 +131,7 @@ import {
 } from "./pageCompatibility";
 import { isRefreshNoiseEventType } from "./refreshEventPolicy";
 import { createChannelActionAdapter } from "./channelActionAdapter";
+import { useChannelDiagnostics } from "./useChannelDiagnostics";
 import { useChannelLiveConvergence } from "./useChannelLiveConvergence";
 import { shouldRefreshChannelsAfterAction } from "./kanbanAgentInteractionPolicy";
 import { useProjectObservabilityData } from "./useProjectObservabilityData";
@@ -641,9 +642,6 @@ export function App() {
   const [selectedChannelId, setSelectedChannelId] = useState(initial.channel);
   const [channelDetail, setChannelDetail] = useState<ChannelDetail | null>(null);
   const [channelLoadError, setChannelLoadError] = useState<string | null>(null);
-  const [channelDiagnosticsDetail, setChannelDiagnosticsDetail] = useState<ChannelDetail | null>(null);
-  const [channelDiagnosticsLoading, setChannelDiagnosticsLoading] = useState(false);
-  const [channelDiagnosticsError, setChannelDiagnosticsError] = useState<string | null>(null);
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(initial.task);
   const [taskDetail, setTaskDetail] = useState<TaskDetailModel | null>(null);
   const [taskDiff, setTaskDiff] = useState<TaskDiff | null>(null);
@@ -723,7 +721,10 @@ export function App() {
   const selectedChannelIdRef = useRef(selectedChannelId);
   const channelDetailRequestGateRef = useRef(new LatestRequestGate());
   const channelHistoryRequestGateRef = useRef(new LatestRequestGate());
-  const channelDiagnosticsRequestGateRef = useRef(new LatestRequestGate());
+  const { channelDiagnosticsDetail, channelDiagnosticsLoading, channelDiagnosticsError,
+    loadChannelDiagnostics, invalidateChannelDiagnostics } = useChannelDiagnostics({
+    activeProjectId, selectedChannelId, selectedChannelIdRef, conversationSeq: Number(channelDetail?.seq || 0),
+  });
   const recoverStreamGap = useProjectStreamGapRecovery({
     activeProjectId, page, selectedChannelId, lastSeqRef, setEvents, setSnapshot, setDeliveryFeaturesPage,
     setChannelsPage, setChannelLoadError, setSelectedChannelId,
@@ -761,10 +762,6 @@ export function App() {
 
   useEffect(() => {
     channelHistoryRequestGateRef.current.invalidate();
-    channelDiagnosticsRequestGateRef.current.invalidate();
-    setChannelDiagnosticsDetail(null);
-    setChannelDiagnosticsLoading(false);
-    setChannelDiagnosticsError(null);
   }, [activeProjectId, selectedChannelId]);
 
   useEffect(() => {
@@ -866,33 +863,6 @@ export function App() {
       current ? mergeChannelConversationPages(current, earlier) : earlier
     ));
   }, [activeProjectId, channelDetail, selectedChannelId]);
-
-  const loadChannelDiagnostics = useCallback(async () => {
-    const channelId = selectedChannelId || "ch-zaofu";
-    const conversationSeq = Number(channelDetail?.seq || 0);
-    if (channelDiagnosticsLoading) return;
-    if (
-      channelDiagnosticsDetail?.channel_id === channelId
-      && Number(channelDiagnosticsDetail.seq || 0) >= conversationSeq
-    ) return;
-    const projectId = activeProjectId || undefined;
-    const ticket = channelDiagnosticsRequestGateRef.current.issue();
-    setChannelDiagnosticsLoading(true);
-    setChannelDiagnosticsError(null);
-    try {
-      const detail = await getChannelDetail(channelId, projectId);
-      if (!channelDiagnosticsRequestGateRef.current.isCurrent(ticket)) return;
-      if (selectedChannelIdRef.current !== channelId) return;
-      setChannelDiagnosticsDetail(detail);
-    } catch (err) {
-      if (!channelDiagnosticsRequestGateRef.current.isCurrent(ticket)) return;
-      setChannelDiagnosticsError(err instanceof Error ? err.message : String(err));
-    } finally {
-      if (channelDiagnosticsRequestGateRef.current.isCurrent(ticket)) {
-        setChannelDiagnosticsLoading(false);
-      }
-    }
-  }, [activeProjectId, channelDetail?.seq, channelDiagnosticsDetail, channelDiagnosticsLoading, selectedChannelId]);
 
   const loadKanbanProposals = useCallback(async () => {
     const requestedProjectId = activeProjectId || "";
@@ -1562,6 +1532,10 @@ export function App() {
     const ticket = projectRequestScope.capture(requestedProjectId);
     const result = await postAction(action, payload, requestedProjectId || undefined);
     if (!projectRequestScope.isCurrent(ticket)) return result;
+    if (!actionFailed(result) && payload.channel_id === selectedChannelIdRef.current) {
+      // Report-only actions do not advance the compact conversation sequence.
+      invalidateChannelDiagnostics();
+    }
     if (actionFailed(result) && actionFailureReason(result).includes("missing or invalid web action token/session")) {
       window.localStorage.removeItem("zf.webActionToken");
       setWebActionTokenPresent(false);
@@ -1769,7 +1743,7 @@ export function App() {
 
   const channelActions = createChannelActionAdapter({
     activeProjectId,
-    channelDetail: channelDiagnosticsDetail ?? channelDetail,
+    channelDetail: channelDetail ? { ...channelDiagnosticsDetail, ...channelDetail } : null,
     prepareTaskAgent: (taskId) => {
       if (taskId) setSelectedTaskId(taskId);
       openTaskAgent();
@@ -2258,6 +2232,8 @@ export function App() {
                 onPostMessage={(text, refs, ingress) => submitChannelMessage(text, refs, ingress)}
                 onDrainReplies={() => drainChannelReplies()}
                 onGenerateOwnerReport={(threadId) => channelActions.generateOwnerReport(threadId)}
+                onEvaluatePrd={channelActions.evaluatePrd}
+                onDecideMemberInvitation={channelActions.decideMemberInvitation}
                 onClearHistory={(threadId) => clearChannelHistory(threadId)}
                 onDeleteChannel={() => deleteChannel()}
                 onMarkRead={(threadId) => markChannelRead(threadId)}
@@ -2274,9 +2250,12 @@ export function App() {
                 onConsensusDecision={channelActions.decideConsensus}
                 onRemoveMember={(memberId) => removeChannelMember(memberId)}
                 onResearchAdopt={channelActions.adoptResearchResult}
+                onCancelProviderRun={channelActions.cancelProviderRun}
                 onSetMemberPermission={(memberId, permissionProfile) => setChannelMemberPermission(memberId, permissionProfile)}
                 onWorkflowRequest={channelActions.submitWorkflowRequest}
                 selectedChannelId={selectedChannelId}
+                projectId={activeProjectId}
+                onReviewPlans={() => openTaskAgent()}
               />
           ) : page === "triage" ? (
             <TriagePage

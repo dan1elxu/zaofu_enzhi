@@ -61,7 +61,7 @@ def react_channel_synthesis_requested(
                 "source": "runtime",
                 "text": f"@{target_member_id} {prompt}",
                 "mentions": [target_member_id],
-                "refs": {"synthesis_request_id": request_id},
+                "refs": {"synthesis_request_id": request_id, "prd_document_contract": "full.v1"},
             },
             created_by="channel-synthesis:runtime",
             source_event_id=event.id,
@@ -84,18 +84,7 @@ def react_channel_synthesis_requested(
             and str(prior_payload.get("message_id") or "") == message_id
         ):
             return
-    route_channel_message(
-        state_dir=host.state_dir,
-        writer=host.event_writer,
-        message_event=message,
-        message_payload=message.payload,
-        actor="orchestrator-reactor",
-        source="runtime",
-        project_root=getattr(host, "project_root", None),
-        config=getattr(host, "config", None),
-        openclaw_client=getattr(host, "openclaw_client", None),
-        dispatch_inline=True,
-    )
+    _route_runtime_message(host, event, message)
 
 
 def react_channel_synthesis_repair_requested(
@@ -145,6 +134,7 @@ def react_channel_synthesis_repair_requested(
                 "refs": {
                     "synthesis_request_id": synthesis_request_id,
                     "synthesis_repair_id": repair_id,
+                    "prd_document_contract": "full.v1",
                     "synthesis_repair_revision": revision,
                     "synthesis_invalid_reply": invalid_reply_ref,
                     "synthesis_contract_error": contract_error,
@@ -171,18 +161,7 @@ def react_channel_synthesis_repair_requested(
             and str(prior_payload.get("message_id") or "") == message_id
         ):
             return
-    route_channel_message(
-        state_dir=host.state_dir,
-        writer=host.event_writer,
-        message_event=message,
-        message_payload=message.payload,
-        actor="orchestrator-reactor",
-        source="runtime",
-        project_root=getattr(host, "project_root", None),
-        config=getattr(host, "config", None),
-        openclaw_client=getattr(host, "openclaw_client", None),
-        dispatch_inline=True,
-    )
+    _route_runtime_message(host, event, message)
 
 
 def react_channel_question_dedup_requested(
@@ -274,18 +253,7 @@ def react_channel_question_dedup_requested(
             and str(prior_payload.get("message_id") or "") == message_id
         ):
             return
-    route_channel_message(
-        state_dir=host.state_dir,
-        writer=host.event_writer,
-        message_event=message,
-        message_payload=message.payload,
-        actor="orchestrator-reactor",
-        source="runtime",
-        project_root=getattr(host, "project_root", None),
-        config=getattr(host, "config", None),
-        openclaw_client=getattr(host, "openclaw_client", None),
-        dispatch_inline=True,
-    )
+    _route_runtime_message(host, event, message)
 
 
 def react_channel_cross_review_requested(
@@ -321,6 +289,7 @@ def react_channel_cross_review_requested(
                 "mentions": [target_member_id],
                 "refs": {
                     "cross_review_request_id": request_id,
+                    "cross_review_contract": "v2",
                     "question_id": str(payload.get("question_id") or ""),
                     "dedup_request_id": str(
                         payload.get("dedup_request_id") or ""
@@ -442,7 +411,7 @@ def _route_runtime_message(host, event: ZfEvent, message: ZfEvent) -> None:
             and str(prior_payload.get("message_id") or "") == message_id
         ):
             return
-    route_channel_message(
+    routed = route_channel_message(
         state_dir=host.state_dir,
         writer=host.event_writer,
         message_event=message,
@@ -452,7 +421,16 @@ def _route_runtime_message(host, event: ZfEvent, message: ZfEvent) -> None:
         project_root=getattr(host, "project_root", None),
         config=getattr(host, "config", None),
         openclaw_client=getattr(host, "openclaw_client", None),
-        dispatch_inline=True,
+        dispatch_inline=False,
+    )
+    if not routed.reply_requests:
+        return
+    from zf.runtime.channel_message_ingress import dispatch_channel_replies_background
+
+    dispatch_channel_replies_background(
+        state_dir=host.state_dir, channel_id=str(message.payload.get("channel_id") or ""),
+        actor="orchestrator-reactor", source="runtime", project_root=getattr(host, "project_root", None),
+        config=getattr(host, "config", None), openclaw_client=getattr(host, "openclaw_client", None), max_dispatch=len(routed.reply_requests),
     )
 
 

@@ -159,5 +159,5 @@ def consensus_mode_and_required_signers(
         return product_mode, []
     return (
         product_mode,
-        active_discussion_roster(channel, thread_id=thread_id),
+        list(active_discussion.get("review_roster") or active_discussion_roster(channel, thread_id=thread_id)),
     )

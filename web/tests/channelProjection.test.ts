@@ -111,6 +111,52 @@ assert(
 
 console.log("channelProjection.test.ts OK");
 
+// Channel origin ids are transport details. They must fold into the logical
+// primary conversation so opening a channel never lands on an empty `main`
+// tab while the real `kanban:<project>` thread is hidden beside it.
+const originThreadConversation = buildChannelConversation({
+  name: "# 洛书 PRD 定稿",
+  threads: [{ thread_id: "kanban:newloshu-68d799e0", title: "internal origin" }],
+  messages: [{
+    message_id: "origin-user",
+    role: "user",
+    thread_id: "kanban:newloshu-68d799e0",
+    text: "请完成 PRD 评审",
+    ts: "2026-09-22T10:00:00Z",
+  }, {
+    message_id: "origin-reply",
+    role: "assistant",
+    member_id: "security_reviewer",
+    thread_id: "kanban:newloshu-68d799e0",
+    text: "安全评审完成",
+    refs: { request_id: "origin-request" },
+    ts: "2026-09-22T10:00:05Z",
+  }],
+  reply_requests: [{
+    request_id: "origin-request",
+    message_id: "origin-user",
+    thread_id: "kanban:newloshu-68d799e0",
+    target_member_id: "security_reviewer",
+    status: "completed",
+  }],
+} as unknown as ChannelDetail, "ch-origin", "main");
+assert(originThreadConversation.threads.length === 1, "kanban origin does not create a second visible thread");
+assert(originThreadConversation.threads[0]?.id === "kanban:newloshu-68d799e0", "origin retains its actual identity");
+assert(originThreadConversation.threads[0]?.title === "洛书 PRD 定稿", "primary thread uses the channel name as its label");
+assert(
+  originThreadConversation.threads[0]?.turns[0]?.runs.some((run) => run.memberId === "security_reviewer"),
+  "origin thread replies remain visible in the normalized conversation",
+);
+
+console.log("channelProjection origin-thread normalization tests OK");
+
+const distinct = buildChannelConversation({ messages: [
+  { message_id: "original", thread_id: "kanban:project", role: "user", text: "Original" },
+  { message_id: "followup", thread_id: "main", role: "user", text: "Separate" },
+] } as unknown as ChannelDetail, "ch-distinct", "kanban:project");
+assert(distinct.threads.length === 2, "legacy main and origin must remain distinct scopes");
+assert(distinct.activeThreadId === "kanban:project", "active identity survives projection");
+
 
 // --- operator review 2026-07-16: anti-storm notice placement + gating ---
 // A plain agent reply (no @mention) blocked by auto_route_not_allowed is the
@@ -208,6 +254,43 @@ const ppRun = ppConv.threads.flatMap((t) => t.turns).flatMap((t) => t.runs).find
 assert(ppRun.status === "submitted", `provider pending row stays working, got ${ppRun.status}`);
 
 console.log("channelProjection provider-pending tests OK");
+
+const providerFailureConversation = buildChannelConversation({
+  messages: [{ message_id: "m-failed", role: "user", text: "run", ts: "2026-09-22T15:00:00Z" }],
+  reply_requests: [{
+    request_id: "request-failed",
+    message_id: "m-failed",
+    target_member_id: "arch",
+    status: "failed",
+  }],
+  provider_runs: [{
+    run_id: "run-failed",
+    request_id: "request-failed",
+    message_id: "m-failed",
+    target_member_id: "arch",
+    status: "failed",
+    parts: [{
+      id: "failure-part",
+      kind: "error",
+      state: "failed",
+      summary: "codex turn failed: Selected model is at capacity.",
+    }],
+  }],
+} as unknown as ChannelDetail, "ch-failed", "main");
+const providerFailurePart = providerFailureConversation.threads
+  .flatMap((thread) => thread.turns)
+  .flatMap((turn) => turn.runs)
+  .flatMap((run) => run.parts)
+  .find((part) => part.id === "failure-part");
+assert(providerFailurePart?.title === "Provider 容量/限流", "provider capacity failures have a specific category");
+assert(providerFailurePart?.summary?.startsWith("Provider 容量/限流："), "failure detail retains the provider message");
+assert(
+  providerFailureConversation.threads.flatMap((thread) => thread.turns).flatMap((turn) => turn.runs)
+    .find((run) => run.id === "run-failed")?.parts.filter((part) => part.kind === "error").length === 1,
+  "provider failure replaces the provisional request failure instead of duplicating it",
+);
+
+console.log("channelProjection failure classification tests OK");
 
 const resultAvailableDetail = {
   state_updates: [{

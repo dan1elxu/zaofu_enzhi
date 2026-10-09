@@ -135,6 +135,7 @@ def request_channel_handoff(
             resolved_skill_refs=member.get("resolved_skill_refs", []),
             permission_profile=str(member.get("permission_profile") or ""),
             profile_binding=member,
+            config=config,
             state_dir=Path(state_dir),
             project_root=project_root,
         )

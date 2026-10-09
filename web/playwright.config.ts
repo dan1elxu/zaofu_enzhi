@@ -10,7 +10,8 @@ export default defineConfig({
   },
   use: {
     baseURL: process.env.ZF_WEB_BASE_URL ?? "http://127.0.0.1:8001",
-    trace: "retain-on-failure",
+    trace: process.env.ZF_E2E_VIDEO === "on" ? "on" : "retain-on-failure",
+    video: process.env.ZF_E2E_VIDEO === "on" ? "on" : "off",
   },
   projects: [
     {

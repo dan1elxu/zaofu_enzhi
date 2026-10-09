@@ -436,6 +436,16 @@ EVENT_PROBLEM_SPECS: dict[str, EventProblemSpec] = {
     spec.event_type: spec
     for spec in (
         _failure_envelope(
+            "output.evaluation.failed", title="Advisory output evaluation failed",
+            source="independent_output_evaluation", producer_kind="integration",
+            required_scope_any=("request_id",),
+        ),
+        _failure_envelope(
+            "channel.prd_evaluation.feedback.failed", title="Channel evaluation feedback failed",
+            source="channel_evaluation_feedback", producer_kind="kernel",
+            required_scope_any=("request_id",),
+        ),
+        _failure_envelope(
             "runtime.action.attempt.failed",
             title="Controlled action attempt failed",
             source="controlled_action",

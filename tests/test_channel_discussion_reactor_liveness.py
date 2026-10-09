@@ -17,6 +17,8 @@ the `_KERNEL_LIVENESS_EVENTS` fast-path.
 
 from __future__ import annotations
 
+from tests.channel_wait import wait_for_channel
+
 from pathlib import Path
 
 import pytest
@@ -164,6 +166,37 @@ def _seed_phase1_two_of_three_replied(log: EventLog) -> None:
 
 def _phase_changes(log: EventLog) -> list[ZfEvent]:
     return [e for e in log.read_all() if e.type == "channel.discussion.phase.changed"]
+
+
+def test_internal_revision_resolution_wakes_discussion_once(
+    state_dir: Path, config: ZfConfig, transport: TmuxTransport,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from zf.runtime import channel_discussion
+
+    ticks: list[str] = []
+    monkeypatch.setattr(
+        channel_discussion, "advance_discussion",
+        lambda *_args, **_kwargs: ticks.append("revision"),
+    )
+    orch = Orchestrator(state_dir, config, transport)
+    revision = orch.event_writer.emit(
+        "channel.question.resolved", actor="channel-discussion",
+        correlation_id=CHANNEL_ID,
+        payload={"channel_id": CHANNEL_ID, "thread_id": "main",
+                 "question_id": "q-revise", "resolution": "revision_requested"},
+    )
+    orch.run_once(events=[revision])
+    assert ticks == ["revision"]
+
+    ordinary = orch.event_writer.emit(
+        "channel.question.resolved", actor="channel-discussion",
+        correlation_id=CHANNEL_ID,
+        payload={"channel_id": CHANNEL_ID, "thread_id": "main",
+                 "question_id": "q-other", "resolution": "answered"},
+    )
+    orch.run_once(events=[ordinary])
+    assert ticks == ["revision"]
 
 
 def _valid_contribution(
@@ -469,6 +502,7 @@ def test_synthesis_request_dispatches_live_through_layer2_kernel_path(
     )
 
     orch.run_once(events=[requested])
+    wait_for_channel(lambda: any(e.type == "channel.synthesis.proposed" for e in log.read_all()))
 
     events = log.read_all()
     synthesis_messages = [
@@ -639,9 +673,19 @@ def test_synthesis_next_round_dispatches_live_without_implicit_budget(
     assert continued[0].payload["synthesis_event_id"] == synthesis.id
     detail = project_channel(state_dir, CHANNEL_ID) or {}
     assert detail["discussion"]["max_rounds_explicit"] is False
-    # The focused fake providers reply inline. Once their contribution route is
-    # correctly selected, this same live reaction advances into phase 2.
-    assert detail["discussions"]["main"]["state"] == "phase2_relay"
+    # The reactor returns before providers; terminal reply handling advances
+    # phase 2 without waiting for a periodic deadline sweep.
+    wait_for_channel(lambda: len([e for e in log.read_all() if e.type == "channel.questions.frozen"]) == 2)
+    # EventWatcher delivers the background completions in a subsequent tick.
+    orch.run_once(events=[e for e in log.read_all() if e.type in {
+        "channel.agent.reply.completed", "channel.finding.recorded", "channel.questions.frozen",
+    }])
+    detail = project_channel(state_dir, CHANNEL_ID) or {}
+    live_phase2 = [e for e in _phase_changes(log) if e.payload.get("phase") == "phase2_relay"]
+    assert len(live_phase2) == 1
+    assert live_phase2[0].payload["reason"] == "blind_round_complete"
+    assert live_phase2[0].payload["source"] != "deadline-sweep"
+    assert detail["discussions"]["main"]["state"] in {"phase2_relay", "phase3_synthesis"}
     assert detail["discussions"]["main"]["revision"] == 9
     assert detail["discussions"]["main"]["requirement_message_id"] == TRIGGER
     assert channel_requirement_text(state_dir, detail, "main") == (
@@ -815,6 +859,7 @@ def test_synthesis_replay_routes_message_left_before_reply_request(
     orch = Orchestrator(state_dir, config, transport)
 
     orch.run_once(events=[requested])
+    wait_for_channel(lambda: any(e.type == "channel.synthesis.proposed" for e in log.read_all()))
 
     events = log.read_all()
     assert len([

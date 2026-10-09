@@ -590,7 +590,7 @@ def test_plan_request_identity_tracks_origin_while_digest_tracks_semantics() -> 
     assert separate["request_id"] != first["request_id"]
 
 
-def test_headless_plan_binds_the_contiguous_requirement_event_set() -> None:
+def test_headless_plan_binds_the_explicit_requirement_event_set() -> None:
     old = ZfEvent(
         id="evt-old",
         type="user.message",
@@ -633,7 +633,10 @@ def test_headless_plan_binds_the_contiguous_requirement_event_set() -> None:
 
     draft, proposal = prepare_headless_plan_draft(
         [old, boundary, requirement, continuation],
-        answer=_channel_setup_answer(),
+        answer=_channel_setup_answer().replace(
+            '"header": "Channel setup",',
+            '"header": "Channel setup", "originating_message_event_ids": ["evt-requirement", "evt-continuation"],',
+        ),
         action_proposal=None,
         project_id="zaofu",
         conversation_id="kanban:zaofu",
@@ -931,7 +934,10 @@ def test_headless_plan_can_bind_an_existing_task_outside_task_panel() -> None:
     config = load_config(ROOT / "zf.yaml")
 
     draft, proposal = prepare_headless_plan_draft(
-        [],
+        [ZfEvent(id="evt-workflow-request", type="user.message", actor="web", payload={
+            "message": "Start the workflow for TASK-PLAN", "project_id": "zaofu",
+            "conversation_id": "kanban:zaofu", "thread_key": "kanban:zaofu",
+        })],
         answer=_task_workflow_answer(),
         action_proposal=None,
         project_id="zaofu",
@@ -1207,6 +1213,7 @@ def test_plan_discussion_revision_keeps_the_original_request_identity() -> None:
         actor="web",
         payload={
             "message": "Could the recommendation include repository evidence?",
+            "project_id": "project-a", "conversation_id": "kanban:project-a", "thread_key": "main",
             "request": {
                 "plan_discussion": {
                     "request_event_id": source.id,
@@ -1256,6 +1263,7 @@ def test_plan_discussion_can_replace_invalid_draft_with_valid_revision() -> None
         actor="web",
         payload={
             "message": "Remove unsupported workflow parameters.",
+            "project_id": "project-a", "conversation_id": "kanban:project-a", "thread_key": "main",
             "request": {
                 "plan_discussion": {
                     "request_event_id": source.id,

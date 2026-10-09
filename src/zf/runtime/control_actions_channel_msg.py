@@ -14,6 +14,8 @@ from zf.runtime.channel_message_ingress import (
     execute_channel_message_ingress,
 )
 from zf.runtime.channel_owner_report import build_owner_report_payload
+from zf.runtime.channel_owner_authority import channel_owner_authority_error
+from zf.runtime.channel_member_proposals import pending_member_proposals
 from zf.runtime.channel_projection import project_channel
 from zf.runtime.channel_router import route_channel_message
 from zf.runtime.channel_sidecar import channel_message_event_payload
@@ -243,20 +245,26 @@ class ChannelMessageActionsMixin:
     ) -> dict:
         channel_id = _normal_channel_id(_required_text(payload, "channel_id"))
         thread_id = _optional_str(payload.get("thread_id")) or "main"
-        owner_id = _required_text(payload, "owner_id")
         member_id = _optional_str(payload.get("member_id")) or ""
         period = _optional_str(payload.get("period")) or "current"
         reason = _optional_str(payload.get("reason")) or "owner report requested"
         channel_view = project_channel(self.state_dir, channel_id) or {}
-        authorized = next(
-            (m for m in channel_view.get("members") or []
-             if str(m.get("member_id") or "") == owner_id
-             and "report_owner" in (m.get("permissions") or [])),
-            None,
+        owner_id = str(channel_view.get("owner_actor_ref") or self.actor)
+        authority_error = channel_owner_authority_error(
+            channel_view, actor=self.actor, capability="report_owner",
         )
-        if authorized is None:
+        # Legacy channels may have only a member grant. It must belong to the
+        # actual caller, never to an identity supplied in the request body.
+        if not channel_view.get("owner_actor_ref") and any(
+            str(m.get("member_id") or "") == self.actor
+            and m.get("status") not in {"removed", "suspended"}
+            and "report_owner" in (m.get("permissions") or [])
+            for m in channel_view.get("members") or []
+        ):
+            authority_error = ""
+        if authority_error:
             rejection_reason = (
-                f"owner_id {owner_id!r} lacks report_owner permission in channel {channel_id!r}"
+                f"actor {self.actor!r} lacks report_owner permission in channel {channel_id!r}: {authority_error}"
             )
             rejected = self.writer.emit(
                 "channel.owner_report.rejected",
@@ -444,6 +452,10 @@ class ChannelMessageActionsMixin:
             channel_synthesis_lock_path(self.state_dir, channel_id, thread_id)
         ):
             channel = project_channel(self.state_dir, channel_id) or {}
+            if pending_member_proposals(channel, thread_id):
+                return self._failed(requested=requested, action=action, requested_action=requested_action,
+                                    task_id=requested.task_id, reason="member invitation approval is pending",
+                                    status_code=409, status="member_invitation_pending")
             active_request = synthesis_request_in_flight(channel, thread_id)
             if active_request is not None:
                 active_request_id = str(active_request.get("request_id") or "")
@@ -477,7 +489,7 @@ class ChannelMessageActionsMixin:
                 }
             target_member_id = (
                 _optional_str(payload.get("target_member_id"))
-                or _synthesis_target_member(channel)
+                or _synthesis_target_member(channel, thread_id)
             )
             if not target_member_id:
                 return self._failed(
@@ -508,6 +520,8 @@ class ChannelMessageActionsMixin:
                     "channel_id": channel_id,
                     "thread_id": thread_id,
                     "request_id": request_id,
+                    "discussion_revision": int((channel.get("discussions", {}).get(thread_id) or {}).get("revision") or 1),
+                    "discussion_context_digest": str((channel.get("discussions", {}).get(thread_id) or {}).get("context_digest") or ""),
                     "target_member_id": target_member_id,
                     "status": "requested",
                     "reason": str(payload.get("reason") or "synthesis requested"),
@@ -525,7 +539,7 @@ class ChannelMessageActionsMixin:
             "source": self.surface,
             "text": f"@{target_member_id} {prompt}",
             "mentions": [target_member_id],
-            "refs": {"synthesis_request_id": request_id},
+            "refs": {"synthesis_request_id": request_id, "prd_document_contract": "full.v1"},
         }, created_by=f"channel-synthesis:{self.surface}")
         message = self.writer.emit(
             "channel.message.posted",

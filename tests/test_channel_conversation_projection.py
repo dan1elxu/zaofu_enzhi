@@ -134,7 +134,8 @@ def test_channel_conversation_carries_compact_discussion_attention(
     assert conversation is not None
     attention = conversation["discussion_attention"]["main"]
     assert attention["state"] == "running"
-    assert attention["active_agent_count"] == 1
+    assert attention["active_agent_count"] == 0
+    assert attention["queued_reply_count"] == 1
     assert attention["participant_count"] == 2
     assert attention["is_derived_projection"] is True
 
@@ -349,3 +350,15 @@ def test_channel_conversation_skips_linked_event_materialization(
     assert detail is not None
     assert len(detail["linked_events"]) == 80
     assert len(materialized) == 80
+
+
+def test_conversation_keeps_formal_review_status_without_large_review_bodies(tmp_path):
+    log = EventLog(tmp_path / "events.jsonl")
+    _append(log, "channel.created", {"name": "review"})
+    _append(log, "channel.cross_review.requested", {"request_id": "x1", "thread_id": "main", "question_id": "q1", "target_member_id": "security"})
+    _append(log, "channel.cross_review.rejected", {"request_id": "x1", "thread_id": "main", "target_member_id": "security", "reason": "cross_review_needs_owner_requires_question_and_recommendation", "answer": "large private semantic body"})
+    channel = project_channel_conversation(tmp_path, CHANNEL_ID)
+    row = channel["cross_reviews"][0]
+    assert row["status"] == "rejected"
+    assert row["reason"] == "cross_review_needs_owner_requires_question_and_recommendation"
+    assert "answer" not in row

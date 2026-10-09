@@ -1,5 +1,5 @@
 import { createContext, Fragment, useContext, useEffect, useMemo, useState } from "react";
-import type { CSSProperties, PointerEvent as ReactPointerEvent } from "react";
+import type { CSSProperties, PointerEvent as ReactPointerEvent, ReactNode } from "react";
 import { AlertTriangle, Bot, Check, CheckCircle2, ChevronRight, CircleSlash, Clock3, Copy, FileText, GitCompare, Hourglass, Info, ListChecks, Loader2, Maximize2, MessageSquare, Minimize2, Paperclip, PauseCircle, Pin, Reply, XCircle } from "lucide-react";
 import type {
   AgentConversation,
@@ -21,6 +21,7 @@ import { completedRunNotices } from "./notices";
 import { actionImpactRows, previewItemsFromRefs, type PreviewItem } from "./previewRegistry";
 import { formatOutputStats, formatToolDuration, getOutputPreview, prettyPrintIfJson, rawOutputLabel, rawOutputRefFromRefs, type RawOutputRef } from "./toolOutput";
 import { actionPresentation } from "./actionPresentation";
+import { ReferencePreviewContext, previewFileRef } from "./referencePreview";
 
 // Opens a preview part into the fullscreen side pane. null when preview-split
 // isn't available (compact/docked), so preview cards render non-clickable.
@@ -38,6 +39,7 @@ import {
 } from "./contributionPresentation";
 
 interface AgentSessionTimelineProps {
+  onPreviewReference?: (item: PreviewItem) => void;
   conversation: AgentConversation;
   activeThreadId: string;
   compact?: boolean;
@@ -67,12 +69,15 @@ interface AgentSessionTimelineProps {
   onAdoptResearchResult?: (card: AgentSessionCard, cardId: string) => void;
   onReplyMessage?: (message: AgentSessionMessage, threadId: string) => void;
   onPinMessage?: (message: AgentSessionMessage, threadId: string) => void;
+  renderRunSupplement?: (run: AgentSessionRun, turn: AgentSessionTurn) => ReactNode;
+  renderRunIdentity?: (run: AgentSessionRun) => ReactNode;
   providerCapabilities?: AgentProviderCapability[];
   emptyTitle?: string;
   emptyBody?: string;
 }
 
 export function AgentSessionTimeline({
+  onPreviewReference,
   conversation,
   activeThreadId,
   compact = false,
@@ -100,6 +105,8 @@ export function AgentSessionTimeline({
   onAdoptResearchResult,
   onReplyMessage,
   onPinMessage,
+  renderRunSupplement,
+  renderRunIdentity,
   providerCapabilities = [],
   emptyTitle = "No messages",
   emptyBody = "Start a conversation to see agent runs, tools, and proposals.",
@@ -128,6 +135,7 @@ export function AgentSessionTimeline({
     : undefined;
 
   return (
+    <ReferencePreviewContext.Provider value={onPreviewReference ?? null}>
     <div className={`agent-session ${compact ? "compact" : ""} ${channelChatMode ? "channel-chat-mode" : ""}`.trim()}>
       {showThreadChips ? (
         <AgentThreadNavigation
@@ -163,6 +171,8 @@ export function AgentSessionTimeline({
                   onAdoptResearchResult={onAdoptResearchResult}
                   onReplyMessage={onReplyMessage}
                   onPinMessage={onPinMessage}
+                  renderRunSupplement={renderRunSupplement}
+                  renderRunIdentity={renderRunIdentity}
                   providerCapabilities={providerCapabilities}
                   channelChatMode={channelChatMode}
                   collapseCompletedRunDetails={collapseCompletedRunDetails}
@@ -190,6 +200,7 @@ export function AgentSessionTimeline({
         </div>
       )}
     </div>
+    </ReferencePreviewContext.Provider>
   );
 }
 
@@ -210,6 +221,8 @@ function ThreadPane({
   onAdoptResearchResult,
   onReplyMessage,
   onPinMessage,
+  renderRunSupplement,
+  renderRunIdentity,
   providerCapabilities,
   channelChatMode,
   collapseCompletedRunDetails,
@@ -235,6 +248,8 @@ function ThreadPane({
   onAdoptResearchResult?: (card: AgentSessionCard, cardId: string) => void;
   onReplyMessage?: (message: AgentSessionMessage, threadId: string) => void;
   onPinMessage?: (message: AgentSessionMessage, threadId: string) => void;
+  renderRunSupplement?: (run: AgentSessionRun, turn: AgentSessionTurn) => ReactNode;
+  renderRunIdentity?: (run: AgentSessionRun) => ReactNode;
   providerCapabilities: AgentProviderCapability[];
   channelChatMode: boolean;
   collapseCompletedRunDetails: boolean;
@@ -323,7 +338,10 @@ function ThreadPane({
                 collapseCompletedRunDetails={collapseCompletedRunDetails}
                 compactRunHeader={compactRunHeader}
                 minimalRunActivity={minimalRunActivity}
+                renderRunSupplement={renderRunSupplement}
+                renderRunIdentity={renderRunIdentity}
                 run={run}
+                turn={turn}
                 showRunDetails={showRunDetails}
                 showRunProvider={showRunProvider}
               />
@@ -373,7 +391,10 @@ function ThreadPane({
 function RunBlock({
   compact,
   contributionCards,
+  renderRunSupplement,
+  renderRunIdentity,
   run,
+  turn,
   onCancelRun,
   providerCapabilities,
   channelChatMode,
@@ -385,7 +406,10 @@ function RunBlock({
 }: {
   compact: boolean;
   contributionCards: AgentSessionCard[];
+  renderRunSupplement?: (run: AgentSessionRun, turn: AgentSessionTurn) => ReactNode;
+  renderRunIdentity?: (run: AgentSessionRun) => ReactNode;
   run: AgentSessionRun;
+  turn: AgentSessionTurn;
   onCancelRun?: (runId: string) => void;
   providerCapabilities: AgentProviderCapability[];
   channelChatMode: boolean;
@@ -485,22 +509,26 @@ function RunBlock({
     summary: statusLabel(run.status),
   });
   return (
-    <div className={`agent-run-block ${statusClass(run.status)} ${channelChatMode ? "channel-run-block" : ""}`.trim()}>
+    <div
+      className={`agent-run-block ${statusClass(run.status)} ${channelChatMode ? "channel-run-block" : ""}`.trim()}
+      data-member-id={run.memberId || undefined}
+    >
       {!chatMode || showChatHeader ? (
       <div className={`agent-run-header ${chatMode ? "agent-run-header-min" : ""}`.trim()}>
         {chatMode ? (
           <div className="agent-run-title agent-run-title-min">
+            {renderRunIdentity?.(run)}
             {showThinkingIndicator ? (
               // Single status line: pulse dots + @member + "Thinking · 12s".
               <ThinkingIndicator
                 label={chatToolParts.length ? "Working" : "Thinking"}
                 startedAt={runStartTimestamp(run)}
-                who={run.memberId}
+                who={renderRunIdentity ? undefined : run.memberId}
               />
             ) : (
               <>
                 <span className={`agent-thread-dot ${statusClass(run.status)}`} />
-                {run.memberId ? <span className="agent-run-who">@{run.memberId}</span> : null}
+                {!renderRunIdentity && run.memberId ? <span className="agent-run-who">@{run.memberId}</span> : null}
               </>
             )}
           </div>
@@ -552,6 +580,7 @@ function RunBlock({
         )
       ) : null}
       {contributionCards.map((card) => <ContributionCard card={card} key={card.id} />)}
+      {renderRunSupplement?.(run, turn)}
     </div>
   );
 }
@@ -1057,12 +1086,18 @@ function PreviewPane({ part, onClose, projectId }: { part: AgentSessionPart; onC
 }
 
 function AttachmentChips({ refs }: { refs?: Record<string, unknown> }) {
+  const openPreview = useContext(ReferencePreviewContext);
   const items = refItems(refs);
   if (!items.length) return null;
   return (
     <div className="agent-ref-chips" aria-label="Context ledger">
       {items.map((item, index) => (
-        <span className={`agent-ref-chip profile-${item.profile || "text"}`} key={`${item.kind}-${item.id || item.name}-${index}`}>
+        openPreview && previewFileRef(item) ? <button type="button" className="agent-ref-chip channel-file-chip" key={`${item.kind}-${item.id}-${index}`}
+          title={previewFileRef(item)} aria-label={`Preview ${item.name}`} onClick={() => openPreview(item)}>
+          <FileText size={14} /><span>{item.name.split("/").at(-1)}</span><small>Preview</small>
+        </button> :
+        <span className={`agent-ref-chip profile-${item.profile || "text"}`} key={`${item.kind}-${item.id || item.name}-${index}`}
+          title={openPreview && ["artifact", "attachment"].includes(item.kind) ? "没有已保存的文件路径，无法预览正文" : undefined}>
           <Paperclip size={12} />
           <span>{item.name || item.id || item.kind}</span>
           {item.meta ? <small>{item.meta}</small> : null}

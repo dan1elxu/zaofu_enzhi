@@ -76,26 +76,26 @@ test("Channel product contract stays durable across Web actions and reload", asy
   page.on("pageerror", (error) => consoleErrors.push(error.message));
 
   await openChannel(page, id);
-  const discussionAttention = page.getByTestId("channel-discussion-attention");
-  await expect(discussionAttention).toHaveAttribute(
-    "data-discussion-state",
-    "needs_input",
-  );
-  await expect(discussionAttention).toContainText("Needs input");
-  await expect(discussionAttention).toContainText("Review result");
-  await expect(discussionAttention).not.toContainText("Open debate");
-  await expect(discussionAttention).not.toContainText("debating");
+  const discussionAttention = page.getByTestId("channel-flow-discussion");
+  await expect(page.getByTestId("channel-discussion-attention")).toHaveCount(0);
+  await expect(page.getByTestId("channel-header-members")).toBeVisible();
+  await expect(page.getByTestId("channel-participant-rail")).toHaveCount(0);
+  await expect(discussionAttention).toBeVisible();
   const initialDetail = await json<ChannelDetail>(request, detailPath);
   expect(initialDetail.discussion_attention?.main?.state).toBe("needs_input");
 
-  await discussionAttention.getByRole("button", {
-    name: "Review result",
-  }).click();
+  await discussionAttention.click();
+  const attentionDrawer = page.getByTestId("channel-discussion-activity");
+  await expect(attentionDrawer).toContainText("Needs input");
+  await expect(attentionDrawer).toContainText("Review result");
+  await expect(attentionDrawer).not.toContainText("Open debate");
+  await expect(attentionDrawer).not.toContainText("debating");
+  await attentionDrawer.getByRole("button", { name: "Review result" }).click();
   await expect(page.locator(".channel-consensus-control")).toBeVisible();
   await expect(page.getByRole("button", { name: "Confirm" })).toBeVisible();
 
   await page.setViewportSize({ width: 390, height: 844 });
-  await expect(discussionAttention).toBeVisible();
+  await expect(page.getByTestId("channel-prd-preview")).toBeVisible();
   const mobileLayout = await page.evaluate(() => {
     const timeline = document.querySelector<HTMLElement>(".channel-timeline");
     const composer = document.querySelector<HTMLElement>(".channel-composer");
@@ -115,15 +115,10 @@ test("Channel product contract stays durable across Web actions and reload", asy
   );
   await page.setViewportSize({ width: 1280, height: 720 });
 
-  await page.locator(".channel-tabs").getByRole("button", {
-    name: "Details",
-  }).click();
-  await expect(page.locator(".channel-workspace-dashboard")).toContainText(
-    "conversation",
-  );
-  await page.locator(".channel-tabs").getByRole("button", {
-    name: "Chat",
-  }).click();
+  await page.getByRole("button", { name: "Close drawer" }).click();
+  await page.getByRole("button", { name: "More", exact: true }).click();
+  await expect(page.getByRole("combobox", { name: "Discussion mode" })).toHaveValue("conversation");
+  await page.getByRole("button", { name: "Close drawer" }).click();
   const userText = "Define a durable Channel product contract.";
   const userRow = messageRow(page, userText);
   await expect(userRow).toBeVisible();

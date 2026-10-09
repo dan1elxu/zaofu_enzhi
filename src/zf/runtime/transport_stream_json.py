@@ -183,6 +183,8 @@ class StreamJsonTransport(TransportAdapter):
         self._dispatch_lock = threading.RLock()
         self._dispatch_queues: dict[str, deque[_QueuedDispatch]] = {}
         self._dispatch_threads: dict[str, threading.Thread] = {}
+        from zf.runtime.stream_json_cancellation import StreamJsonTurnCancellation
+        self._turn_cancellation = StreamJsonTurnCancellation()
         self._closing = False
 
     # -- TransportAdapter interface --
@@ -202,6 +204,7 @@ class StreamJsonTransport(TransportAdapter):
         *,
         cwd: Path | None = None,
     ) -> None:
+        self._turn_cancellation.reset(role.instance_id)
         # Stream-json has no long-lived process, but SpawnCoordinator's argv
         # carries role-scoped capability credentials. Preserve that leading
         # ``env KEY=VALUE ...`` block for the SDK subprocess.
@@ -415,16 +418,18 @@ class StreamJsonTransport(TransportAdapter):
         def _drain_once(sid: str, resume: bool):
             with SessionLock(self.lock_dir, sid):
                 return asyncio.run(
-                    self._drain(
+                    self._turn_cancellation.drain(role_name, lambda: self._drain(
                         prompt=prompt, session_id=sid,
                         role=role, is_resume=resume,
                         cwd=role_cwd,
                         env=role_env,
-                    )
+                    ))
                 )
 
         try:
             messages, status = _drain_once(session_id, is_resume)
+        except asyncio.CancelledError:
+            return
         except Exception as exc:
             # P0-1 (2026-06-19 e2e): a role re-dispatched within a run (e.g. a
             # synthRole invoked a second time after its fanout children) reuses
@@ -438,6 +443,8 @@ class StreamJsonTransport(TransportAdapter):
                 purge_stale_claude_session_lock(session_id)
                 try:
                     messages, status = _drain_once(session_id, False)
+                except asyncio.CancelledError:
+                    return
                 except Exception:
                     self._last_query_ok[role_name] = False
                     self._record_provider_operation(
@@ -881,6 +888,10 @@ class StreamJsonTransport(TransportAdapter):
     def terminate(self, role_name: str) -> None:
         with self._dispatch_lock:
             self._dispatch_queues.pop(role_name, None)
+            thread = self._dispatch_threads.get(role_name)
+        self._turn_cancellation.cancel_and_join(role_name, thread)
+        with self._dispatch_lock:
+            self._dispatch_queues.pop(role_name, None)
             self._messages.pop(role_name, None)
             self._roles.pop(role_name, None)
             self._cwd_by_role.pop(role_name, None)
@@ -892,7 +903,11 @@ class StreamJsonTransport(TransportAdapter):
     def shutdown(self, *, exclude_roles: set[str] | None = None) -> None:
         with self._dispatch_lock:
             self._closing = True
+            roles = set(self._roles) | set(self._dispatch_threads)
             self._dispatch_queues.clear()
+        for role_name in roles - (exclude_roles or set()):
+            self.terminate(role_name)
+        with self._dispatch_lock:
             self._messages.clear()
             self._roles.clear()
             self._cwd_by_role.clear()

@@ -1,4 +1,5 @@
 from zf.web.channel_task_plan import normalize_channel_task_submit_payload
+import pytest
 
 
 def _authority() -> dict[str, object]:
@@ -92,3 +93,19 @@ def test_channel_task_plan_rejects_non_mapping_workflow_plan() -> None:
     assert payload == {}
     assert details == {}
     assert error == "workflow_plan must be a mapping"
+
+
+@pytest.mark.parametrize("field", ["objective", "acceptance", "acceptance_criteria", "verification", "verification_tiers"])
+def test_approved_task_requires_explicit_local_contract(field):
+    raw = {"title": "验证取消", "objective": "验证取消不再派发", "acceptance": "取消后无派发",
+           "acceptance_criteria": ["取消后无派发"], "verification": "python -m pytest tests/test_cancel.py",
+           "verification_tiers": ["runtime"], "channel_prd_scope": "approved_task",
+           "channel_authority": _authority()}
+    raw.pop(field)
+    assert normalize_channel_task_submit_payload(raw)[2] == f"approved_task requires {field}"
+
+
+def test_unknown_channel_prd_scope_is_rejected():
+    assert "channel_prd_scope must be" in normalize_channel_task_submit_payload({
+        "title": "test", "channel_prd_scope": "skip", "channel_authority": _authority(),
+    })[2]

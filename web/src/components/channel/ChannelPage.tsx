@@ -1,26 +1,40 @@
+import { useChannelComposerDraft, useChannelThreadSelection, channelDraftStorageKey, type ComposerAttachment, type ChannelComposerDraft } from "./useChannelConversationState";
+import { ChannelContextFailures } from "./ChannelContextFailures";
 // ChannelPage + exclusive closure, extracted verbatim from App.tsx (P1 split).
 import { search } from "../../api/client";
-import type { ActionResponse, ChannelDetail, ChannelDiscussionAttention, ChannelHistorySearchResult, ChannelSummary, RecentEvent, Task } from "../../api/types";
+import type { ActionResponse, ChannelDetail, ChannelHistorySearchResult, ChannelSummary, RecentEvent } from "../../api/types";
 import { AgentSessionTimeline } from "../../components/agent-session/AgentSessionTimeline";
-import type { AgentSessionMessage } from "../../components/agent-session/types";
-import { buildChannelConversation } from "../../components/agent-session/projection";
+import type { AgentSessionMessage, AgentSessionRun, AgentSessionTurn } from "../../components/agent-session/types";
+import { buildChannelConversation, channelThreadId } from "../../components/agent-session/channelProjection";
 import { elapsedSecondsSince, formatElapsed } from "../../components/agent-session/liveRunIndicator";
 import { channelLiveStreamRows, compactChannelLiveRows, foldChannelLiveStream } from "../agent-session/channelLiveStream";
 import { mergeEventsByIdentity } from "../orchestrator/kanbanSessionEvents";
 import { formatTime } from "../../lib/format";
-import { Archive, ArrowUp, AtSign, Bell, Bold, Boxes, ChevronDown, Code, FileText, GitFork, Hash, Info, Italic, Link, List, ListOrdered, Loader2, MessageSquare, MoreHorizontal, PlayCircle, Plus, Quote, Search, Send, Settings, Smile, SquareCode, Strikethrough, Trash2, Type, Underline, Users, Wrench, X } from "lucide-react";
+import { Archive, ArrowUp, AtSign, Bell, Bold, ChevronDown, Code, FileText, Hash, Italic, Link, List, ListOrdered, Loader2, MessageSquare, MoreHorizontal, PlayCircle, Plus, Quote, Search, Send, Smile, SquareCode, Strikethrough, Trash2, Type, Underline, Users, Wrench, X } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import { Fragment, lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
 import type { UIEvent as ReactUIEvent } from "react";
 import type { ChannelPermissionProfile } from "../../app/sharedTypes";
 import { TablePage, agentConversationScrollSignature, asRecordArray, asStringArray, channelIdOf, channelNameOf, recordString, recordValue, scrollElementToBottom, textValue } from "../../app/shared";
-import { previewItemsFromRefs } from "../agent-session/previewRegistry";
-import { canonicalChannelPrd } from "./workflowPlanning";
+import { previewItemsFromRefs, type PreviewItem } from "../agent-session/previewRegistry";
+import { ChannelFilePreview } from "./ChannelFilePreview";
+import { channelFlow, channelMemberLabel, channelSourceThreadId, FLOW_LABELS, type ChannelFlowNode } from "./channelFlow";
+import { ChannelFlowNavigation, ChannelFlowPreview } from "./ChannelFlowNavigation";
+import { ChannelMemberIdentity, memberColor } from "./ChannelMemberIdentity";
+import { ChannelQuestionCard } from "./ChannelQuestionCard";
+import { ChannelDecisionQueue, type ChannelDecisionItem } from "./ChannelDecisionQueue";
+import { ChannelMemberInvitations } from "./ChannelMemberInvitations";
+import { channelReplyHealth, replyFailurePresentation } from "./replyHealth";
+import { channelDecisionReceipts, questionTargetRun } from "./channelDecisions";
+import { ChannelDecisionHistory } from "./ChannelDecisionHistory";
+import { channelChatConversation } from "./chatPresentation";
+import { ChannelPrdHandoff } from "./ChannelPrdHandoff";
+import { ChannelPrdPreview } from "./ChannelPrdPreview";
+import { ChannelConsensusControl } from "./ChannelConsensusControl";
+import { useChannelDelivery } from "./useChannelDelivery";
+import { channelDocumentKey } from "../../api/channelDelivery";
 import { openOwnerQuestionnaire } from "./channelQuestionnaire";
-import {
-  AskUserQuestion,
-  type AskUserQuestionAnswer,
-} from "../common/AskUserQuestion";
+import { type AskUserQuestionAnswer } from "../common/AskUserQuestion";
 import {
   channelDiscussionControlPolicy,
   presentChannelDiscussionAttention,
@@ -31,9 +45,7 @@ const ChannelEmojiPicker = lazy(() => import("./ChannelEmojiPicker").then((modul
   default: module.ChannelEmojiPicker,
 })));
 
-type ChannelTab = "chat" | "workspace";
-
-type ChannelDrawerKey = "members" | "attention" | "context" | "reports" | "workflow" | "settings";
+type ChannelDrawerKey = "members" | "attention" | "diagnostics" | "reports" | "settings" | "file" | ChannelFlowNode;
 
 type ComposerFormatAction = "bold" | "italic" | "underline" | "strike" | "link" | "ordered-list" | "unordered-list" | "quote" | "inline-code" | "code-block";
 
@@ -44,17 +56,11 @@ interface EmojiMartSelection {
 }
 
 
-interface ComposerAttachment {
-  id: string;
-  name: string;
-  size: number;
-  type: string;
-  lastModified: number;
-}
-
-
 interface PendingChannelMessage {
   id: string;
+  channelId: string;
+  projectId: string;
+  threadId: string;
   text: string;
   ts: string;
   targets: string[];
@@ -66,18 +72,6 @@ interface ChannelMessageIngress {
   threadId: string;
   replyToMessageId?: string;
 }
-
-interface ChannelComposerDraft {
-  schemaVersion: "channel-composer-draft.v1";
-  clientMessageId: string;
-  threadId: string;
-  text: string;
-  html: string;
-  attachments: ComposerAttachment[];
-  refs?: Record<string, unknown>;
-  reason: string;
-}
-
 
 interface ChannelMentionDigest {
   id: string;
@@ -91,6 +85,27 @@ interface ChannelMentionDigest {
   text: string;
 }
 
+interface ChannelOwnerQuestion {
+  id: string;
+  header: string;
+  question: string;
+  description?: string;
+  options: Array<{
+    id: string;
+    label: string;
+    description?: string;
+    recommended?: boolean;
+  }>;
+  allowOther: boolean;
+  inputPlaceholder: string;
+  required: boolean;
+  skipLabel: string;
+  askedBy: string;
+  priority: string;
+  sourceThreadId: string;
+  sourceMessageId: string;
+  sourceRunId: string;
+}
 
 function ChannelLiveElapsed({ startedAt }: { startedAt: string }) {
   const [nowMs, setNowMs] = useState(() => Date.now());
@@ -106,15 +121,6 @@ function ChannelLiveElapsed({ startedAt }: { startedAt: string }) {
       {formatElapsed(seconds)}
     </span>
   );
-}
-
-
-function channelActiveAgentLabel(attention: ChannelDiscussionAttention): string {
-  const activeAgents = attention.active_agents ?? [];
-  const first = activeAgents[0]?.member_id ?? "";
-  if (!first) return "";
-  const remaining = Math.max(activeAgents.length - 1, 0);
-  return remaining ? `@${first} +${remaining}` : `@${first}`;
 }
 
 
@@ -140,10 +146,6 @@ function channelActionNoticeText(result: ActionResponse): string {
       : "posted; no reply requested";
   }
   return result.reason || "message posted";
-}
-
-function channelDraftStorageKey(channelId: string, threadId: string): string {
-  return `zf.channelDraft:${channelId || "ch-zaofu"}:${threadId || "main"}`;
 }
 
 function newClientMessageId(): string {
@@ -184,32 +186,6 @@ function ChannelReportPreviewRefs({
         ))}
       </div>
     </div>
-  );
-}
-
-
-function latestChannelRepliesByTarget(rows: Record<string, unknown>[]): Record<string, unknown>[] {
-  const latest = new Map<string, Record<string, unknown>>();
-  for (const row of rows) {
-    const target = recordString(row, "target_member_id") || recordString(row, "member_id");
-    const key = target || recordString(row, "request_id") || recordString(row, "event_id");
-    if (!key) continue;
-    const current = latest.get(key);
-    if (!current || channelReplySortKey(row) >= channelReplySortKey(current)) {
-      latest.set(key, row);
-    }
-  }
-  return [...latest.values()];
-}
-
-
-function channelReplySortKey(row: Record<string, unknown>): string {
-  return (
-    recordString(row, "updated_at")
-    || recordString(row, "created_at")
-    || recordString(row, "ts")
-    || recordString(row, "event_id")
-    || recordString(row, "request_id")
   );
 }
 
@@ -263,7 +239,8 @@ function channelDetailHasMessage(detail: ChannelDetail | null, pending: PendingC
   return rows.some((row) =>
     recordString(row, "message_id") === pending.id
     || (
-      channelMessageRole(row) === "user"
+      recordString(row, "thread_id", "main") === pending.threadId
+      && channelMessageRole(row) === "user"
       && recordString(row, "member_id", "operator") === "operator"
       && channelMessageText(row) === pending.text
     ),
@@ -287,7 +264,7 @@ function channelDetailWithPendingMessage(
   const pendingMessageRows: Record<string, unknown>[] = pending.map((item) => ({
     event_id: `local-${item.id}`,
     message_id: item.id,
-    thread_id: "main",
+    thread_id: item.threadId,
     ts: item.ts,
     actor: "web",
     member_id: "operator",
@@ -303,7 +280,7 @@ function channelDetailWithPendingMessage(
       event_id: `local-reply-${item.id}-${index}`,
       created_at: item.ts,
       updated_at: item.ts,
-      thread_id: "main",
+      thread_id: item.threadId,
       message_id: item.id,
       member_id: "operator",
       target_member_id: target,
@@ -429,6 +406,8 @@ export function ChannelPage({
   onDeleteChannel,
   onDrainReplies,
   onGenerateOwnerReport,
+  onEvaluatePrd,
+  onDecideMemberInvitation,
   onMarkRead,
   onLoadDiagnostics,
   onLoadEarlier,
@@ -438,6 +417,7 @@ export function ChannelPage({
   onPostMessage,
   onRemoveMember,
   onResearchAdopt,
+  onCancelProviderRun,
   onRequestSynthesis,
   onResolveQuestion,
   onSetMemberPermission,
@@ -447,6 +427,8 @@ export function ChannelPage({
   onConsensusDecision,
   onWorkflowRequest,
   selectedChannelId,
+  projectId = "",
+  onReviewPlans,
   events = [],
 }: {
   actionReady: boolean;
@@ -463,6 +445,8 @@ export function ChannelPage({
   onDeleteChannel: () => Promise<void>;
   onDrainReplies: () => Promise<void>;
   onGenerateOwnerReport: (threadId: string) => Promise<void>;
+  onEvaluatePrd: (threadId: string, revision: number, artifactRef: string, artifactDigest: string, role: "full" | "focused", retry: boolean) => Promise<void>;
+  onDecideMemberInvitation: (proposal: Record<string, unknown>, decision: "approved" | "rejected") => Promise<void>;
   onMarkRead: (threadId: string) => Promise<void>;
   onLoadDiagnostics: () => Promise<void>;
   onLoadEarlier: () => Promise<void>;
@@ -480,24 +464,34 @@ export function ChannelPage({
   ) => Promise<void>;
   onRemoveMember: (memberId: string) => Promise<void>;
   onResearchAdopt: (payload: Record<string, unknown>) => Promise<void>;
+  onCancelProviderRun: (runId: string) => Promise<void>;
   onRequestSynthesis: (threadId: string, targetMemberId?: string) => Promise<void>;
   onResolveQuestion: (questionId: string, threadId: string, resolution: string, answer: string) => Promise<void>;
   onSetMemberPermission: (memberId: string, permissionProfile: ChannelPermissionProfile) => Promise<void>;
   onSearchHistory: (query: string, threadId?: string) => Promise<ChannelHistorySearchResult>;
   onSetDiscussionMode: (threadId: string, mode: string, defaultResponderId?: string) => Promise<void>;
   onStartDiscussion: (threadId: string, message: string, messageId: string, mode: string, restart: boolean) => Promise<void>;
-  onConsensusDecision: (decision: "confirm" | "block", threadId: string, artifactRef: string, artifactDigest: string, blocker?: string) => Promise<void>;
+  onConsensusDecision: (decision: "confirm" | "block", threadId: string, artifactRef: string, artifactDigest: string, blocker?: string, acceptReadinessRisk?: boolean) => Promise<void>;
   onWorkflowRequest: (taskId: string, reason: string, threadId: string) => Promise<void>;
   selectedChannelId: string;
+  projectId?: string;
+  onReviewPlans: () => void;
 }) {
-  const [composerText, setComposerText] = useState("");
+  const composerRef = useRef<HTMLDivElement | null>(null);
+  const [activeChannelThreadId, setActiveChannelThreadId] = useChannelThreadSelection(projectId || "", selectedChannelId, detail);
+  const { composerText, setComposerText, composerAttachments, setComposerAttachments,
+    composerRefs, setComposerRefs,
+    retryClientMessageId, setRetryClientMessageId, composerError, setComposerError, currentDraftKey,
+  } = useChannelComposerDraft(projectId || "", selectedChannelId, activeChannelThreadId, composerRef);
   const [postingCount, setPostingCount] = useState(0);
-  const [composerError, setComposerError] = useState("");
+  const evaluationSourceDocument = composerRefs.evaluation_source_document === true;
+  function setEvaluationSourceDocument(value: boolean) {
+    setComposerRefs((current) => ({...current, evaluation_source_document: value}));
+  }
   const [workflowDraft, setWorkflowDraft] = useState({ taskId: "", reason: "" });
-  const [consensusBlocker, setConsensusBlocker] = useState("");
   const [controlsBusy, setControlsBusy] = useState(false);
+  const [controlError, setControlError] = useState("");
   const [researchActionBusyId, setResearchActionBusyId] = useState("");
-  const [activeTab, setActiveTab] = useState<ChannelTab>("chat");
   const [drawer, setDrawer] = useState<ChannelDrawerKey | null>(null);
   const [channelSwitcherOpen, setChannelSwitcherOpen] = useState(false);
   const [channelSearch, setChannelSearch] = useState("");
@@ -508,22 +502,25 @@ export function ChannelPage({
   const [historySearchOpen, setHistorySearchOpen] = useState(false);
   const [formattingOpen, setFormattingOpen] = useState(false);
   const [emojiOpen, setEmojiOpen] = useState(false);
-  const [composerAttachments, setComposerAttachments] = useState<ComposerAttachment[]>([]);
-  const [retryClientMessageId, setRetryClientMessageId] = useState("");
-  const [replyTarget, setReplyTarget] = useState<AgentSessionMessage | null>(null);
+  const [replySelection, setReplySelection] = useState<{ scope: string; message: AgentSessionMessage } | null>(null);
+  const replyScope = JSON.stringify([projectId, selectedChannelId, activeChannelThreadId]);
+  const replyTarget = replySelection?.scope === replyScope ? replySelection.message : null;
+  function setReplyTarget(message: AgentSessionMessage | null, threadId = activeChannelThreadId) {
+    setReplySelection(message ? { scope: JSON.stringify([projectId, selectedChannelId, threadId]), message } : null);
+  }
   const [pendingChannelMessages, setPendingChannelMessages] = useState<PendingChannelMessage[]>([]);
-  const [activeChannelThreadId, setActiveChannelThreadId] = useState("main");
   const [channelSplitThreadId, setChannelSplitThreadId] = useState("");
   const [channelPinnedToBottom, setChannelPinnedToBottom] = useState(true);
   const [channelHasNewBelow, setChannelHasNewBelow] = useState(false);
   const [ownerQuestionsOpen, setOwnerQuestionsOpen] = useState(false);
+  const [decisionQueueOpen, setDecisionQueueOpen] = useState(false);
+  const [questionSourceSelection, setQuestionSourceSelection] = useState<{ id: string; sourceThreadId: string } | null>(null);
   const [memberSearch, setMemberSearch] = useState("");
   const [memberMenuId, setMemberMenuId] = useState("");
   const [memberProfileId, setMemberProfileId] = useState("");
   const [mentionOpen, setMentionOpen] = useState(false);
   const [mentionQuery, setMentionQuery] = useState("");
   const [mentionActiveIndex, setMentionActiveIndex] = useState(0);
-  const composerRef = useRef<HTMLDivElement | null>(null);
   const channelTimelineRef = useRef<HTMLDivElement | null>(null);
   const historyPrependAnchorRef = useRef<{ height: number; top: number } | null>(null);
   const historyInputRef = useRef<HTMLInputElement | null>(null);
@@ -534,37 +531,13 @@ export function ChannelPage({
     : [{ channel_id: "ch-zaofu", name: "# zaofu", members: [], workflow_requests: [] } as ChannelSummary];
   const activeChannel = detail ?? visibleChannels.find((channel) => channelIdOf(channel) === selectedChannelId) ?? null;
   const conversationDetail = useMemo(
-    () => channelDetailWithPendingMessage(detail, selectedChannelId, pendingChannelMessages),
-    [detail, pendingChannelMessages, selectedChannelId],
+    () => channelDetailWithPendingMessage(detail, selectedChannelId, pendingChannelMessages.filter((item) => item.channelId === selectedChannelId && item.projectId === (projectId || ""))),
+    [detail, pendingChannelMessages, selectedChannelId, projectId],
   );
   const posting = postingCount > 0;
   useEffect(() => {
     setPendingChannelMessages((current) => current.filter((item) => !channelDetailHasMessage(detail, item)));
   }, [detail]);
-  useEffect(() => {
-    const key = channelDraftStorageKey(
-      selectedChannelId,
-      activeChannelThreadId,
-    );
-    const raw = window.localStorage.getItem(key);
-    if (!raw || composerPlainText().trim() || composerAttachments.length) return;
-    try {
-      const draft = JSON.parse(raw) as Partial<ChannelComposerDraft>;
-      if (
-        draft.schemaVersion !== "channel-composer-draft.v1"
-        || draft.threadId !== activeChannelThreadId
-        || typeof draft.text !== "string"
-      ) return;
-      restoreComposerEditor(String(draft.html || ""), draft.text);
-      setComposerAttachments(
-        Array.isArray(draft.attachments) ? draft.attachments : [],
-      );
-      setRetryClientMessageId(String(draft.clientMessageId || ""));
-      setComposerError(String(draft.reason || "message draft restored"));
-    } catch {
-      window.localStorage.removeItem(key);
-    }
-  }, [activeChannelThreadId, selectedChannelId]);
   // Live-stream fold (operator report 2026-07-16): member replies stream
   // token deltas over the SSE live bus; buffer this channel's rows (the App
   // event window is capped at 120 — a long reply outlives it) and fold them
@@ -598,11 +571,11 @@ export function ChannelPage({
     );
     if (!attention) return null;
     const presentation = presentChannelDiscussionAttention(attention);
-    const threadId = attention.thread_id || activeChannelThreadId || "main";
+    const threadId = channelThreadId(attention.thread_id || activeChannelThreadId || "main");
     const questions = Object.values(detail?.open_questions ?? {})
       .map((item) => item as Record<string, unknown>);
     const threadQuestions = questions.filter((item) => (
-      String(item.thread_id || "main") === threadId
+      channelThreadId(String(item.thread_id || "main")) === threadId
     ));
     const openQuestions = threadQuestions
       .filter((item) => (
@@ -610,7 +583,7 @@ export function ChannelPage({
       ))
       .map((item) => ({
         id: String(item.question_id || ""),
-        threadId: String(item.thread_id || "main"),
+        threadId: channelThreadId(String(item.thread_id || "main")),
         text: String(item.question || ""),
         category: String(item.category || ""),
         askedBy: String(item.asked_by || ""),
@@ -620,10 +593,9 @@ export function ChannelPage({
       attention.question_consolidation_status !== undefined
       && attention.question_consolidation_status !== "open"
     ) || attention.attention_kind === "consolidating";
-    const ownerQuestions = (questionConsolidationPending
+    const ownerQuestions: ChannelOwnerQuestion[] = (questionConsolidationPending
       ? []
       : openOwnerQuestionnaire(detail, threadId))
-      .slice(0, 3)
       .flatMap((item) => {
         const id = String(item.question_id || "").trim();
         const text = String(item.question || "").trim();
@@ -654,7 +626,6 @@ export function ChannelPage({
             !options.length && recommendedAnswer
               ? `Recommended: ${recommendedAnswer}`
               : "",
-            askedBy ? `Asked by ${askedBy}` : "",
           ].filter(Boolean).join(" "),
           options,
           allowOther: item.allow_other !== false,
@@ -663,6 +634,11 @@ export function ChannelPage({
             : "Answer this owner decision.",
           required: false,
           skipLabel: "Out of scope",
+          askedBy,
+          priority: String(item.priority || "p1").trim().toLowerCase(),
+          sourceThreadId: String(item.thread_id || attention.thread_id || activeChannelThreadId || "main"),
+          sourceMessageId: String(item.source_message_id || item.message_id || "").trim(),
+          sourceRunId: String(item.source_run_id || item.run_id || "").trim(),
         }];
       });
     return {
@@ -672,11 +648,16 @@ export function ChannelPage({
       openQuestions,
       ownerQuestions,
       questionConsolidationPending,
-      questionGraphDigest: detail?.question_graph_digests?.[threadId] || "",
+      questionGraphDigest: detail?.question_graph_digests?.[threadId]
+        || Object.entries(detail?.question_graph_digests ?? {})
+          .find(([key]) => channelThreadId(key) === threadId)?.[1]
+        || "",
     };
   }, [activeChannelThreadId, detail]);
   useEffect(() => {
     setOwnerQuestionsOpen(false);
+    setDecisionQueueOpen(false);
+    setQuestionSourceSelection(null);
     autoOpenedQuestionnaireRef.current = "";
   }, [activeChannelThreadId, selectedChannelId]);
   useEffect(() => {
@@ -701,37 +682,171 @@ export function ChannelPage({
     if (autoOpenedQuestionnaireRef.current === key) return;
     autoOpenedQuestionnaireRef.current = key;
     setOwnerQuestionsOpen(true);
-    setDrawer(null);
   }, [discussionBand, selectedChannelId]);
+  const ownerQuestionAttachments = useMemo(() => {
+    const byRun = new Map<string, ChannelOwnerQuestion[]>();
+    const unassigned: ChannelOwnerQuestion[] = [];
+    if (!ownerQuestionsOpen || !discussionBand?.ownerQuestions.length) {
+      return { byRun, unassigned };
+    }
+    const activeThread = channelConversation.threads.find((thread) => thread.id === activeChannelThreadId)
+      ?? channelConversation.threads[0];
+    const runRows = activeThread?.turns.flatMap((turn) => turn.runs.map((run) => ({ run, turn }))) ?? [];
+    for (const question of discussionBand.ownerQuestions) {
+      const target = questionTargetRun(question, runRows);
+      if (!target) {
+        unassigned.push(question);
+        continue;
+      }
+      const current = byRun.get(target.run.id) ?? [];
+      current.push(question);
+      byRun.set(target.run.id, current);
+    }
+    return { byRun, unassigned };
+  }, [activeChannelThreadId, channelConversation, discussionBand, ownerQuestionsOpen]);
+  const decisionReceipts = useMemo(() => channelDecisionReceipts(detail, channelConversation, activeChannelThreadId),
+    [detail, channelConversation, activeChannelThreadId]);
+  const decisionQueueItems: ChannelDecisionItem[] = discussionBand?.ownerQuestions.map((question) => ({
+    id: question.id,
+    priority: question.priority,
+    question: question.question,
+    askedBy: question.askedBy,
+    sourceThreadId: question.sourceThreadId,
+    sourceRunId: question.sourceRunId,
+    sourceAvailable: [...ownerQuestionAttachments.byRun.values()].flat().includes(question),
+  })) ?? [];
+  function focusOwnerQuestions() {
+    setOwnerQuestionsOpen(true);
+    setDecisionQueueOpen(false);
+    setDrawer(null);
+    window.requestAnimationFrame(() => {
+      const node = channelTimelineRef.current?.querySelector<HTMLElement>(".channel-question-card");
+      node?.scrollIntoView({ behavior: "smooth", block: "start" });
+      node?.querySelector<HTMLElement>("summary")?.focus({ preventScroll: true });
+      setChannelPinnedToBottom(false);
+    });
+  }
+  function focusOwnerQuestion(question: { id: string; sourceThreadId: string }) {
+    setOwnerQuestionsOpen(true);
+    setDecisionQueueOpen(false);
+    setQuestionSourceSelection(question);
+    window.requestAnimationFrame(() => {
+      const selector = `.channel-question-card[data-question-id="${CSS.escape(question.id)}"][data-question-thread="${CSS.escape(question.sourceThreadId)}"]`;
+      const card = channelTimelineRef.current?.querySelector<HTMLDetailsElement>(selector);
+      if (!card) { setDrawer("diagnostics"); return; }
+      setDrawer(null);
+      card?.scrollIntoView({ behavior: "smooth", block: "center" });
+      card?.querySelector<HTMLElement>("summary")?.focus({ preventScroll: true });
+      setChannelPinnedToBottom(false);
+    });
+  }
+  const selectedSourceQuestion = discussionBand?.ownerQuestions.find((question) => (
+    question.id === questionSourceSelection?.id && question.sourceThreadId === questionSourceSelection.sourceThreadId
+  ));
+  useEffect(() => {
+    if (!selectedSourceQuestion || drawer !== "diagnostics" || historyLoadingEarlier) return;
+    if (![...ownerQuestionAttachments.byRun.values()].flat().includes(selectedSourceQuestion)) return;
+    // Source pagination has completed; only the explicitly selected question
+    // is allowed to move focus from Diagnostics back to the Agent reply.
+    const frame = requestAnimationFrame(() => focusOwnerQuestion(selectedSourceQuestion));
+    return () => cancelAnimationFrame(frame);
+  }, [selectedSourceQuestion, ownerQuestionAttachments, drawer, historyLoadingEarlier]);
+
+  function renderOwnerQuestionCard(
+    questions: ChannelOwnerQuestion[],
+    testId: string,
+    className: string,
+    defaultOpen = false,
+  ) {
+    if (!questions.length) return null;
+    return (
+      <div className={className} data-testid={testId}>
+        {questions.map((question) => <ChannelQuestionCard key={JSON.stringify([question.sourceThreadId, question.id])}
+          sourceThreadId={question.sourceThreadId} defaultOpen={defaultOpen}
+          busy={controlsBusy}
+          disabled={!actionReady}
+          onDiscuss={(question) => {
+            quoteDiscussionQuestion(question.question);
+            window.setTimeout(() => focusComposer(), 0);
+          }}
+          onSubmit={(answers: AskUserQuestionAnswer[]) => {
+            void runControl(async () => {
+              for (const answer of answers) {
+                await onResolveQuestion(
+                  answer.questionId,
+                  question.sourceThreadId,
+                  answer.skipped ? "out_of_scope" : "answered",
+                  answer.answer,
+                );
+              }
+            });
+          }}
+          question={question}
+          requestId={[
+            selectedChannelId,
+            question.sourceThreadId,
+            discussionBand?.questionGraphDigest || "",
+            JSON.stringify([question.question, question.options]),
+          ].join(":")}
+        />)}
+      </div>
+    );
+  }
   function quoteDiscussionQuestion(text: string) {
     insertComposerText(`Re “${text}”: `);
+  }
+  function renderChannelConsensusControl() {
+    if (recordString(threadConsensus, "artifact_ref") !== flow.artifactRef
+      || recordString(threadConsensus, "artifact_digest").replace(/^sha256:/, "") !== flow.artifactDigest.replace(/^sha256:/, "")
+      || Number(threadConsensus.prd_revision || 0) !== flow.revision) return null;
+    if (!recordString(threadConsensus, "artifact_ref") || recordString(threadConsensus, "reached_event_id")) {
+      return null;
+    }
+    return <ChannelConsensusControl
+      key={JSON.stringify([projectId, selectedChannelId, controlThreadId, flow.artifactRef, flow.artifactDigest,
+        flow.revision, threadConsensus.readiness_ref, threadConsensus.readiness_digest])}
+      selection={{ projectId, channelId: selectedChannelId, threadId: controlThreadId,
+        revision: flow.revision, digest: flow.artifactDigest }}
+      artifactRef={flow.artifactRef} consensus={threadConsensus} actionReady={actionReady} busy={controlsBusy}
+      onDecision={(decision, blocker, acceptRisk) => runControl(() => onConsensusDecision(
+        decision, controlThreadId, flow.artifactRef, flow.artifactDigest, blocker, acceptRisk,
+      ))}
+    />;
   }
   const channelScrollSignature = agentConversationScrollSignature(
     channelConversation,
     activeChannelThreadId,
     [],
   );
+  const hasPendingOwnerQuestions = decisionQueueItems.length > 0;
+  const channelDetailLoaded = Boolean(detail);
   useEffect(() => {
-    if (activeTab !== "chat") return;
-    setChannelPinnedToBottom(true);
+    if (!channelDetailLoaded) return;
+    setChannelPinnedToBottom(!hasPendingOwnerQuestions);
     setChannelHasNewBelow(false);
-    scrollElementToBottom(channelTimelineRef.current);
-  }, [activeChannelThreadId, activeTab, selectedChannelId]);
+    if (!hasPendingOwnerQuestions) scrollElementToBottom(channelTimelineRef.current);
+  }, [activeChannelThreadId, channelDetailLoaded, hasPendingOwnerQuestions, selectedChannelId]);
   useEffect(() => {
-    if (activeTab !== "chat") return;
     const node = channelTimelineRef.current;
     if (!node) return;
     if (historyPrependAnchorRef.current) return;
+    // A pending decision is an explicit attention state. Never let a late
+    // conversation rebuild or a transient near-bottom measurement pull the
+    // operator away from the current position while it is visible.
+    if (hasPendingOwnerQuestions) {
+      setChannelHasNewBelow(!isScrollElementNearBottom(node));
+      return;
+    }
     if (channelPinnedToBottom || isScrollElementNearBottom(node)) {
       scrollElementToBottom(node);
       setChannelHasNewBelow(false);
       return;
     }
     setChannelHasNewBelow(true);
-  }, [activeTab, channelPinnedToBottom, channelScrollSignature]);
+  }, [channelPinnedToBottom, channelScrollSignature, hasPendingOwnerQuestions]);
   useEffect(() => {
-    if (activeTab === "workspace") void onLoadDiagnostics();
-  }, [activeTab, detail?.seq, onLoadDiagnostics, selectedChannelId]);
+    if ((drawer === "diagnostics" || drawer === "reports") && !diagnosticsLoading && !diagnosticsError) void onLoadDiagnostics();
+  }, [drawer, detail?.seq, diagnosticsLoading, diagnosticsError, onLoadDiagnostics, selectedChannelId]);
   useEffect(() => {
     setHistoryQuery("");
     setHistoryResult(null);
@@ -751,7 +866,8 @@ export function ChannelPage({
     ...visibleChannels.filter((channel) => channelIdOf(channel) === selectedChannelId),
     ...visibleChannels.filter((channel) => channelIdOf(channel) !== selectedChannelId),
   ].slice(0, 3);
-  const workspaceDetail = diagnosticsDetail ?? detail;
+  // Fresh conversation facts override cached diagnostics; absent sidecars remain available.
+  const workspaceDetail = diagnosticsDetail ? { ...diagnosticsDetail, ...detail } as ChannelDetail : detail;
   const members = detail?.members ?? workspaceDetail?.members ?? [];
   const mentionChoices = useMemo(() => {
     const mentionableMembers = members.filter((member) => canMentionMember(member));
@@ -801,16 +917,21 @@ export function ChannelPage({
     Object.keys((member["workflow_role_binding"] as Record<string, unknown> | undefined) ?? {}).length > 0
   );
   const messages = detail?.messages ?? detail?.recent_messages ?? [];
-  const syntheses = workspaceDetail?.syntheses ?? [];
-  const controlThreadId = discussionBand?.threadId || activeChannelThreadId || "main";
-  const canonicalPrd = canonicalChannelPrd(workspaceDetail, controlThreadId);
+  const controlThreadId = channelSourceThreadId(workspaceDetail, activeChannelThreadId || "main");
+  const baseFlow = channelFlow(workspaceDetail, controlThreadId);
+  const prdSelection = { projectId, channelId: selectedChannelId, threadId: controlThreadId,
+    revision: baseFlow.revision, digest: baseFlow.artifactDigest };
+  const deliveryVersion = events.filter((event) => /^(kanban\.agent\.(plan|proposal|action|turn)|operator\.action|web\.action|task\.created|workflow\.|run\.)/.test(event.type)).at(-1)?.id || "";
+  const delivery = useChannelDelivery(prdSelection, deliveryVersion);
+  const flow = channelFlow(workspaceDetail, controlThreadId, delivery.data);
+  const canonicalPrd = { ...flow.canonical, ready: flow.ready };
   const threadConsensus = workspaceDetail?.consensus?.[controlThreadId] ?? {};
   const workflowRequests = workspaceDetail?.workflow_requests ?? [];
-  const replyRequests = workspaceDetail?.reply_requests ?? [];
+  const replyRequests = diagnosticsDetail?.reply_requests ?? detail?.reply_requests ?? [];
   const conversationReplyRequests = detail?.reply_requests ?? [];
-  const contextPacks = workspaceDetail?.context_packs ?? [];
+  const contextPacks = diagnosticsDetail?.context_packs ?? detail?.context_packs ?? [];
   const handoffs = workspaceDetail?.handoffs ?? [];
-  const stateUpdates = workspaceDetail?.state_updates ?? [];
+  const stateUpdates = diagnosticsDetail?.state_updates ?? detail?.state_updates ?? [];
   const ownerReports = workspaceDetail?.owner_reports ?? [];
   const automationReports = workspaceDetail?.automation_reports ?? [];
   const resultReceipts = workspaceDetail?.result_receipts ?? [];
@@ -843,6 +964,26 @@ export function ChannelPage({
     Boolean(latestThreadRequirementText),
   );
   const defaultResponderId = recordString(workspaceDetail?.discussion ?? {}, "default_responder_id");
+  const moderatorMemberId = (
+    workspaceDetail?.leader_member_id
+    || recordString(workspaceDetail?.discussion ?? {}, "moderator_member_id")
+    || recordString(workspaceDetail?.discussion ?? {}, "leader_member_id")
+  );
+  const moderatorMember = members.find((member) => (
+    recordString(member, "member_id") === moderatorMemberId
+  ));
+  const moderatorLabel = moderatorMember
+    ? memberDisplayName(moderatorMember)
+    : moderatorMemberId || "未配置";
+  const defaultResponderMember = members.find((member) => (
+    recordString(member, "member_id") === defaultResponderId
+  ));
+  const defaultResponderLabel = defaultResponderMember
+    ? memberDisplayName(defaultResponderMember)
+    : defaultResponderId || "未配置";
+  const sameModeratorAndResponder = Boolean(
+    moderatorMemberId && defaultResponderId && moderatorMemberId === defaultResponderId,
+  );
   const replyCapableMembers = members.filter((member) => {
     const status = recordString(member, "status");
     const memberType = recordString(member, "member_type");
@@ -852,33 +993,32 @@ export function ChannelPage({
   const channelMemberIds = new Set(
     members.map((member) => recordString(member, "member_id")).filter(Boolean),
   );
-  const latestReplyRowsByTarget = latestChannelRepliesByTarget(conversationReplyRequests).filter((request) => {
-    const target = recordString(request, "target_member_id") || recordString(request, "member_id");
-    return !target || channelMemberIds.has(target);
-  });
-  const pendingReplyRows = latestReplyRowsByTarget.filter((request) => {
-    const status = recordString(request, "status", "pending");
-    return status === "pending" || status === "queued" || status === "running" || status === "started";
-  });
-  const failedReplyRows = latestReplyRowsByTarget.filter((request) => {
-    const status = recordString(request, "status");
-    return status === "failed" || status === "rejected" || status === "escalated";
-  });
+  const replyHealth = channelReplyHealth(conversationReplyRequests, controlThreadId);
+  const pendingReplyRows = replyHealth.active;
+  const failedReplyRows = replyHealth.failed;
+  const currentFailedReplyRows = failedReplyRows.filter((row) => !row.message_id || row.message_id === latestThreadRequirementId);
   const attentionReplyRows = [...pendingReplyRows, ...failedReplyRows];
   const pendingReplies = pendingReplyRows.length;
-  const discussionAttentionCount = discussionBand?.attention.state === "needs_input"
-    ? Math.max(1, discussionBand.attention.owner_question_count)
-    : discussionBand?.attention.state === "blocked" ? 1 : 0;
-  const attentionCount = pendingReplies + failedReplyRows.length + discussionAttentionCount;
   const mentionRows = (detail?.mentions_detected ?? []).filter((item): item is Record<string, unknown> => Boolean(recordValue(item)));
   const mentionDigests = buildChannelMentionDigests(mentionRows, messages as Record<string, unknown>[], channelMemberIds);
+  const contextRejections = discussionBand?.attention.context_rejections ?? [];
+  const unsettledCrossReviews = (detail?.cross_reviews ?? diagnosticsDetail?.cross_reviews ?? [])
+    .filter((row) => recordString(row, "thread_id", "main") === controlThreadId
+      && (row.status !== "completed" || row.outcome === "unresolved"));
+  const activityCount = pendingReplies + failedReplyRows.length + mentionDigests.length + contextRejections.length + unsettledCrossReviews.length;
+  const chatConversation = useMemo(() => channelChatConversation(
+    channelConversation,
+    new Set([...ownerQuestionAttachments.byRun.keys(), ...decisionReceipts.byRun.keys()]),
+  ), [channelConversation, ownerQuestionAttachments, decisionReceipts]);
+  const [previewFile, setPreviewFile] = useState<PreviewItem | null>(null);
   const drawerTitles: Record<ChannelDrawerKey, string> = {
+    file: "File preview",
     members: "Members",
-    attention: "Attention",
-    context: "Context",
+    attention: "Activity",
+    diagnostics: "诊断",
+    ...FLOW_LABELS,
     reports: "Reports",
-    workflow: "Workflow",
-    settings: "Channel Settings",
+    settings: "更多 · 群组设置",
   };
   const formatButtons: Array<{ action: ComposerFormatAction; label: string; icon: LucideIcon }> = [
     { action: "bold", label: "Bold", icon: Bold },
@@ -893,7 +1033,6 @@ export function ChannelPage({
     { action: "code-block", label: "Code block", icon: SquareCode },
   ];
   useEffect(() => {
-    setActiveChannelThreadId("main");
     setChannelSplitThreadId("");
     setMemberMenuId("");
     setMemberProfileId("");
@@ -901,10 +1040,9 @@ export function ChannelPage({
     setMentionOpen(false);
     setMentionQuery("");
     setHistorySearchOpen(false);
-    setConsensusBlocker("");
     setHistoryLoadingEarlier(false);
     historyPrependAnchorRef.current = null;
-  }, [selectedChannelId]);
+  }, [selectedChannelId, projectId]);
   async function loadEarlierMessages() {
     if (historyLoadingEarlier || !detail?.has_more) return;
     const node = channelTimelineRef.current;
@@ -933,7 +1071,6 @@ export function ChannelPage({
     }
   }
   function toggleDrawer(nextDrawer: ChannelDrawerKey) {
-    setOwnerQuestionsOpen(false);
     setDrawer((current) => current === nextDrawer ? null : nextDrawer);
   }
   function channelMemberCount(channel: ChannelSummary): number {
@@ -977,7 +1114,7 @@ export function ChannelPage({
     );
   }
   function memberDisplayName(member: Record<string, unknown>): string {
-    return recordString(member, "display_name") || recordString(member, "member_id") || "member";
+    return channelMemberLabel(member);
   }
   function memberProvider(member: Record<string, unknown>): string {
     return recordString(member, "provider") || recordString(member, "backend") || recordString(member, "member_type") || "agent";
@@ -1101,7 +1238,6 @@ export function ChannelPage({
     setComposerText(plain);
   }
   function openHistorySearch() {
-    setActiveTab("chat");
     setHistorySearchOpen(true);
     window.requestAnimationFrame(() => historyInputRef.current?.focus());
   }
@@ -1162,7 +1298,6 @@ export function ChannelPage({
     setEmojiOpen(false);
   }
   function openMentionMenu() {
-    setActiveTab("chat");
     setEmojiOpen(false);
     setFormattingOpen(false);
     const text = composerPlainText();
@@ -1242,12 +1377,13 @@ export function ChannelPage({
     setComposerAttachments((current) => current.filter((item) => item.id !== id));
   }
   function attachmentRefs(): Record<string, unknown> | undefined {
-    if (!composerAttachments.length) return undefined;
+    if (!composerAttachments.length && !evaluationSourceDocument) return undefined;
     return {
-      attachments: composerAttachments.map(({ id: _id, ...attachment }) => ({
+      ...(evaluationSourceDocument ? { evaluation_source_document: true } : {}),
+      ...(composerAttachments.length ? { attachments: composerAttachments.map(({ id: _id, ...attachment }) => ({
         ...attachment,
         source: "browser-file-picker",
-      })),
+      })) } : {}),
     };
   }
   function formatBytes(value: number): string {
@@ -1273,7 +1409,6 @@ export function ChannelPage({
   }
   function openHistoryResult(row: Record<string, unknown>) {
     const threadId = recordString(row, "thread_id", "main");
-    setActiveTab("chat");
     setActiveChannelThreadId(threadId || "main");
     setChannelSplitThreadId("");
   }
@@ -1302,6 +1437,7 @@ export function ChannelPage({
     const clientMessageId = retryClientMessageId || newClientMessageId();
     const pendingId = clientMessageId;
     const draftKey = channelDraftStorageKey(
+      projectId || "",
       selectedChannelId,
       activeChannelThreadId,
     );
@@ -1310,6 +1446,9 @@ export function ChannelPage({
     setChannelHasNewBelow(false);
     setPendingChannelMessages((current) => [...current, {
       id: pendingId,
+      channelId: selectedChannelId,
+      projectId: projectId || "",
+      threadId: activeChannelThreadId,
       text: messageText,
       ts: new Date().toISOString(),
       targets: targetMembersForMessage(messageText),
@@ -1317,6 +1456,7 @@ export function ChannelPage({
     }]);
     clearComposerEditor();
     setComposerAttachments([]);
+    setComposerRefs({});
     setMentionOpen(false);
     setMentionQuery("");
     setPostingCount((count) => count + 1);
@@ -1326,9 +1466,12 @@ export function ChannelPage({
       replyToMessageId: replyTarget?.id || undefined,
     })
       .then(() => {
-        window.localStorage.removeItem(draftKey);
-        setRetryClientMessageId("");
-        setReplyTarget(null);
+        const saved = window.localStorage.getItem(draftKey);
+        if (saved && JSON.parse(saved).clientMessageId === clientMessageId) window.localStorage.removeItem(draftKey);
+        if (currentDraftKey.current === draftKey) {
+          setRetryClientMessageId("");
+          setReplyTarget(null);
+        }
         // Success: keep the optimistic row until the REAL message lands in
         // `detail` — channelDetailWithPendingMessage drops it by identity
         // the moment the projection catches up. Removing it here (the old
@@ -1342,7 +1485,6 @@ export function ChannelPage({
       })
       .catch((error) => {
         const reason = error instanceof Error ? error.message : "message was not posted";
-        setComposerError(reason);
         const draft: ChannelComposerDraft = {
           schemaVersion: "channel-composer-draft.v1",
           clientMessageId,
@@ -1354,9 +1496,13 @@ export function ChannelPage({
           reason,
         };
         window.localStorage.setItem(draftKey, JSON.stringify(draft));
-        setRetryClientMessageId(clientMessageId);
-        if (!composerPlainText().trim()) restoreComposerEditor(pendingHtml, pendingText);
-        setComposerAttachments((current) => current.length ? current : pendingAttachments);
+        if (currentDraftKey.current === draftKey) {
+          setComposerError(reason);
+          setRetryClientMessageId(clientMessageId);
+          if (!composerPlainText().trim()) restoreComposerEditor(pendingHtml, pendingText);
+          setComposerAttachments((current) => current.length ? current : pendingAttachments);
+          setComposerRefs(refs || {});
+        }
         setPendingChannelMessages((current) => current.filter((item) => item.id !== pendingId));
       })
       .finally(() => {
@@ -1366,41 +1512,17 @@ export function ChannelPage({
   async function runControl(action: () => Promise<void>) {
     if (controlsBusy) return;
     setControlsBusy(true);
+    setControlError("");
     try {
       await action();
+    } catch (error) {
+      setControlError(error instanceof Error ? error.message : "操作未完成，请重试。");
     } finally {
       setControlsBusy(false);
     }
   }
-  function handleDiscussionAttentionAction() {
-    const presentation = discussionBand?.presentation;
-    if (!presentation) return;
-    if (presentation.action === "questions") {
-      setOwnerQuestionsOpen(true);
-      setDrawer(null);
-      return;
-    }
-    if (presentation.action === "synthesize") {
-      if (!discussionControls.canSynthesize) return;
-      void runControl(() => onRequestSynthesis(
-        controlThreadId,
-        defaultResponderId || undefined,
-      ));
-      return;
-    }
-    if (presentation.action === "result") {
-      // Chat intentionally starts from the lightweight conversation projection.
-      // A canonical result needs the full Channel detail before the owner can
-      // inspect its bound artifact and make the token-gated consensus decision.
-      setDrawer(null);
-      void onLoadDiagnostics();
-      return;
-    }
-    setDrawer("attention");
-  }
   function messageMember(memberId: string) {
     if (!memberId) return;
-    setActiveTab("chat");
     setMemberMenuId("");
     setMentionOpen(false);
     insertComposerText(`@${memberId} `);
@@ -1484,15 +1606,16 @@ export function ChannelPage({
             <div className={`channel-member-item ${profileOpen ? "profile-open" : ""}`} key={memberId}>
               <div className="channel-member">
                 <div className="channel-member-identity">
-                  <span className="channel-avatar small">{initials(displayName)}</span>
+                  <span className="channel-message-avatar" style={{ color: memberColor(memberId) }}>{initials(displayName)}</span>
                   <div>
                     <strong>{displayName}</strong>
-                    <span className="muted">{memberRoleLabel(member)}</span>
+                    <span className="muted">{memberId === moderatorMemberId ? "主持人" : memberId === defaultResponderId ? "默认回复" : recordString(member, "responsibility") || channelMemberLabel(member)}</span>
                   </div>
                 </div>
-                <span className="status-pill">{memberProvider(member)}</span>
-                <span className="status-pill">{permissionProfile}</span>
-                <span className={`status-pill status-${memberPresence(member)}`}>{memberPresence(member)}</span>
+                <details className="channel-member-runtime"><summary>运行信息</summary>
+                  <span>{memberProvider(member)} · {permissionProfile}</span>
+                  <span>最近回复：{memberPresence(member)}</span>
+                </details>
                 {options.actions ? (
                   <div className="channel-member-actions">
                     <button
@@ -1579,6 +1702,7 @@ export function ChannelPage({
             {canonicalPrd.ready ? "canonical PRD" : "PRD pending"}
           </span>
         </div>
+        <p className="muted">先生成规划；创建 Task 与启动 Workflow 各需一次独立确认。</p>
         <div className="channel-control-form-grid">
           <label className="channel-control-field channel-control-field-wide">
             <span>Objective</span>
@@ -1590,25 +1714,6 @@ export function ChannelPage({
               onChange={(event) => setWorkflowDraft({ ...workflowDraft, reason: event.target.value })}
             />
           </label>
-        </div>
-        <div className="channel-control-actions">
-          <button
-            className="icon-button primary"
-            data-testid="channel-create-task-from-prd"
-            disabled={!actionReady || controlsBusy || !canonicalPrd.ready}
-            type="button"
-            onClick={() => void runControl(async () => {
-              await onWorkflowRequest(
-                "",
-                workflowDraft.reason.trim()
-                  || "Create a Task bound to the canonical Channel PRD.",
-                controlThreadId,
-              );
-            })}
-          >
-            <Plus size={16} />
-            Plan Task + Workflow
-          </button>
         </div>
         <details className="channel-workflow-existing-task">
           <summary>Plan an existing Task</summary>
@@ -1752,34 +1857,48 @@ export function ChannelPage({
       </div>
     );
   }
-  function renderReplyAttentionList() {
+  function renderReplyAttentionList(rows = attentionReplyRows, history = false) {
+    const reviews = history ? [] : unsettledCrossReviews;
     return (
       <div className="channel-attention-section">
         <div className="inline-heading">
-          <h3>Reply Queue</h3>
-          <span className="muted">{attentionReplyRows.length} active</span>
+          <h3>{history ? "历史失败（不代表仍在运行）" : "回复状态"}</h3>
+          <span className="muted">{history ? `${rows.length} records` : `${replyHealth.running.length} running · ${replyHealth.waiting.length} waiting`}</span>
         </div>
-        {attentionReplyRows.length ? (
+        {reviews.length ? <div data-testid="channel-review-attention" className="channel-attention-list">
+          <strong>正式审查尚未通过 · {reviews.length}</strong>
+          <p>成员回复完成不代表正式结果已通过检查。格式错误由运行时有限修正，未解决的事实仍需证据。</p>
+          {reviews.map((row) => <div className="channel-attention-card" key={recordString(row, "request_id")}>
+            <strong>{recordString(row, "target_member_id")}</strong>
+            <span>{row.status === "rejected" ? "输出未通过检查" : row.outcome === "unresolved" ? "事实尚未解决" : "复核待完成"}</span>
+            {row.reason ? <details><summary>查看原因</summary><p>{recordString(row, "reason")}</p></details> : null}
+          </div>)}
+        </div> : null}
+        {rows.length ? (
           <div className="channel-attention-list">
-            {attentionReplyRows.map((row) => {
+            {rows.map((row) => {
               const status = recordString(row, "status", "pending");
               const target = recordString(row, "target_member_id") || recordString(row, "member_id") || "agent";
               const reason = recordString(row, "reason") || recordString(row, "error") || recordString(row, "summary");
+              const failure = failedReplyRows.includes(row) ? replyFailurePresentation(row) : null;
+              const historic = Boolean(failure && row.message_id && row.message_id !== latestThreadRequirementId);
               const requestId = recordString(row, "request_id") || recordString(row, "event_id") || target;
               const ts = recordString(row, "updated_at") || recordString(row, "created_at") || recordString(row, "ts");
-              const active = status === "pending" || status === "queued" || status === "running" || status === "started";
+              const active = status === "running" || status === "started";
               const startedAt = recordString(row, "started_at") || (
                 status === "running" || status === "started"
                   ? recordString(row, "updated_at")
                   : recordString(row, "created_at")
               );
               return (
-                <div className={`channel-attention-card ${failedReplyRows.includes(row) ? "failed" : ""}`} key={requestId}>
+                <div className={`channel-attention-card ${failedReplyRows.includes(row) ? "failed" : ""}`} data-member-id={target} key={requestId}>
                   <div className="channel-attention-card-main">
                     <span className="channel-avatar tiny">{initials(target)}</span>
                     <div>
-                      <strong>@{target}</strong>
-                      <span className="muted">{reason || (status === "running" ? "reply is running" : "waiting for reply")}</span>
+                      <strong>{channelMemberLabel(members.find((member) => member.member_id === target) ?? { member_id: target })}</strong>
+                      <span className="muted">{failure ? `${historic ? "历史记录 · " : ""}${failure.label}` : active ? "正在回复" : "等待运行时调度"}</span>
+                      {failure ? <small>{failure.advice}</small> : null}
+                      {reason ? <details className="channel-reply-error"><summary>错误详情 / 原始原因</summary><p>{reason}</p></details> : null}
                     </div>
                   </div>
                   <div className="channel-attention-card-meta">
@@ -1794,8 +1913,8 @@ export function ChannelPage({
           </div>
         ) : (
           <div className="channel-attention-empty">
-            <strong>No reply attention</strong>
-            <span>All requested agent replies have settled.</span>
+            <strong>{reviews.length ? "等待正式审查结果" : contextRejections.length ? "评审尚未派发" : "No reply attention"}</strong>
+            <span>{reviews.length ? "查看上方审查状态；尚不能认定讨论完成。" : contextRejections.length ? "来源上下文检查阻止了后续评审，请先处理上方原因。" : "All requested agent replies have settled."}</span>
           </div>
         )}
       </div>
@@ -1861,18 +1980,6 @@ export function ChannelPage({
   }
   function countWorkspaceRows(rows: Record<string, unknown>[], predicate: (row: Record<string, unknown>) => boolean): number {
     return rows.reduce((count, row) => count + (predicate(row) ? 1 : 0), 0);
-  }
-  function renderWorkspaceMetric(label: string, value: number | string, detail: string, Icon: LucideIcon) {
-    return (
-      <div className="channel-workspace-metric">
-        <span className="channel-workspace-metric-icon"><Icon size={16} /></span>
-        <div>
-          <strong>{value}</strong>
-          <span>{label}</span>
-          <small>{detail}</small>
-        </div>
-      </div>
-    );
   }
   function renderWorkspaceReplyFlow(includeHistory = false) {
     const attentionRows = replyRequests.filter((row) => {
@@ -1970,218 +2077,15 @@ export function ChannelPage({
       </section>
     );
   }
-  function renderWorkspaceDiagnostics() {
-    const linkedEventCount = workspaceDetail?.linked_events?.length
-      ?? Number(detail?.diagnostics_summary?.linked_event_count || 0);
-    return (
-      <details className="channel-workspace-diagnostics span-2" data-testid="channel-diagnostics">
-        <summary>
-          <span>
-            <strong>Diagnostics</strong>
-            <small>Reply history, context construction and linked events</small>
-          </span>
-          <span className="channel-workspace-chip-row">
-            <span className="metric-chip">{replyRequests.length} replies</span>
-            <span className="metric-chip">{contextPacks.length} contexts</span>
-            <span className="metric-chip">{linkedEventCount} events</span>
-          </span>
-        </summary>
-        <div className="channel-workspace-diagnostics-grid">
-          {renderWorkspaceReplyFlow(true)}
-          {renderWorkspaceContextFlow()}
-        </div>
-      </details>
-    );
-  }
-  function renderWorkspaceRequests() {
-    const activeWorkflowItems = [...workflowRequests, ...syntheses, ...handoffs].filter((item) => Boolean(recordValue(item))) as Record<string, unknown>[];
-    return (
-      <section className="channel-workspace-panel" data-testid="channel-workflow-surface">
-        <div className="channel-workspace-panel-head">
-          <div>
-            <h3>Workflow Surface</h3>
-            <span className="muted">{activeWorkflowItems.length} requests / handoffs</span>
-          </div>
-        </div>
-        {activeWorkflowItems.length ? (
-          <div className="channel-workspace-list compact">
-            {latestWorkspaceRows(activeWorkflowItems, 5).map((row, index) => (
-              <div
-                className="channel-workspace-row compact"
-                data-pattern-id={recordString(row, "pattern_id") || undefined}
-                data-request-id={recordString(row, "request_id") || recordString(row, "event_id") || undefined}
-                key={recordString(row, "event_id") || recordString(row, "request_id") || index}
-              >
-                <GitFork size={15} />
-                <div>
-                  <strong>{recordString(row, "pattern_id") || recordString(row, "type") || "workflow"}</strong>
-                  <span className="muted">{recordString(row, "task_id") || recordString(row, "summary") || recordString(row, "reason") || "-"}</span>
-                </div>
-              </div>
-            ))}
-          </div>
-        ) : (
-          <div className="channel-workspace-empty">No workflow requests or handoffs.</div>
-        )}
-      </section>
-    );
-  }
-  function renderWorkspaceControls() {
-    return (
-      <section className="channel-workspace-panel channel-workspace-controls">
-        <div className="channel-workspace-panel-head">
-          <div>
-            <h3>Controls</h3>
-            <span className="muted">kernel-gated actions</span>
-          </div>
-          <span className={`metric-chip ${actionReady ? "" : "chip-warn"}`}>
-            {actionReady ? "active" : "locked"}
-          </span>
-        </div>
-        <div className="channel-control-panel flat channel-control-card">
-          <div className="inline-heading">
-            <h3>Discussion</h3>
-            <span className="muted">{discussionMode}</span>
-          </div>
-          <div className="channel-control-stack">
-            <label className="channel-control-row">
-              <span className="channel-control-copy">
-                <strong>Mode</strong>
-                <small>How channel messages choose speakers.</small>
-              </span>
-              <select
-                className="filter-input"
-                disabled={!actionReady || controlsBusy}
-                value={discussionMode}
-                onChange={(event) => {
-                  const mode = event.target.value;
-                  void runControl(() => onSetDiscussionMode(controlThreadId, mode, defaultResponderId));
-                }}
-              >
-                <option value="conversation">conversation</option>
-                <option value="clarification">clarification</option>
-                <option value="multi_lens">multi lens</option>
-              </select>
-            </label>
-            <label className="channel-control-row">
-              <span className="channel-control-copy">
-                <strong>Default responder</strong>
-                <small>Handles messages without an explicit @mention.</small>
-              </span>
-              <select
-                className="filter-input"
-                disabled={!actionReady || controlsBusy}
-                value={defaultResponderId}
-                onChange={(event) => {
-                  const memberId = event.target.value;
-                  void runControl(() => onSetDiscussionMode(controlThreadId, discussionMode, memberId));
-                }}
-              >
-                <option value="">no default responder</option>
-                {replyCapableMembers.map((member) => {
-                  const memberId = recordString(member, "member_id");
-                  return <option key={memberId} value={memberId}>{memberDisplayName(member)}</option>;
-                })}
-              </select>
-            </label>
-          </div>
-          <div className="channel-control-actions">
-            <button
-              className="icon-button"
-              disabled={
-                !actionReady
-                || controlsBusy
-                || !discussionControls.canStartOrRestart
-              }
-              type="button"
-              onClick={() => void runControl(() => onStartDiscussion(
-                controlThreadId,
-                latestThreadRequirementText,
-                latestThreadRequirementId,
-                discussionMode,
-                discussionControls.restart,
-              ))}
-            >
-              <PlayCircle size={16} />
-              {discussionControls.startLabel}
-            </button>
-            <button className="icon-button" disabled={!actionReady || controlsBusy || !discussionControls.canDrainReplies} type="button" onClick={() => void runControl(onDrainReplies)}>
-              Drain Replies
-            </button>
-            <button className="icon-button" disabled={!actionReady || controlsBusy || !discussionControls.canSynthesize} type="button" onClick={() => void runControl(() => onRequestSynthesis(controlThreadId, defaultResponderId || undefined))}>
-              <FileText size={16} />
-              Synthesize
-            </button>
-          </div>
-        </div>
-        <div className="channel-control-panel flat channel-control-card">
-          <div className="inline-heading">
-            <h3>Owner</h3>
-            <span className="muted">{ownerReports.length} reports</span>
-          </div>
-          <div className="channel-control-row read-only">
-            <span className="channel-control-copy">
-              <strong>Brief</strong>
-              <small>Generate an owner-visible channel report.</small>
-            </span>
-            <button className="icon-button" disabled={!actionReady || controlsBusy} type="button" onClick={() => void runControl(() => onGenerateOwnerReport(controlThreadId))}>
-              <FileText size={16} />
-              Report
-            </button>
-          </div>
-        </div>
-        {renderWorkflowRequestForm()}
-      </section>
-    );
-  }
-  function renderChannelWorkspace() {
-    if (diagnosticsLoading && !diagnosticsDetail) {
-      return (
-        <div className="channel-workspace-loading" data-testid="channel-details-loading">
-          <Loader2 className="spin" size={18} />
-          <span>Loading channel details…</span>
-        </div>
-      );
-    }
-    if (diagnosticsError && !diagnosticsDetail) {
-      return (
-        <div className="channel-workspace-loading is-error" data-testid="channel-details-error">
-          <span>{diagnosticsError}</span>
-          <button className="icon-button" type="button" onClick={() => void onLoadDiagnostics()}>
-            Retry
-          </button>
-        </div>
-      );
-    }
-    return (
-      <div
-        className="channel-workspace-dashboard"
-        data-testid={diagnosticsDetail ? "channel-details-loaded" : "channel-details-summary"}
-      >
-        <section className="channel-workspace-hero">
-          {renderWorkspaceMetric("Members", members.length, `${boundMembers.length} runtime bound`, Users)}
-          {renderWorkspaceMetric(
-            "Messages",
-            Number(workspaceDetail?.message_count ?? messages.length),
-            `${mentionDigests.length} mention events`,
-            MessageSquare,
-          )}
-          {renderWorkspaceMetric("Replies", replyRequests.length, `${pendingReplies} pending / ${failedReplyRows.length} failed`, Bell)}
-          {renderWorkspaceMetric("Context", contextPacks.length, `${stateUpdates.length} state updates`, Boxes)}
-          {renderWorkspaceMetric("Reports", ownerReports.length + automationReports.length, `${automationReports.length} automation`, FileText)}
-        </section>
-        <div className="channel-workspace-main-grid">
-          {renderWorkspaceReplyFlow()}
-          {renderWorkspaceRequests()}
-          {renderWorkspaceControls()}
-          {renderWorkspaceDiagnostics()}
-        </div>
-      </div>
-    );
-  }
   function renderDiscussionActivity() {
     if (!discussionBand) return null;
     const { attention, presentation } = discussionBand;
+    const activityLabel = attention.state === "needs_input" && attention.owner_question_count > 0
+      ? `${attention.owner_question_count} decisions need review`
+      : presentation.label;
+    const activitySummary = attention.state === "needs_input" && attention.owner_question_count > 0
+      ? "Questions stay attached to the Agent that asked them."
+      : presentation.summary;
     return (
       <section
         className={`channel-discussion-activity tone-${presentation.tone}`}
@@ -2191,8 +2095,8 @@ export function ChannelPage({
         <div className="channel-discussion-activity-head">
           <span className="channel-discussion-state-icon"><Bell size={15} /></span>
           <div>
-            <strong>{presentation.label}</strong>
-            <span>{presentation.summary}</span>
+            <strong>{activityLabel}</strong>
+            <span>{activitySummary}</span>
           </div>
         </div>
         <div className="channel-discussion-activity-metrics">
@@ -2228,17 +2132,27 @@ export function ChannelPage({
             ))}
           </div>
         ) : null}
+        {presentation.action === "result" && presentation.actionLabel ? (
+          <button
+            className="icon-button primary"
+            type="button"
+            onClick={() => {
+              void onLoadDiagnostics();
+              setDrawer("prd");
+            }}
+          >
+            {presentation.actionLabel}
+          </button>
+        ) : null}
+        {renderChannelConsensusControl()}
         <div className="channel-discussion-activity-actions">
           {attention.can_review_questions ? (
             <button
               className="icon-button primary"
               type="button"
-              onClick={() => {
-                setOwnerQuestionsOpen(true);
-                setDrawer(null);
-              }}
+              onClick={focusOwnerQuestions}
             >
-              Review decisions
+              Locate questions
             </button>
           ) : null}
           <button
@@ -2255,7 +2169,6 @@ export function ChannelPage({
             type="button"
             onClick={() => void runControl(() => onRequestSynthesis(
               controlThreadId,
-              defaultResponderId || undefined,
             ))}
           >
             <FileText size={15} />
@@ -2281,10 +2194,30 @@ export function ChannelPage({
     );
   }
   function renderDrawerContent(activeDrawer: ChannelDrawerKey) {
+    if (activeDrawer === "file" && previewFile) return <ChannelFilePreview
+      key={`${projectId}:${selectedChannelId}:${controlThreadId}:${previewFile.id}:${previewFile.name}`}
+      item={previewFile} projectId={projectId || "default"} channelId={selectedChannelId} threadId={controlThreadId}
+      onClose={() => setDrawer(null)} />;
     if (activeDrawer === "members") {
       return (
         <>
           <div className="channel-control-panel">
+            <div className="channel-control-row read-only channel-member-role-summary">
+              <span className="channel-control-copy">
+                <strong>Channel Moderator</strong>
+                <small>{moderatorLabel}</small>
+              </span>
+              <span className="status-pill status-observed">{sameModeratorAndResponder ? "主持人 · 默认回复（同一成员）" : "主持人"}</span>
+            </div>
+            {!sameModeratorAndResponder ? <div className="channel-control-row read-only channel-member-role-summary">
+              <span className="channel-control-copy">
+                <strong>Default Responder</strong>
+                <small>{defaultResponderLabel}</small>
+              </span>
+              <span className="status-pill status-observed">
+                {sameModeratorAndResponder ? "同一成员" : "默认回复"}
+              </span>
+            </div> : null}
             <div className="inline-heading">
               <h3>Members</h3>
               <span className="muted">{members.length}</span>
@@ -2297,7 +2230,7 @@ export function ChannelPage({
             />
             <button className="channel-member-add-row" disabled={!actionReady} type="button" onClick={onAddAgent}>
               <Plus size={16} />
-              Add people
+              Add role / member
             </button>
             {renderMemberList(members, { actions: true, filter: memberSearch })}
           </div>
@@ -2316,25 +2249,75 @@ export function ChannelPage({
     if (activeDrawer === "attention") {
       return (
         <>
-          {renderDiscussionActivity()}
+          <ChannelContextFailures rows={contextRejections} />
           <div className="channel-attention-strip">
-            <span className="metric-chip">{pendingReplies} pending</span>
-            <span className={`metric-chip ${failedReplyRows.length ? "chip-warn" : ""}`}>{failedReplyRows.length} failed</span>
+            <span className="metric-chip">{replyHealth.running.length} running</span>
+            <span className="metric-chip">{replyHealth.waiting.length} waiting</span>
+            <span className={`metric-chip ${currentFailedReplyRows.length ? "chip-warn" : ""}`}>{currentFailedReplyRows.length} failed</span>
             <span className="metric-chip">{mentionDigests.length} mentions</span>
             <button className="icon-button" disabled={!actionReady || controlsBusy || !discussionControls.canDrainReplies} type="button" onClick={() => void runControl(onDrainReplies)}>
               Drain Replies
             </button>
           </div>
-          {renderReplyAttentionList()}
+          {renderReplyAttentionList([...pendingReplyRows, ...currentFailedReplyRows])}
+          {failedReplyRows.length > currentFailedReplyRows.length ? <details className="channel-reply-history"><summary>历史失败 · {failedReplyRows.length - currentFailedReplyRows.length}</summary>
+            {renderReplyAttentionList(failedReplyRows.filter((row) => !currentFailedReplyRows.includes(row)), true)}
+          </details> : null}
+          {replyHealth.settled.length ? <details className="channel-reply-history"><summary>已结束记录 · {replyHealth.settled.length}</summary>
+            {replyHealth.settled.map((row, index) => <p key={String(row.request_id || index)}>{String(row.target_member_id || "成员")} · {String(row.failure_category || row.terminal_disposition || row.status)}</p>)}
+          </details> : null}
+          {failedReplyRows.length ? <button className="icon-button" type="button" onClick={() => setDrawer("discussion")}>查看讨论状态与恢复操作</button> : null}
           {renderMentionEventList()}
         </>
       );
     }
-    if (activeDrawer === "context") {
+    if (activeDrawer === "prd") return <ChannelPrdPreview key={channelDocumentKey(prdSelection)}
+      selection={prdSelection} flow={flow} actionReady={actionReady} busy={controlsBusy}
+      onClose={() => setDrawer(null)}
+      onDiscuss={() => { setDrawer(null); composerRef.current?.focus(); }}
+      onProcess={() => onWorkflowRequest("", workflowDraft.reason.trim() || "Create a Task bound to the canonical Channel PRD.", controlThreadId)}
+      onEvaluate={(role, retry) => onEvaluatePrd(controlThreadId, flow.revision, flow.artifactRef, flow.artifactDigest, role, retry)}>
+      {renderChannelConsensusControl()}
+      {flow.ready ? <details><summary>Planning options</summary>{renderWorkflowRequestForm()}</details> : null}
+    </ChannelPrdPreview>;
+    if (activeDrawer === "requirement" || activeDrawer === "task" || activeDrawer === "workflow") {
+      return <>
+        <ChannelFlowPreview flow={flow} node={activeDrawer} />
+        {activeDrawer === "requirement" && detail?.has_more ? <button className="icon-button" type="button"
+          disabled={historyLoadingEarlier} onClick={() => void loadEarlierMessages()}>
+          {historyLoadingEarlier ? "Loading…" : "加载更早的需求记录"}
+        </button> : null}
+        {activeDrawer !== "requirement" ? <div className="channel-control-actions">
+          <button className="icon-button" type="button" onClick={() => setDrawer("prd")}>Preview PRD</button>
+          <button className="icon-button" type="button" onClick={onReviewPlans}>Open Kanban Agent</button>
+        </div> : null}
+      </>;
+    }
+    if (activeDrawer === "discussion") return renderDiscussionActivity();
+    if (activeDrawer === "diagnostics") {
+      if (selectedSourceQuestion && ownerQuestionAttachments.unassigned.includes(selectedSourceQuestion)) return <section data-testid="channel-question-source-diagnostics">
+        <p>Source reply unavailable · {selectedSourceQuestion.askedBy || "Unknown agent"}</p>
+        <p className="muted">该历史问题缺少可唯一定位的发言，或来源尚未加载。保留原始问题身份，不附到其他 Agent 回复下。</p>
+        {detail?.has_more ? <button className="icon-button" type="button" disabled={historyLoadingEarlier}
+          onClick={() => void loadEarlierMessages()}>{historyLoadingEarlier ? "Loading…" : "Load earlier source"}</button> : null}
+        {renderOwnerQuestionCard([selectedSourceQuestion], "channel-source-question", "channel-inline-question", true)}
+      </section>;
+      if (diagnosticsError) return <div role="alert" data-testid="channel-diagnostics-error">
+        <p>{diagnosticsError}</p>
+        <button className="icon-button" type="button" onClick={() => void onLoadDiagnostics()}>Retry</button>
+      </div>;
+      if (diagnosticsLoading || !diagnosticsDetail) return <p role="status" data-testid="channel-diagnostics-loading">Loading diagnostics…</p>;
       return (
         <>
+          <div data-testid="channel-diagnostics-loaded">
+            {renderWorkspaceReplyFlow(true)}
+            {renderWorkspaceContextFlow()}
+          </div>
           <TablePage title="Context Packs" rows={contextPacks} embedded />
           <TablePage title="State Updates" rows={stateUpdates} embedded />
+          <TablePage title="Provider Runs" rows={diagnosticsDetail?.provider_runs ?? []} embedded />
+          <TablePage title="Workflow Requests / Handoffs" rows={[...workflowRequests, ...handoffs]} embedded />
+          {renderResultReceipts()}
         </>
       );
     }
@@ -2355,16 +2338,6 @@ export function ChannelPage({
           <ChannelReportPreviewRefs rows={automationReports} title="Automation Report Preview Refs" />
           <TablePage title="Owner Reports" rows={ownerReports} embedded />
           <TablePage title="Automation Reports" rows={automationReports} embedded />
-        </>
-      );
-    }
-    if (activeDrawer === "workflow") {
-      return (
-        <>
-          {renderWorkflowRequestForm()}
-          {renderResultReceipts()}
-          <TablePage title="Workflow Requests" rows={workflowRequests} embedded />
-          <TablePage title="Synthesis / Handoffs" rows={[...syntheses, ...handoffs]} embedded />
         </>
       );
     }
@@ -2402,6 +2375,9 @@ export function ChannelPage({
             <h3>Workflow</h3>
             <span className="muted">{workflowRequests.length} requests</span>
           </div>
+          <button className="icon-button" type="button" onClick={() => setDrawer("diagnostics")}>
+            <Wrench size={16} />诊断
+          </button>
           <button className="icon-button" type="button" onClick={() => setDrawer("workflow")}>
             <PlayCircle size={16} />
             Workflow
@@ -2417,6 +2393,7 @@ export function ChannelPage({
             <span className="muted">{discussionMode}</span>
           </div>
           <select
+            aria-label="Discussion mode"
             className="filter-input"
             disabled={!actionReady || controlsBusy}
             value={discussionMode}
@@ -2430,6 +2407,7 @@ export function ChannelPage({
             <option value="multi_lens">multi lens</option>
           </select>
           <select
+            aria-label="Default responder"
             className="filter-input"
             disabled={!actionReady || controlsBusy}
             value={defaultResponderId}
@@ -2464,6 +2442,10 @@ export function ChannelPage({
             {discussionControls.startLabel}
           </button>
         </div>
+        <button className="icon-button" disabled={!actionReady || controlsBusy || !discussionControls.canSynthesize} type="button"
+          onClick={() => void runControl(() => onRequestSynthesis(controlThreadId))}>
+          <FileText size={16} />Synthesize
+        </button>
         <div className="channel-control-panel">
           <div className="inline-heading">
             <h3>Danger Zone</h3>
@@ -2494,11 +2476,11 @@ export function ChannelPage({
     );
   }
   return (
-    <section className="channel-page channel-page-chat">
+    <section className={`channel-page channel-page-chat ${decisionQueueItems.length ? "has-decision-queue" : ""} ${drawer ? "has-drawer" : ""}`.trim()}>
       <div className="channel-shell-header">
         <div className="channel-heading-stack">
-          <div className="channel-title-row">
-            <div className="channel-switcher-wrap">
+            <div className="channel-title-row">
+              <div className="channel-switcher-wrap">
               <button
                 aria-expanded={channelSwitcherOpen}
                 className={`channel-title-button ${channelSwitcherOpen ? "active" : ""}`}
@@ -2552,32 +2534,6 @@ export function ChannelPage({
                 </div>
               ) : null}
             </div>
-            <span className="muted mono">{selectedChannelId}</span>
-          </div>
-          <div className="channel-tabs" role="tablist" aria-label="Channel view">
-            <button
-              aria-selected={activeTab === "chat"}
-              className={`channel-tab ${activeTab === "chat" ? "active" : ""}`}
-              data-testid="channel-chat-tab"
-              type="button"
-              onClick={() => setActiveTab("chat")}
-            >
-              <MessageSquare size={16} />
-              Chat
-            </button>
-            <button
-              aria-selected={activeTab === "workspace"}
-              className={`channel-tab ${activeTab === "workspace" ? "active" : ""}`}
-              data-testid="channel-details-tab"
-              type="button"
-              onClick={() => {
-                setActiveTab("workspace");
-                void onLoadDiagnostics();
-              }}
-            >
-              <Info size={16} />
-              Details
-            </button>
           </div>
         </div>
         <div className="channel-header-actions">
@@ -2591,34 +2547,41 @@ export function ChannelPage({
             <Search size={16} />
           </button>
           <button
+            aria-label={`Members ${members.length}`}
             aria-pressed={drawer === "members"}
-            className={`channel-tool-button ${drawer === "members" ? "active" : ""}`}
-            title="Members"
+            className={`channel-member-stack-button ${drawer === "members" ? "active" : ""}`}
+            data-testid="channel-header-members"
+            title={`Members ${members.length}`}
             type="button"
             onClick={() => toggleDrawer("members")}
           >
-            <Users size={16} />
+            <span className="channel-member-stack-avatars" aria-hidden="true">
+              {members.length ? members.slice(0, 4).map((member) => {
+                const memberId = recordString(member, "member_id") || memberDisplayName(member);
+                return (
+                  <span className="channel-member-stack-avatar" style={{ color: memberColor(memberId) }} key={memberId}>
+                    {initials(memberDisplayName(member))}
+                  </span>
+                );
+              }) : <Users size={15} />}
+              {members.length > 4 ? <span className="channel-member-stack-more">+{members.length - 4}</span> : null}
+            </span>
             <span>{members.length}</span>
           </button>
-          <button
-            aria-pressed={drawer === "attention"}
-            className={`channel-tool-button ${drawer === "attention" ? "active" : ""}`}
-            title="Attention"
-            type="button"
-            onClick={() => toggleDrawer("attention")}
-          >
-            <Bell size={16} />
-            <span>{attentionCount}</span>
-          </button>
-          <button
-            aria-pressed={drawer === "context"}
-            className={`channel-tool-button ${drawer === "context" ? "active" : ""}`}
-            title="Context"
-            type="button"
-            onClick={() => toggleDrawer("context")}
-          >
-            <FileText size={16} />
-          </button>
+          {activityCount ? (
+            <button
+              aria-label={`Activity ${activityCount}`}
+              aria-pressed={drawer === "attention"}
+              className={`channel-tool-button ${currentFailedReplyRows.length ? "channel-header-failure" : ""} ${drawer === "attention" ? "active" : ""}`}
+              data-testid="channel-header-failures"
+              title="Activity"
+              type="button"
+              onClick={() => toggleDrawer("attention")}
+            >
+              <Bell size={16} />
+              <span className="channel-activity-label">Activity</span><span>{activityCount}</span>
+            </button>
+          ) : null}
           <button
             aria-pressed={drawer === "settings"}
             className={`channel-tool-button ${drawer === "settings" ? "active" : ""}`}
@@ -2630,6 +2593,8 @@ export function ChannelPage({
           </button>
         </div>
       </div>
+      <ChannelFlowNavigation flow={flow} onSelect={(node) => toggleDrawer(node)}
+        onReviewQuestions={focusOwnerQuestions} onReviewPlans={onReviewPlans} deliveryError={delivery.error} />
       {loadError ? <div className="notice">{loadError}</div> : null}
       {actionResult && (
         actionResult?.action === "channel-create"
@@ -2650,157 +2615,10 @@ export function ChannelPage({
           <span className="mono">{actionResult.status}</span> {channelActionNoticeText(actionResult)}
         </div>
       ) : null}
-      <div className={`channel-shell ${drawer ? "has-drawer" : ""}`}>
+      <div className={`channel-shell ${drawer ? "has-drawer" : ""} ${decisionQueueItems.length ? "has-decision-queue" : ""}`.trim()}>
         <main className="channel-main">
-          {activeTab === "chat" ? (
-            <>
+          <>
               {renderHistorySearchPanel()}
-              {discussionBand?.presentation.visible ? (
-                <section
-                  aria-label="Discussion attention"
-                  aria-live="polite"
-                  className={`channel-discussion-attention tone-${discussionBand.presentation.tone}`}
-                  data-discussion-state={discussionBand.attention.state}
-                  data-testid="channel-discussion-attention"
-                >
-                  <div className="channel-discussion-attention-main">
-                    <span className="channel-discussion-state-icon" aria-hidden="true">
-                      {discussionBand.attention.active_agent_count > 0 ? (
-                        <Loader2 className="spin" size={15} />
-                      ) : discussionBand.attention.state === "ready" ? (
-                        <FileText size={15} />
-                      ) : discussionBand.attention.state === "blocked" ? (
-                        <Info size={15} />
-                      ) : (
-                        <Bell size={15} />
-                      )}
-                    </span>
-                    <div className="channel-discussion-attention-copy">
-                      <strong>{discussionBand.presentation.label}</strong>
-                      {discussionBand.presentation.summary ? (
-                        <span>{discussionBand.presentation.summary}</span>
-                      ) : null}
-                      {discussionBand.attention.active_agent_count > 0 ? (
-                        <span className="channel-discussion-live-meta">
-                          {channelActiveAgentLabel(discussionBand.attention) ? (
-                            <span>{channelActiveAgentLabel(discussionBand.attention)}</span>
-                          ) : null}
-                          <ChannelLiveElapsed
-                            startedAt={discussionBand.attention.oldest_active_started_at ?? ""}
-                          />
-                        </span>
-                      ) : null}
-                    </div>
-                    {discussionBand.presentation.actionLabel ? (
-                      <button
-                        className="icon-button"
-                        disabled={
-                          (
-                            discussionBand.presentation.action === "synthesize"
-                            && (
-                              controlsBusy
-                              || !actionReady
-                              || !discussionControls.canSynthesize
-                            )
-                          )
-                          || (
-                            discussionBand.presentation.action === "questions"
-                            && !discussionBand.ownerQuestions.length
-                          )
-                        }
-                        type="button"
-                        onClick={handleDiscussionAttentionAction}
-                      >
-                        {discussionBand.presentation.actionLabel}
-                      </button>
-                    ) : null}
-                  </div>
-                  {recordString(threadConsensus, "artifact_ref") && !recordString(threadConsensus, "reached_event_id") ? (
-                    <div className="channel-consensus-control">
-                      <span className="channel-discussion-qtext">
-                        {Boolean(threadConsensus.human_confirmed)
-                          ? "Owner confirmed; waiting for required signatures"
-                          : "Canonical PRD awaiting owner decision"}
-                      </span>
-                      <input
-                        className="filter-input"
-                        placeholder="Blocker"
-                        value={consensusBlocker}
-                        onChange={(event) => setConsensusBlocker(event.target.value)}
-                      />
-                      <button
-                        className="icon-button primary"
-                        disabled={!actionReady || controlsBusy || Boolean(threadConsensus.human_confirmed)}
-                        type="button"
-                        onClick={() => void runControl(() => onConsensusDecision(
-                          "confirm",
-                          controlThreadId,
-                          recordString(threadConsensus, "artifact_ref"),
-                          recordString(threadConsensus, "artifact_digest"),
-                        ))}
-                      >
-                        <FileText size={14} />
-                        Confirm
-                      </button>
-                      <button
-                        className="icon-button"
-                        disabled={!actionReady || controlsBusy || !consensusBlocker.trim()}
-                        type="button"
-                        onClick={() => void runControl(async () => {
-                          await onConsensusDecision(
-                            "block",
-                            controlThreadId,
-                            recordString(threadConsensus, "artifact_ref"),
-                            recordString(threadConsensus, "artifact_digest"),
-                            consensusBlocker.trim(),
-                          );
-                          setConsensusBlocker("");
-                        })}
-                      >
-                        <X size={14} />
-                        Block
-                      </button>
-                    </div>
-                  ) : null}
-                </section>
-              ) : null}
-              {ownerQuestionsOpen && discussionBand?.ownerQuestions.length ? (
-                <div className="channel-owner-question-shelf" data-testid="channel-owner-question-shelf">
-                  <AskUserQuestion
-                    busy={controlsBusy}
-                    disabled={!actionReady}
-                    onClose={() => setOwnerQuestionsOpen(false)}
-                    onDiscuss={(question) => {
-                      setOwnerQuestionsOpen(false);
-                      quoteDiscussionQuestion(question.question);
-                      window.setTimeout(() => focusComposer(), 0);
-                    }}
-                    onSubmit={(answers: AskUserQuestionAnswer[]) => {
-                      void runControl(async () => {
-                        for (const answer of answers) {
-                          await onResolveQuestion(
-                            answer.questionId,
-                            discussionBand.threadId,
-                            answer.skipped ? "out_of_scope" : "answered",
-                            answer.answer,
-                          );
-                        }
-                        setOwnerQuestionsOpen(false);
-                      });
-                    }}
-                    questions={discussionBand.ownerQuestions}
-                    requestId={[
-                      selectedChannelId,
-                      discussionBand.threadId,
-                      discussionBand.questionGraphDigest,
-                    ].join(":")}
-                    submitLabel={(answers) => (
-                      answers.length > 1 ? "Submit answers" : "Answer"
-                    )}
-                    variant="shelf"
-                  />
-                </div>
-              ) : null}
               <div
                 ref={channelTimelineRef}
                 className="channel-timeline"
@@ -2818,17 +2636,42 @@ export function ChannelPage({
                     {historyLoadingEarlier ? "Loading…" : "Load earlier messages"}
                   </button>
                 ) : null}
+                {controlError ? <p role="alert" data-testid="channel-control-error">{controlError}</p> : null}
+                <ChannelMemberInvitations
+                  key={`${projectId}:${selectedChannelId}:${controlThreadId}`}
+                  proposals={detail?.member_invitation_proposals || []}
+                  threadId={controlThreadId} enabled={actionReady} onDecide={onDecideMemberInvitation}
+                />
                 <AgentSessionTimeline
+                  onPreviewReference={(item) => { setPreviewFile(item); setDrawer("file"); }}
                   actionBusyId={researchActionBusyId}
+                  onCancelRun={actionReady && !controlsBusy
+                    ? (runId) => { void runControl(() => onCancelProviderRun(runId)); }
+                    : undefined}
                   activeThreadId={activeChannelThreadId}
                   allowSplit={channelHasMultipleThreads}
                   allowPreviewSplit
                   compact={!channelHasMultipleThreads}
-                  conversation={channelConversation}
+                  conversation={chatConversation}
                   collapseCompletedRunDetails
                   emptyBody="Post a message or @mention an agent to start a channel run."
                   emptyTitle="No channel messages"
                   minimalRunActivity
+                  renderRunIdentity={(run) => <ChannelMemberIdentity
+                    member={members.find((member) => recordString(member, "member_id") === run.memberId) ?? { member_id: run.memberId }}
+                    moderator={run.memberId === moderatorMemberId}
+                    responder={run.memberId === defaultResponderId}
+                    onDetails={() => { setMemberProfileId(run.memberId || ""); setMemberSearch(""); setDrawer("members"); }}
+                  />}
+                  renderRunSupplement={(run: AgentSessionRun, _turn: AgentSessionTurn) => <>
+                    {ownerQuestionsOpen
+                      ? renderOwnerQuestionCard(
+                        ownerQuestionAttachments.byRun.get(run.id) || [],
+                        "channel-inline-question",
+                        "channel-inline-question",
+                      )
+                      : null}
+                  </>}
                   onAdoptResearchResult={(card, cardId) => {
                     const payload = recordValue(
                       card.payload?.adoptPayload,
@@ -2848,7 +2691,7 @@ export function ChannelPage({
                   }}
                   onReplyMessage={(message, threadId) => {
                     setActiveChannelThreadId(threadId);
-                    setReplyTarget(message);
+                    setReplyTarget(message, threadId);
                     window.setTimeout(() => focusComposer(), 0);
                   }}
                   onActiveThreadChange={(threadId) => {
@@ -2861,6 +2704,9 @@ export function ChannelPage({
                   showThreadChips={channelHasMultipleThreads}
                   splitThreadId={channelSplitThreadId}
                 />
+                <ChannelDecisionHistory key={`${selectedChannelId}:${activeChannelThreadId}`}
+                  groups={decisionReceipts.groups} recordCount={decisionReceipts.recordCount} />
+                <ChannelPrdHandoff flow={flow} onDetails={() => setDrawer("prd")} />
               </div>
               {channelHasNewBelow ? (
                 <button className="channel-scroll-latest" type="button" onClick={showLatestChannelMessages}>
@@ -2989,6 +2835,11 @@ export function ChannelPage({
                   </div>
                 ) : null}
                 {composerError ? <div className="notice compact-error channel-composer-error">{composerError}</div> : null}
+                <label className="channel-source-document-toggle">
+                  <input type="checkbox" checked={evaluationSourceDocument}
+                    onChange={(event) => setEvaluationSourceDocument(event.target.checked)} />
+                  Mark as original requirement source
+                </label>
                 <div className="channel-composer-toolbar">
                   <div className="channel-composer-tools">
                     <button className="channel-tool-button" title="Upload attachment" type="button" onClick={() => attachmentInputRef.current?.click()}>
@@ -3052,15 +2903,20 @@ export function ChannelPage({
                   </button>
                 </div>
               </form>
-            </>
-          ) : (
-            renderChannelWorkspace()
-          )}
+          </>
         </main>
 
+        <ChannelDecisionQueue
+          items={decisionQueueItems}
+          mobileOpen={decisionQueueOpen}
+          onCloseMobile={() => setDecisionQueueOpen(false)}
+          onSelect={focusOwnerQuestion}
+          onToggleMobile={() => setDecisionQueueOpen((open) => !open)}
+        />
+
         {drawer ? (
-          <aside className="channel-drawer">
-            <div className="channel-drawer-header">
+          <aside className={`channel-drawer ${drawer === "prd" || drawer === "file" ? "channel-document-drawer" : ""}`}>
+            {drawer !== "prd" && drawer !== "file" ? <div className="channel-drawer-header">
               <div>
                 <h3>{drawerTitles[drawer]}</h3>
                 <span className="muted mono">{selectedChannelId}</span>
@@ -3068,7 +2924,7 @@ export function ChannelPage({
               <button className="channel-tool-button" title="Close drawer" type="button" onClick={() => setDrawer(null)}>
                 <X size={16} />
               </button>
-            </div>
+            </div> : null}
             <div className="channel-drawer-content">
               {renderDrawerContent(drawer)}
             </div>

@@ -25,13 +25,13 @@ def question_dedup_gate_state(
         if isinstance(raw_questions, dict)
         else raw_questions
     )
-    has_open_question = any(
-        isinstance(item, dict)
+    open_questions = [
+        item for item in questions
+        if isinstance(item, dict)
         and str(item.get("thread_id") or "main") == thread_id
         and str(item.get("status") or "") == "open"
-        for item in questions
-    )
-    if not has_open_question:
+    ]
+    if not open_questions:
         return "open"
 
     discussions = current.get("discussions") or {}
@@ -40,6 +40,12 @@ def question_dedup_gate_state(
         session = {}
     phase = str(session.get("state") or "")
     if phase != "phase2_relay":
+        return "open"
+    if (str(session.get("phase_reason") or "") == "consensus_blocked"
+            and all(str(item.get("category") or "") == "blocker"
+                    for item in open_questions)):
+        # Review blockers are already explicit, separate questions. The
+        # phase-3 rollback does not dispatch a phase-2 dedup request.
         return "open"
 
     session_started_at = str(session.get("started_at") or "")

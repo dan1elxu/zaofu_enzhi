@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 from zf.core.task.schema import Task, TaskContract
+from zf.runtime.channel_contract_artifacts import persist_channel_prd
 from zf.runtime.workflow_request_acceptance import (
     bind_task_workflow_inputs,
     inherit_task_acceptance,
 )
+from zf.runtime.workflow_task_input_artifacts import materialize_channel_prd_reader_source
 
 
 def test_inherits_canonical_task_acceptance_when_request_omits_it() -> None:
@@ -77,3 +81,26 @@ def test_channel_prd_lineage_is_inherited_into_workflow_source_refs() -> None:
         "channel_prd_readiness_ref": "channels/ch-prd/prd/r3-readiness.json",
         "channel_prd_readiness_digest": "readiness-sha",
     }
+
+
+def test_channel_prd_reader_source_preserves_canonical_body_and_digest(tmp_path):
+    state = tmp_path / "state"
+    state.mkdir()
+    descriptor = persist_channel_prd(
+        state, channel_id="ch-1", thread_id="main", revision=1,
+        previous_ref="", previous_digest="",
+        body={"title": "报名", "markdown": "# 报名\n\n最多 20 人。\n"},
+        readiness_descriptor={}, created_by="test", source_event_id="source-1",
+    )
+    contract = {"source_ref": descriptor["ref"], "evidence_contract": {
+        "channel_id": "ch-1", "channel_prd_digest": descriptor["sha256"]}}
+    target = materialize_channel_prd_reader_source(
+        state_dir=state, workflow_dir=tmp_path / "project" / "artifacts" / "workflow" / "req-1",
+        input_contract=contract,
+    )
+    assert target.endswith("/artifacts/workflow/req-1/channel-prd-source.md")
+    assert Path(target).read_text(encoding="utf-8") == "# 报名\n\n最多 20 人。\n"
+    assert materialize_channel_prd_reader_source(
+        state_dir=state, workflow_dir=tmp_path / "unused",
+        input_contract={"source_ref": "docs/PRD.md"},
+    ) == ""

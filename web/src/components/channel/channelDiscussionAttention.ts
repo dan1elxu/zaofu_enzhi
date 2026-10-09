@@ -27,14 +27,6 @@ export interface ChannelDiscussionControlPolicy {
   startLabel: "Start discussion" | "Restart discussion";
 }
 
-const STATE_PRIORITY: Record<ChannelDiscussionAttention["state"], number> = {
-  needs_input: 0,
-  blocked: 1,
-  running: 2,
-  ready: 3,
-  done: 4,
-};
-
 function countLabel(count: number, singular: string, plural = `${singular}s`): string {
   return `${count} ${count === 1 ? singular : plural}`;
 }
@@ -43,14 +35,7 @@ export function selectChannelDiscussionAttention(
   detail: ChannelDetail | null | undefined,
   preferredThreadId: string,
 ): ChannelDiscussionAttention | null {
-  const rows = Object.values(detail?.discussion_attention ?? {});
-  if (!rows.length) return null;
-  const preferred = detail?.discussion_attention?.[preferredThreadId];
-  if (preferred && preferred.state !== "done") return preferred;
-  const selected = [...rows].sort((left, right) => (
-    STATE_PRIORITY[left.state] - STATE_PRIORITY[right.state]
-  ))[0] ?? null;
-  return selected?.state !== "done" ? selected : preferred ?? selected;
+  return detail?.discussion_attention?.[preferredThreadId] ?? null;
 }
 
 export function presentChannelDiscussionAttention(
@@ -74,6 +59,19 @@ export function presentChannelDiscussionAttention(
     attentionKind === "question" ? "synthesis" : "consensus"
   );
 
+  if (attention.reason === "member_invitation_pending") {
+    return { label: "等待成员邀请决定", summary: "批准后成员将正式参评；邀请卡位于当前讨论中。",
+      tone: "warning", action: "activity", actionLabel: "", visible: true };
+  }
+  if (attention.reason === "context_pack_rejected") {
+    return { label: "评审来源需要处理", summary: "来源上下文未通过检查，后续评审尚未派发。请查看 Activity 中的具体原因。",
+      tone: "blocked", action: "activity", actionLabel: "查看原因", visible: true };
+  }
+  if (["synthesis_superseded", "synthesis_missing"].includes(attention.reason)) {
+    return { label: "综合尚未完成", summary: attention.reason === "synthesis_superseded"
+      ? "已忽略旧轮次结果，请查看当前轮次的执行情况。" : "当前轮次缺少有效综合结果。",
+      tone: "blocked", action: "restart", actionLabel: "查看阻塞", visible: true };
+  }
   if (attentionKind === "consolidating") {
     if (attention.question_consolidation_status === "blocked") {
       return {

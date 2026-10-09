@@ -166,6 +166,7 @@ class HeadlessBackend(Protocol):
         on_session_id: SessionCallback,
         on_message: MessageCallback | None,
         timeout_s: float,
+        execution_deadline: float | None = None,
         thinking_level: str = "",
         run_id: str = "",
         run_thread_id: str = "",
@@ -432,6 +433,7 @@ class ClaudeHeadlessBackend:
         on_session_id: SessionCallback,
         on_message: MessageCallback | None,
         timeout_s: float,
+        execution_deadline: float | None = None,
         thinking_level: str = "",
         run_id: str = "",
         run_thread_id: str = "",
@@ -473,6 +475,7 @@ class ClaudeHeadlessBackend:
                         process,
                         prompt=prompt,
                         timeout_s=timeout_s,
+                        execution_deadline=execution_deadline,
                         on_session_id=on_session_id,
                         on_message=on_message,
                     )
@@ -511,7 +514,11 @@ class ClaudeHeadlessBackend:
                 messages=parsed.messages,
                 usage=parsed.usage,
                 resumed=started_with_resume,
-                error=f"claude headless timed out after {timeout_s:.0f}s",
+                error=(
+                    "claude headless execution timed out at total deadline"
+                    if execution_deadline is not None and time.monotonic() >= execution_deadline
+                    else f"claude headless timed out after {timeout_s:.0f}s"
+                ),
             )
         error = _tail(stderr)
         ok = (
@@ -724,6 +731,7 @@ class CodexHeadlessBackend:
         on_session_id: SessionCallback,
         on_message: MessageCallback | None,
         timeout_s: float,
+        execution_deadline: float | None = None,
         thinking_level: str = "",
         run_id: str = "",
         run_thread_id: str = "",
@@ -751,6 +759,7 @@ class CodexHeadlessBackend:
             args,
             cwd=cwd,
             timeout_s=timeout_s,
+            execution_deadline=execution_deadline,
             tool_timeout_s=self.tool_timeout_s,
             permission_profile=permission_profile,
             env=_headless_subprocess_env(self._telemetry_env),
@@ -1222,8 +1231,13 @@ class KanbanHeadlessAgent:
             "options, exactly one recommended "
             "option first, and an optional free-form answer. Multi-question Plans "
             "cannot bind an action. Do not request secrets. A plan_request ends the turn and "
-            "must never appear with action_proposal. Do not use a synchronous "
-            "request_user_input call in this headless bridge: the durable answer "
+            "must never appear with action_proposal. "
+            "Bind requirements to the current user message by default. For a multi-turn "
+            "requirement, explicitly select originating_message_event_ids from context "
+            "requirement_source_messages, including only messages that belong to that "
+            "requirement. Prior troubleshooting or recovery instructions are not new "
+            "product requirements merely because they share this conversation. "
+            "Do not use a synchronous request_user_input call in this headless bridge: the durable answer "
             "will arrive as the next turn in the same provider session. Plan is "
             "clarification, not permission or approval, except for the bounded "
             "Channel setup contract below. "
@@ -1283,8 +1297,17 @@ class KanbanHeadlessAgent:
             "two or three options. The recommended option uses mode=propose, "
             "action=create-task, and a flat payload limited to title, objective, "
             "acceptance, acceptance_criteria, scope, explicit_non_goals, "
-            "skills_required, priority, optional task_id, and optional "
+            "skills_required, priority, optional channel_prd_scope, verification, "
+            "verification_tiers, validation, optional task_id, and optional "
             "workflow_plan; priority must be an integer from 1 through 5. When "
+            "the owner requests the complete product, use channel_prd_scope=full_product "
+            "(the default): the canonical PRD supplies behavior, acceptance and verification. "
+            "For an explicitly requested bounded review, verification or rehearsal, use "
+            "channel_prd_scope=approved_task; its objective, acceptance, acceptance_criteria, "
+            "verification and verification_tiers are required and must describe that approved "
+            "Task scope, not the entire product. Use executable verification commands with "
+            "honest producer/evidence paths, not imaginary existing scripts. Same-version "
+            "PRD authority and execution readiness still apply. Ask for missing inputs. When "
             "the owner asks to take this PRD into delivery, include workflow_plan "
             "with two or three choices from the active workflow_route_catalog. "
             "Each executable workflow_plan choice has id, label, description, "
@@ -1308,7 +1331,7 @@ class KanbanHeadlessAgent:
             "effect.mode=continue, not defer, and do not emit action_proposal "
             "in the same turn. scope may contain only raw repo-relative paths "
             "or globs; put all scope prose in objective. The scope must cover "
-            "every mandatory acceptance criterion's implementation plus its "
+            "every mandatory acceptance criterion in the selected Task scope plus its "
             "test, runner/config, and evidence-producer paths, including planned "
             "paths that do not exist yet. Do not bind browser acceptance only to "
             "unit/build files or omit Playwright/evidence paths. task_create Plan is "
@@ -1345,6 +1368,12 @@ class KanbanHeadlessAgent:
             "only a listed Profile with the same template role through "
             "overrides.role_overrides.<template_role>.profile_id; never invent a "
             "Profile, role, skill, provider, prompt, permission, or capability. "
+            "Before proposing setup, summarize the requirement's needed lenses and "
+            "which current template roles cover them; if a lens is missing, make the "
+            "gap and its requirement-based reason explicit. If no catalog Profile can "
+            "cover a required lens, ask for Profile registration instead of inventing "
+            "a role. After an invite is approved, continue the original thread only "
+            "through the controlled discussion-start path. "
             "To disable an optional template role, use only "
             "overrides.role_overrides.<template_role>.enabled=false; never emit "
             "disabled_roles. "
@@ -1364,7 +1393,21 @@ class KanbanHeadlessAgent:
             "fixed configuration, use channel-create-and-start. For a discussion "
             "in an existing Channel, propose channel-discussion-start with "
             "payload.channel_id and payload.objective. Channel is an independent "
-            "collaboration surface, not a Workflow preparation stage. For an "
+            "collaboration surface, not a Workflow preparation stage. A created "
+            "Channel Group must expose both a moderator (the materialized "
+            "leader_member_id) and a default_responder_id; the moderator is the "
+            "only member authorized to propose the downstream Workflow. The "
+            "current_channel_group context, when present, is the read-only roster "
+            "truth. If the requirement needs a role that is not in that roster, "
+            "the moderator may propose channel-invite-member with the exact "
+            "channel_id, member_id, profile_id, channel_role/profile binding from "
+            "channel_profile_catalog, and a reason that cites the current "
+            "requirement. Never invent a role or profile, never bypass the action "
+            "approval gate, and only start/restart discussion after the role invite "
+            "is accepted. For research over external project inputs, preserve the "
+            "paths supplied by the owner in discussion_seed/message and choose the "
+            "researcher role/template; do not treat a filesystem path as a profile "
+            "or runtime capability. For an "
             "existing Task, use subject_type=task_workflow and option effects with "
             "mode=propose, action=workflow-start, and exact payload "
             "{task_id,route_id,objective,config_digest,parameters}; the runtime "
@@ -1759,6 +1802,7 @@ def _stream_claude_process(
     *,
     prompt: str,
     timeout_s: float,
+    execution_deadline: float | None = None,
     on_session_id: SessionCallback,
     on_message: MessageCallback | None,
 ) -> tuple[_ParsedClaudeStream, str, bool]:
@@ -1804,7 +1848,11 @@ def _stream_claude_process(
     stdout_done = False
     timed_out = False
     while True:
-        remaining = deadline - time.monotonic()
+        effective_deadline = (
+            min(deadline, execution_deadline)
+            if execution_deadline is not None else deadline
+        )
+        remaining = effective_deadline - time.monotonic()
         if remaining <= 0:
             timed_out = True
             break
@@ -1826,7 +1874,8 @@ def _stream_claude_process(
         # a wall-clock cap killed that actively-streaming turn at timeout_s and
         # returned status:failed with zero proposal. Reset the deadline on each
         # observed frame so only true silence (no output for timeout_s) trips
-        # the timeout. Runaway protection stays with --max-turns, not here.
+        # the idle timeout. Channel operations additionally supply an absolute
+        # execution_deadline; ordinary Kanban turns keep the idle-only policy.
         deadline = time.monotonic() + timeout_s
 
     if timed_out and process.poll() is None:
@@ -1883,6 +1932,7 @@ class _CodexRpcClient:
         cwd: Path,
         timeout_s: float,
         tool_timeout_s: float,
+        execution_deadline: float | None = None,
         permission_profile: str = "read_only",
         env: dict[str, str] | None = None,
     ) -> None:
@@ -1890,6 +1940,7 @@ class _CodexRpcClient:
         self.cwd = cwd
         self.timeout_s = timeout_s
         self.tool_timeout_s = tool_timeout_s
+        self.execution_deadline = execution_deadline
         self.permission_profile = normalize_permission_profile(permission_profile)
         self.env = dict(env or _headless_subprocess_env())
         self.write_policy = permission_profile_write_policy(self.permission_profile)
@@ -2031,6 +2082,10 @@ class _CodexRpcClient:
             self._stderr_parts = self._stderr_parts[-80:]
 
     def _get_until(self, deadline: float) -> dict[str, Any] | None:
+        if self.execution_deadline is not None:
+            if time.monotonic() >= self.execution_deadline:
+                raise RuntimeError("codex turn timed out at total deadline")
+            deadline = min(deadline, self.execution_deadline)
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             return None

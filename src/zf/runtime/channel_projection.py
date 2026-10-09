@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from zf.runtime.channel_member_proposals import apply_member_proposal_event
+from zf.runtime.channel_synthesis_lock import mark_exhausted_synthesis
+
 from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
@@ -23,8 +26,14 @@ from zf.runtime.channel_contracts import (
     normalize_visibility_profile,
     permission_profile_write_policy,
 )
-from zf.runtime.channel_discussion_attention import project_discussion_attention
+from zf.runtime.channel_discussion_attention import (
+    project_discussion_attention,
+    project_discussion_evaluation_summary,
+)
 from zf.runtime.channel_roles import normalize_role_context_ref
+from zf.runtime.channel_reply_parsing import structured_reply_display_text
+from zf.runtime.channel_reply_stream import CHANNEL_CONTRACT_KEYS
+from zf.runtime.channel_setup_readiness import channel_control_anchor_status
 from zf.runtime.channel_question_graph import (
     normalize_question_payload,
     owner_questionnaire,
@@ -69,6 +78,7 @@ CHANNEL_EVENT_TYPES = {
     "channel.agent.reply.started",
     "channel.agent.reply.completed",
     "channel.agent.reply.failed",
+    "channel.agent.reply.remediation.exhausted",
     "channel.typing.started",
     "channel.typing.stopped",
     "channel.message.stream.started",
@@ -96,6 +106,8 @@ CHANNEL_EVENT_TYPES = {
     "channel.discussion.mode.set",
     "channel.discussion.started",
     "channel.discussion.continued",
+    "channel.member.invitation.proposed",
+    "channel.member.invitation.decided",
     "channel.discussion.phase.changed",
     "channel.discussion.closed",
     "channel.discussion.participant.missed",
@@ -346,6 +358,19 @@ def _message_search_text(message: dict[str, Any]) -> str:
 def _history_result(message: dict[str, Any], terms: list[str]) -> dict[str, Any]:
     refs = message.get("refs") if isinstance(message.get("refs"), dict) else {}
     text = str(message.get("text") or message.get("message") or message.get("summary") or "")
+    display = text
+    if message.get("role") == "assistant" or (
+        not message.get("role") and refs.get("request_id")
+    ):
+        for key in CHANNEL_CONTRACT_KEYS:
+            display = structured_reply_display_text(display, key)
+    excerpt = _history_excerpt(display, terms)
+    # Continue searching the evidence body; only its presentation is compact.
+    # A hit outside the prose must not masquerade as a quotation of that prose.
+    if display != text and any(
+        term in text.casefold() and term not in display.casefold() for term in terms
+    ):
+        excerpt = "匹配内容位于该消息的结构化审查证据中。 " + excerpt
     return {
         "message_id": str(message.get("message_id") or ""),
         "event_id": str(message.get("event_id") or ""),
@@ -354,7 +379,7 @@ def _history_result(message: dict[str, Any], terms: list[str]) -> dict[str, Any]
         "role": str(message.get("role") or ""),
         "source": str(message.get("source") or ""),
         "ts": str(message.get("ts") or ""),
-        "text_excerpt": _history_excerpt(text, terms),
+        "text_excerpt": excerpt,
         "mentions": _string_list(message.get("mentions")),
         "attachment_count": _ref_count(refs, "attachments"),
         "artifact_count": _ref_count(refs, "artifacts") + _ref_count(refs, "artifact_refs"),
@@ -424,6 +449,9 @@ def _build(events: list[tuple[int, ZfEvent]], *, state_dir: Path | None = None) 
                 if isinstance(payload.get("owner_delegates"), list)
                 else channel["owner_delegates"]
             )
+            channel["control_anchor_policy"] = _payload_str(
+                payload, "control_anchor_policy"
+            ) or channel["control_anchor_policy"]
             channel["leader_member_id"] = (
                 _payload_str(payload, "leader_member_id")
                 or channel["leader_member_id"]
@@ -461,6 +489,8 @@ def _build(events: list[tuple[int, ZfEvent]], *, state_dir: Path | None = None) 
             "channel.member.visibility.updated",
         }:
             _apply_member(channel, event, payload)
+        elif event.type.startswith("channel.member.invitation."):
+            apply_member_proposal_event(channel, event, payload)
         elif event.type == "channel.member.add.rejected":
             _apply_member_rejection(channel, event, payload)
         elif event.type == "channel.mention.detected":
@@ -469,6 +499,8 @@ def _build(events: list[tuple[int, ZfEvent]], *, state_dir: Path | None = None) 
             _apply_route_defaulted(channel, event, payload)
         elif event.type == "channel.route.blocked":
             _apply_route_blocked(channel, event, payload)
+        elif event.type == "channel.agent.reply.remediation.exhausted":
+            mark_exhausted_synthesis(channel, event)
         elif event.type.startswith("channel.agent.reply."):
             _apply_reply(channel, event, payload)
         elif event.type.startswith("channel.typing."):
@@ -562,11 +594,13 @@ def _empty_channel(channel_id: str) -> dict[str, Any]:
         "created_by_event": False,
         "owner_actor_ref": "",
         "owner_delegates": [],
+        "control_anchor_policy": "legacy",
         "leader_member_id": "",
         "leader_revision": 0,
         "leader_event_id": "",
         "origin_binding": {},
         "members": {},
+        "member_invitation_proposals": {},
         "messages": {},
         "threads": {},
         "read_state": {},
@@ -766,6 +800,9 @@ def _apply_member(channel: dict[str, Any], event: ZfEvent, payload: dict[str, An
         member["status"] = "active"
     elif event.type == "channel.member.added":
         member["status"] = _payload_str(payload, "status") or "active"
+    elif event.type == "channel.member.invited":
+        member["status"] = "invited"
+        member["last_error"] = ""
     else:
         member["status"] = _payload_str(payload, "status") or member["status"]
 
@@ -862,6 +899,12 @@ def _external_origin(refs: dict[str, Any]) -> dict[str, str]:
 
 
 def _apply_message(channel: dict[str, Any], event: ZfEvent, payload: dict[str, Any]) -> None:
+    refs = payload.get("refs") if isinstance(payload.get("refs"), dict) else {}
+    request = channel.get("reply_requests", {}).get(str(refs.get("request_id") or ""), {})
+    if (payload.get("role") == "assistant" and request and "run_generation" in refs
+            and _payload_int(refs["run_generation"], 1)
+            != _payload_int(request.get("run_generation"), 1)):
+        return
     message_id = _payload_str(payload, "message_id") or event.id
     thread_id = _payload_str(payload, "thread_id") or "main"
     mentions = _string_list(payload.get("mentions"))
@@ -1117,6 +1160,14 @@ def _apply_reply(channel: dict[str, Any], event: ZfEvent, payload: dict[str, Any
     if incoming_generation > current_generation:
         item.pop("started_at", None)
         item.pop("ended_at", None)
+        for key in (
+            "failure_status",
+            "failure_class",
+            "failure_category",
+            "terminal_disposition",
+        ):
+            item.pop(key, None)
+        item["retryable"] = True
     run_id = (
         _payload_str(payload, "run_id")
         or _payload_str(payload, "provider_run_id")
@@ -1160,6 +1211,11 @@ def _apply_reply(channel: dict[str, Any], event: ZfEvent, payload: dict[str, Any
         "provider_run_id": provider_run_id,
         "run_generation": incoming_generation,
         "reason": _payload_str(payload, "reason") or str(item.get("reason") or ""),
+        "failure_status": _payload_str(payload, "failure_status") or str(item.get("failure_status") or ""),
+        "failure_class": _payload_str(payload, "failure_class") or str(item.get("failure_class") or ""),
+        "failure_category": _payload_str(payload, "failure_category") or str(item.get("failure_category") or ""),
+        "retryable": payload.get("retryable") if isinstance(payload.get("retryable"), bool) else item.get("retryable", True),
+        "terminal_disposition": _payload_str(payload, "terminal_disposition") or str(item.get("terminal_disposition") or ""),
         "continuation_count": _payload_int(
             payload.get("continuation_count"),
             _payload_int(item.get("continuation_count"), 0),
@@ -1711,6 +1767,8 @@ def _apply_discussion_started(channel: dict[str, Any], event: ZfEvent, payload: 
         "state": state,
         "trigger": _payload_str(payload, "trigger"),
         "roster": _string_list(payload.get("roster")),
+        "participants": _string_list(payload.get("participants") or payload.get("roster")),
+        "review_roster": _string_list(payload.get("review_roster") or payload.get("roster")),
         "synthesizer": _payload_str(payload, "synthesizer"),
         "requirement_message_id": _payload_str(payload, "requirement_message_id"),
         "started_event_id": event.id,
@@ -1741,6 +1799,11 @@ def _apply_discussion_continued(
         _payload_str(payload, "context_digest")
         or session.get("context_digest", "")
     )
+    session.setdefault("participants", list(session.get("roster") or []))
+    session.setdefault("review_roster", list(session.get("roster") or []))
+    for roster_key in ("participants", "review_roster"):
+        if payload.get(roster_key) is not None:
+            session[roster_key] = _string_list(payload[roster_key])
     if payload.get("roster") is not None:
         session["roster"] = _string_list(payload.get("roster"))
     if _payload_str(payload, "requirement_message_id"):
@@ -1762,6 +1825,7 @@ def _apply_discussion_continued(
     if _payload_str(payload, "next_round_id"):
         session["last_next_round_id"] = _payload_str(payload, "next_round_id")
     session["continued_event_id"] = event.id
+    session["continued_at"] = event.ts
     session["phase_changed_at"] = event.ts
     if str(session.get("state") or "") == "idle":
         session["state"] = "active"
@@ -1890,7 +1954,7 @@ def _apply_question(channel: dict[str, Any], event: ZfEvent, payload: dict[str, 
         normalized, error = normalize_question_payload(
             {**question, **payload},
             question_id=question_id,
-            question=str(question.get("question") or ""),
+            question=str(payload.get("question") or question.get("question") or ""),
             asked_by=str(question.get("asked_by") or event.actor),
             member_ids=channel.get("members", {}).keys(),
         )
@@ -1923,6 +1987,7 @@ def _apply_question(channel: dict[str, Any], event: ZfEvent, payload: dict[str, 
             "assumption",
             "out_of_scope",
             "evidence",
+            "revision_requested",
         }:
             return
         resolved_by = _payload_str(payload, "resolved_by") or event.actor
@@ -1964,6 +2029,20 @@ def _apply_question(channel: dict[str, Any], event: ZfEvent, payload: dict[str, 
                 _question_activity(channel, event, thread_id)
                 return
             question["evidence_refs"] = evidence_refs
+        if resolution == "revision_requested" and (
+            str(question.get("kind") or "") != "revision_request"
+            or event.actor != "channel-discussion"
+        ):
+            channel["rejected_resolutions"].append({
+                "question_id": question_id,
+                "thread_id": thread_id,
+                "event_id": event.id,
+                "actor": event.actor,
+                "reason": "invalid_revision_resolution",
+                "ts": event.ts,
+            })
+            _question_activity(channel, event, thread_id)
+            return
         question["status"] = "resolved"
         question["resolution"] = resolution
         question["resolved_by"] = resolved_by
@@ -2011,6 +2090,7 @@ def _apply_cross_review(
             "dissent": payload.get("dissent") if isinstance(payload.get("dissent"), list) else [],
             "status": "pending",
             "requested_event_id": event.id,
+            "dedup_request_id": _payload_str(payload, "dedup_request_id"),
             "ts": event.ts,
         }))
         return
@@ -2023,6 +2103,9 @@ def _apply_cross_review(
         "result_event_id": event.id,
         "summary": _payload_str(payload, "summary"),
         "answer": _payload_str(payload, "answer"),
+        "outcome": _payload_str(payload, "outcome") or "resolved",
+        "owner_question": _payload_str(payload, "owner_question"),
+        "recommended_answer": _payload_str(payload, "recommended_answer"),
         "reason": _payload_str(payload, "reason"),
         "artifact_ref": _payload_str(payload, "artifact_ref"),
         "artifact_digest": _payload_str(payload, "artifact_digest"),
@@ -2205,6 +2288,7 @@ def _apply_consensus(channel: dict[str, Any], event: ZfEvent, payload: dict[str,
     if event.type == "channel.consensus.blocked":
         item.setdefault("blocked", []).append({
             "member_id": _payload_str(payload, "member_id") or event.actor,
+            "blocker_kind": _payload_str(payload, "blocker_kind") or "owner_decision",
             "blocker_question_id": _payload_str(payload, "blocker_question_id"),
             "blocker_question": _payload_str(payload, "blocker_question"),
             "dissent": _payload_str(payload, "dissent"),
@@ -2352,6 +2436,9 @@ def _apply_contribution(
         "questions_frozen": payload.get("questions_frozen") is True,
         "source_refs": _string_list(payload.get("source_refs")),
         "evidence_refs": _string_list(payload.get("evidence_refs")),
+        "findings": redact_obj(payload.get("findings") if isinstance(payload.get("findings"), list) else []),
+        "contradictions": redact_obj(payload.get("contradictions") if isinstance(payload.get("contradictions"), list) else []),
+        "risks": redact_obj(payload.get("risks") if isinstance(payload.get("risks"), list) else []),
     }
 
 
@@ -2671,6 +2758,11 @@ def _public_channel(
         reply_requests,
         owner_questionnaires,
     )
+    evaluation_summary = project_discussion_evaluation_summary(
+        channel,
+        discussion_attention,
+    )
+    anchor_status = channel_control_anchor_status(channel)
     out = {
         "schema_version": "channel.v1",
         "generated_at": datetime.now(timezone.utc).isoformat(),
@@ -2686,6 +2778,9 @@ def _public_channel(
         "created_by_event": bool(channel["created_by_event"]),
         "owner_actor_ref": channel["owner_actor_ref"],
         "owner_delegates": redact_obj(channel["owner_delegates"]),
+        "control_anchor_policy": channel["control_anchor_policy"],
+        "setup_pending": anchor_status["setup_pending"],
+        "setup_blockers": list(anchor_status["setup_blockers"]),
         "leader_member_id": channel["leader_member_id"],
         "leader_revision": channel["leader_revision"],
         "leader_event_id": channel["leader_event_id"],
@@ -2693,6 +2788,7 @@ def _public_channel(
         "scope": redact_obj(channel["scope"]),
         "members": members,
         "member_count": len(members),
+        "member_invitation_proposals": list(channel["member_invitation_proposals"].values()),
         "threads": sorted(channel["threads"].values(), key=lambda item: item["thread_id"]),
         "read_state": sorted(
             channel["read_state"].values(),
@@ -2757,6 +2853,7 @@ def _public_channel(
         "discussion": channel["discussion"],
         "discussions": channel["discussions"],
         "discussion_attention": discussion_attention,
+        "evaluation_summary": evaluation_summary,
         "open_questions": sorted(
             channel["open_questions"].values(),
             key=lambda item: str(item.get("ts") or ""),
@@ -2881,6 +2978,11 @@ def _compact_reply_request(item: dict[str, Any]) -> dict[str, Any]:
         "status": str(item.get("status") or ""),
         "routing_reason": str(item.get("routing_reason") or ""),
         "reason": str(item.get("reason") or "")[:240],
+        "failure_status": str(item.get("failure_status") or ""),
+        "failure_class": str(item.get("failure_class") or ""),
+        "failure_category": str(item.get("failure_category") or ""),
+        "retryable": bool(item.get("retryable", True)),
+        "terminal_disposition": str(item.get("terminal_disposition") or ""),
         "created_at": str(item.get("created_at") or ""),
         "started_at": str(item.get("started_at") or ""),
         "ended_at": str(item.get("ended_at") or ""),
@@ -3031,6 +3133,7 @@ def _merge_provider_session(base: dict[str, Any], session: dict[str, Any]) -> di
         "run_generation": _payload_int(session.get("run_generation"), _payload_int(out.get("run_generation"), 1)),
         "request_id": str(out.get("request_id") or session.get("request_id") or ""),
         "thread_id": str(out.get("thread_id") or session.get("thread_id") or "main"),
+        "provider_thread_id": str(session.get("thread_id") or ""),
         "message_id": str(out.get("message_id") or session.get("message_id") or ""),
         "target_member_id": str(out.get("target_member_id") or session.get("target_member_id") or ""),
         "member_id": str(out.get("member_id") or session.get("member_id") or ""),

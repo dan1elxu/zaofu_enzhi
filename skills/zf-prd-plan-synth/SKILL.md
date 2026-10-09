@@ -175,6 +175,14 @@ mock-only receipt cannot satisfy a contract that requires the real application,
 browser, provider, or simulation unless the acceptance criterion explicitly
 permits that substitute.
 
+For Docker Playwright rows, preserve the complete runner boundary in the
+canonical command: use `--entrypoint bash -lc` (or another explicitly pinned
+entrypoint) and include `acceptance_ids` on every real-E2E row. Do not emit
+`mcp/playwright:latest node --test ...`; the image's default MCP entrypoint
+will parse `node` as an option and the workflow will fail before the browser
+starts. Keep static/runtime commands in the normal Test Matrix and do not label
+them as real-E2E evidence.
+
 ## Goal Closure Loop
 
 PRD delivery can replan after verify without discarding completed slices. If

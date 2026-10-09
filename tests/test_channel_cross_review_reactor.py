@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -66,6 +67,11 @@ def test_cross_review_request_routes_once_and_completes_with_fake_provider(
     react_channel_cross_review_requested(host, requested)
     react_channel_cross_review_requested(host, requested)
 
+    deadline = time.monotonic() + 3
+    while time.monotonic() < deadline:
+        if any(e.type == "channel.cross_review.completed" for e in log.read_all()):
+            break
+        time.sleep(0.01)
     events = log.read_all()
     messages = [
         event

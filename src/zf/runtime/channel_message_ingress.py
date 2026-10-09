@@ -12,12 +12,18 @@ from zf.core.events.factory import event_log_from_project
 from zf.core.security.redaction import redact_obj
 from zf.core.state.locks import locked_path
 from zf.runtime.channel_adapter import dispatch_pending_replies
+from zf.runtime.channel_dispatch_failure import (
+    fail_pending_channel_replies_after_dispatch_failure,
+)
 from zf.runtime.channel_projection import project_channel
 from zf.runtime.channel_router import (
     detect_channel_mention_tokens,
     resolve_channel_mentions,
     routable_backing_worker_member,
     route_channel_message,
+)
+from zf.runtime.channel_provider_preflight import (
+    normalize_channel_dispatch_policy,
 )
 from zf.runtime.channel_sidecar import channel_message_event_payload
 from zf.runtime.control_actions_helpers import (
@@ -246,6 +252,9 @@ def _post_channel_message_once(
         channel=channel,
         thread_id=thread_id,
         member_id=member_id,
+        actor=service.actor,
+        surface=service.surface,
+        role=role,
         reply_to_message_id=reply_to_message_id,
         refs=source_refs,
     )
@@ -349,7 +358,10 @@ def _post_channel_message_once(
         openclaw_client=service.openclaw_client,
         dispatch_inline=False,
     )
-    if route_result.reply_requests:
+    dispatch_policy = normalize_channel_dispatch_policy(
+        source_refs.get("dispatch_policy")
+    )
+    if route_result.reply_requests and dispatch_policy == "auto":
         dispatch_channel_replies_background(
             state_dir=service.state_dir,
             channel_id=channel_id,
@@ -382,6 +394,12 @@ def _post_channel_message_once(
                 "channel_id": channel_id,
                 "thread_id": thread_id,
                 "message_id": message_id,
+                "dispatch_policy": dispatch_policy,
+                "reply_dispatch": (
+                    "started"
+                    if dispatch_policy == "auto"
+                    else "deferred"
+                ),
             },
         )
     return {
@@ -411,6 +429,10 @@ def _post_channel_message_once(
         "target_count": len(route_result.targets),
         "reply_request_count": len(route_result.reply_requests),
         "queued_count": len(route_result.queued),
+        "dispatch_policy": dispatch_policy,
+        "reply_dispatch": (
+            "started" if dispatch_policy == "auto" else "deferred"
+        ),
         "route": route_result.as_dict(),
     }
 
@@ -600,8 +622,17 @@ def dispatch_channel_replies_background(
     openclaw_client: Any,
     max_dispatch: int,
 ) -> None:
+    candidates = (project_channel(Path(state_dir), channel_id) or {}).get("reply_requests") or []
+    writer = EventWriter(event_log_from_project(state_dir, config=config))
+
+    def fail(exc: Exception) -> None:
+        fail_pending_channel_replies_after_dispatch_failure(
+            state_dir=state_dir, writer=writer, channel_id=channel_id,
+            actor=actor, source=f"{source}:background", candidates=candidates,
+            reason=f"background dispatch crashed: {exc}",
+        )
+
     def run() -> None:
-        writer = EventWriter(event_log_from_project(state_dir, config=config))
         try:
             dispatch_pending_replies(
                 state_dir=state_dir,
@@ -616,23 +647,17 @@ def dispatch_channel_replies_background(
                 openclaw_client=openclaw_client,
             )
         except Exception as exc:
-            writer.emit(
-                "channel.agent.reply.dispatch_failed",
-                actor=actor,
-                correlation_id=channel_id,
-                payload={
-                    "channel_id": channel_id,
-                    "reason": f"background dispatch crashed: {exc}",
-                    "source": f"{source}:background",
-                },
-            )
+            fail(exc)
 
     thread = threading.Thread(
         target=run,
         name=f"zf-channel-dispatch-{channel_id}",
         daemon=True,
     )
-    thread.start()
+    try:
+        thread.start()
+    except RuntimeError as exc:
+        fail(exc)
 
 
 def _validate_ingress_message(
@@ -640,9 +665,17 @@ def _validate_ingress_message(
     channel: dict,
     thread_id: str,
     member_id: str,
+    actor: str,
+    surface: str,
+    role: str,
     reply_to_message_id: str,
     refs: dict,
 ) -> str:
+    if "evaluation_source_document" in refs:
+        owner = str(channel.get("owner_actor_ref") or "")
+        effective_actor = "owner:operator" if surface == "web" and owner == "owner:operator" else actor
+        if refs["evaluation_source_document"] is not True or role != "user" or effective_actor != owner:
+            return "only the Channel Owner may mark an original evaluation source"
     members = [
         item
         for item in channel.get("members") or []

@@ -127,8 +127,27 @@ assert(
   "selected actionable thread wins",
 );
 assert(
-  selectChannelDiscussionAttention(detail, "main")?.thread_id === "feature",
-  "an actionable thread outranks a completed preferred thread",
+  selectChannelDiscussionAttention(detail, "main")?.thread_id === "main",
+  "another thread cannot replace the selected conversation status",
+);
+
+const foldedPreferred = {
+  members: [],
+  workflow_requests: [],
+  discussion_attention: {
+    main: attention("running", { thread_id: "main", owner_question_count: 0 }),
+    "kanban:newloshu": attention("needs_input", {
+      thread_id: "kanban:newloshu",
+      attention_kind: "question",
+      execution_state: "ready",
+      owner_question_count: 2,
+      open_question_count: 2,
+    }),
+  },
+} as unknown as ChannelDetail;
+assert(
+  selectChannelDiscussionAttention(foldedPreferred, "main")?.thread_id === "main",
+  "transport and main threads have independent decision state",
 );
 
 const runningPolicy = channelDiscussionControlPolicy(running, "phase2_relay", true);
@@ -155,3 +174,5 @@ assert(!idlePolicy.restart, "fresh idle discussion does not send restart intent"
 assert(idlePolicy.startLabel === "Start discussion", "idle thread uses start copy");
 
 console.log("channelDiscussionAttention.test.ts OK");
+
+assert(selectChannelDiscussionAttention(detail, "new-thread") === null, "new threads do not inherit another conversation status");

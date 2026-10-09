@@ -334,7 +334,7 @@ class PlanApplyActionsMixin:
             "channel_id": child_channel_id,
             "thread_id": child_thread_id,
             "message_id": f"msg-{request_id}",
-            "message": discussion_seed,
+            "message": origin_message,
             **({"origin_binding": origin_binding} if origin_binding else {}),
             "expected_materialization_digest": str(
                 submit_details.get("materialization_digest") or ""
@@ -356,6 +356,7 @@ class PlanApplyActionsMixin:
                     else {}
                 ),
                 **external_refs,
+                "discussion_seed": discussion_seed,
                 "plan_requirement_event_ids": [
                     str(item)
                     for item in request.get(

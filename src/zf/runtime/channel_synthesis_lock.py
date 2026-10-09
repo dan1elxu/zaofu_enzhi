@@ -45,6 +45,7 @@ def synthesis_request_in_flight(
             "repair_requested",
         }:
             return item
+        return None
     return None
 
 
@@ -71,3 +72,32 @@ def prior_synthesis_questions_are_resolved(
         if isinstance(item, dict)
     }
     return all(question_statuses.get(question_id) == "resolved" for question_id in question_ids)
+
+
+def mark_exhausted_synthesis(channel: dict[str, Any], event: ZfEvent) -> None:
+    """Fold terminal retry exhaustion without rewriting ledger history."""
+    payload = event.payload
+    reply = channel["reply_requests"].get(str(payload.get("request_id") or ""))
+    if not reply or reply.get("status") != "failed":
+        return
+    if int(payload.get("run_generation") or 1) != int(reply.get("run_generation") or 1):
+        return
+    reply["remediation_exhausted_event_id"] = event.id
+    message = channel["messages"].get(str(reply.get("message_id") or ""), {})
+    synthesis_id = (message.get("refs") or {}).get("synthesis_request_id")
+    if not synthesis_id:
+        return
+    for request in channel["synthesis_requests"]:
+        if request.get("request_id") == synthesis_id and request.get("status") in {"requested", "repair_requested"}:
+            request.update(status="failed", recovery_reply_id=reply["request_id"],
+                           reason=str(payload.get("reason") or "reply retries exhausted"), updated_at=event.ts)
+
+
+def retired_synthesis_reply_ids(channel: dict[str, Any], thread_id: str) -> set[str]:
+    """Historic exhausted attempts stay visible but do not block a newer request."""
+    requests = [r for r in channel.get("synthesis_requests", []) if str(r.get("thread_id") or "main") == thread_id]
+    if not requests:
+        return set()
+    latest = requests[-1].get("request_id")
+    return {str(r["recovery_reply_id"]) for r in requests
+            if r.get("request_id") != latest and r.get("recovery_reply_id")}

@@ -9,6 +9,7 @@ from zf.core.events import EventWriter
 from zf.core.events.log import EventLog
 from zf.runtime.channel_discussion import advance_discussion, relay_depth_of
 from zf.runtime.channel_projection import project_channel
+from zf.runtime.channel_question_gate import question_dedup_gate_state
 from zf.runtime.channel_router import route_channel_message
 
 
@@ -604,6 +605,8 @@ def test_consensus_blocked_reopens_phase2(tmp_path: Path) -> None:
     assert detail["discussions"]["main"]["state"] == "phase2_relay"
     questions = {q["question_id"]: q for q in detail["open_questions"]}
     assert questions["q-blocker"]["status"] == "open"
+    assert question_dedup_gate_state(detail, thread_id="main") == "open"
+    assert detail["discussion_attention"]["main"]["owner_question_count"] == 1
 
     # tick again: the blocker must not be reopened twice
     advance_discussion(state_dir, writer, channel_id=CH, thread_id="main")
@@ -611,6 +614,167 @@ def test_consensus_blocked_reopens_phase2(tmp_path: Path) -> None:
               if e.type == "channel.question.opened"
               and e.payload.get("question_id") == "q-blocker"]
     assert len(opened) == 1
+
+
+def test_artifact_revision_review_restarts_synthesis_without_owner_input(
+    tmp_path: Path,
+) -> None:
+    state_dir, writer = _run_to_phase3(tmp_path)
+    _consensus(writer, "proposed", "pm-1",
+               artifact_ref="prd/r1.json", proposed_by="pm-1")
+    _consensus(
+        writer, "blocked", "critic-1", member_id="critic-1",
+        blocker_kind="revision_request", blocker_question_id="q-revise",
+        blocker_question="Split the source coverage into atomic cases.",
+    )
+
+    advance_discussion(state_dir, writer, channel_id=CH, thread_id="main")
+    detail = project_channel(state_dir, CH)
+    question = next(q for q in detail["open_questions"] if q["question_id"] == "q-revise")
+    assert question["kind"] == "revision_request"
+    assert question["status"] == "resolved"
+    assert question["resolution"] == "revision_requested"
+    assert detail["discussion_attention"]["main"]["owner_question_count"] == 0
+    assert detail["discussions"]["main"]["state"] == "phase2_relay"
+
+    advance_discussion(state_dir, writer, channel_id=CH, thread_id="main")
+    assert len([
+        event for event in EventLog(state_dir / "events.jsonl").read_all()
+        if event.type == "channel.synthesis.requested"
+    ]) == 2
+
+
+def test_artifact_revision_waits_for_every_review_before_rework(
+    tmp_path: Path,
+) -> None:
+    state_dir, writer = _run_to_phase3(tmp_path)
+    _consensus(writer, "proposed", "pm-1", artifact_ref="prd/r1.json",
+               proposed_by="pm-1", required_signers=["pm-1", "arch-1", "critic-1"])
+    _consensus(
+        writer, "blocked", "critic-1", member_id="critic-1",
+        blocker_kind="revision_request", blocker_question_id="q-revise",
+        blocker_question="Add one missing acceptance case.",
+    )
+    advance_discussion(state_dir, writer, channel_id=CH, thread_id="main")
+    advance_discussion(state_dir, writer, channel_id=CH, thread_id="main")
+    assert len([
+        event for event in EventLog(state_dir / "events.jsonl").read_all()
+        if event.type == "channel.synthesis.requested"
+    ]) == 1
+
+    _consensus(writer, "signed", "pm-1", member_id="pm-1")
+    _consensus(writer, "signed", "arch-1", member_id="arch-1")
+    advance_discussion(state_dir, writer, channel_id=CH, thread_id="main")
+    assert len([
+        event for event in EventLog(state_dir / "events.jsonl").read_all()
+        if event.type == "channel.synthesis.requested"
+    ]) == 2
+
+
+def test_only_discussion_runtime_can_acknowledge_revision_request(
+    tmp_path: Path,
+) -> None:
+    state_dir, writer = _setup_trio(tmp_path)
+    writer.emit(
+        "channel.question.opened", actor="critic-1", correlation_id=CH,
+        payload={"channel_id": CH, "thread_id": "main",
+                 "question_id": "q-revise", "question": "Correct the draft.",
+                 "kind": "revision_request", "target_member_id": "pm-1"},
+    )
+    writer.emit(
+        "channel.question.resolved", actor="critic-1", correlation_id=CH,
+        payload={"channel_id": CH, "thread_id": "main",
+                 "question_id": "q-revise", "resolution": "revision_requested",
+                 "resolved_by": "critic-1", "answer": "Correct the draft."},
+    )
+    detail = project_channel(state_dir, CH)
+    question = next(q for q in detail["open_questions"] if q["question_id"] == "q-revise")
+    assert question["status"] == "open"
+    assert detail["rejected_resolutions"][-1]["reason"] == "invalid_revision_resolution"
+
+
+def test_artifact_revision_rework_stalls_after_bounded_attempts(
+    tmp_path: Path,
+) -> None:
+    state_dir, writer = _run_to_phase3(tmp_path)
+    writer.emit(
+        "channel.question.opened", actor="channel-discussion", correlation_id=CH,
+        payload={"channel_id": CH, "thread_id": "main", "question_id": "q-prev",
+                 "question": "Revise the draft.", "kind": "revision_request",
+                 "target_member_id": "pm-1"},
+    )
+    writer.emit(
+        "channel.question.resolved", actor="channel-discussion", correlation_id=CH,
+        payload={"channel_id": CH, "thread_id": "main", "question_id": "q-prev",
+                 "resolution": "revision_requested", "resolved_by": "channel-discussion",
+                 "answer": "Revise the draft."},
+    )
+    for request_id in ("second", "third", "fourth"):
+        writer.emit(
+            "channel.synthesis.requested", actor="channel-discussion",
+            correlation_id=CH,
+            payload={"channel_id": CH, "thread_id": "main",
+                     "request_id": request_id, "target_member_id": "pm-1"},
+        )
+    _consensus(writer, "proposed", "pm-1",
+               artifact_ref="prd/r3.json", proposed_by="pm-1")
+    _consensus(
+        writer, "blocked", "critic-1", member_id="critic-1",
+        blocker_kind="revision_request", blocker_question_id="q-revise",
+        blocker_question="Still missing atomic acceptance cases.",
+    )
+
+    advance_discussion(state_dir, writer, channel_id=CH, thread_id="main")
+    advance_discussion(state_dir, writer, channel_id=CH, thread_id="main")
+    detail = project_channel(state_dir, CH)
+    assert detail["discussions"]["main"]["last_outcome"] == "stalled"
+    question = next(q for q in detail["open_questions"] if q["question_id"] == "q-revise")
+    assert question["resolution"] == "revision_requested"
+    closed = [
+        event for event in EventLog(state_dir / "events.jsonl").read_all()
+        if event.type == "channel.discussion.closed"
+    ]
+    assert closed[-1].payload["stalled_phase"] == "automatic_revision_limit"
+
+
+def test_legacy_owner_answered_revisions_do_not_consume_auto_retry_budget(
+    tmp_path: Path,
+) -> None:
+    state_dir, writer = _run_to_phase3(tmp_path)
+    for request_id in ("legacy-second", "legacy-third"):
+        writer.emit(
+            "channel.synthesis.requested", actor="channel-discussion",
+            correlation_id=CH,
+            payload={"channel_id": CH, "thread_id": "main",
+                     "request_id": request_id, "target_member_id": "pm-1"},
+        )
+    _consensus(writer, "proposed", "pm-1",
+               artifact_ref="prd/r3.json", proposed_by="pm-1")
+    _consensus(
+        writer, "blocked", "critic-1", member_id="critic-1",
+        blocker_kind="revision_request", blocker_question_id="q-revise",
+        blocker_question="Add the missing acceptance cases.",
+    )
+
+    advance_discussion(state_dir, writer, channel_id=CH, thread_id="main")
+    advance_discussion(state_dir, writer, channel_id=CH, thread_id="main")
+    detail = project_channel(state_dir, CH)
+    assert detail["discussions"]["main"]["state"] == "phase3_synthesis"
+    assert len([
+        event for event in EventLog(state_dir / "events.jsonl").read_all()
+        if event.type == "channel.synthesis.requested"
+    ]) == 4
+
+
+def test_review_blocker_does_not_bypass_dedup_for_other_open_questions() -> None:
+    channel = {
+        "open_questions": [
+            {"question_id": "q-blocker", "thread_id": "main", "status": "open", "category": "blocker"},
+            {"question_id": "q-scope", "thread_id": "main", "status": "open", "category": "scope"},
+        ],
+        "discussions": {"main": {"state": "phase2_relay", "phase_reason": "consensus_blocked"}},
+    }
+    assert question_dedup_gate_state(channel, thread_id="main") == "consolidating"
 
 
 def test_late_consensus_blocker_opens_while_phase2_is_already_active(

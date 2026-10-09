@@ -67,7 +67,7 @@ synthesis。若请求携带上一次 rejection reason，必须基于最新 ledge
 问题依赖已满足、定向质询完成且 owner frontier 已清零后，产出综合 artifact：
 
 1. 在结构化回复中提供完整 PRD 字段。Runtime 会原子写入
-   `.zf/channel-artifacts/<channel>/<synthesis-request>.md` 并绑定 sha256:
+   `<project.state_dir>/channel-artifacts/<channel>/<synthesis-request>.md` 并绑定 sha256:
 
 ```markdown
 # 澄清需求:<标题>
@@ -77,7 +77,8 @@ synthesis。若请求携带上一次 rejection reason，必须基于最新 ledge
 ## Acceptance Criteria(EARS 句式:When <触发>, the <系统> shall <行为>)
 ```
 
-只写台账里有据的内容——**每条 Decision 必须能对应一个 resolved question**,不发明 owner 没说过的决定。
+保留有来源的原文规则；**新增 Owner 裁定必须对应一个 resolved question**，
+不把原文事实冒充新裁定，也不发明 Owner 没说过的决定。
 
 2. 在 channel 回复末尾输出 `channel_synthesis` JSON，包含 `title`、
    `decision`、`summary`、`decisions`、`assumptions`、`out_of_scope`、
@@ -109,3 +110,42 @@ synthesis。若请求携带上一次 rejection reason，必须基于最新 ledge
 Runtime 只把你的结构化综合绑定为你自己的 proposer 签名，并向当前 roster 其余
 角色派发 artifact-bound review。所有角色签收且 Owner 确认后 kernel 才关闭讨论。
 Task 创建和 Workflow 点火仍需 owner 单独发起。
+
+## 完整 PRD 与可追溯评估
+
+`summary` 是摘要，完整产品说明必须写入 `prd_markdown`，两者不能互相替代。
+长篇既有 PRD 可以改用 `prd_composition`：绑定当前完整来源的 message id/digest，
+以唯一的起止原文锚点选取完整正文，以互不重叠、唯一精确匹配的 `old`/`new` 修改
+条款，在 `appendix_markdown` 补入决策、测试假设、异议处理和验收。Runtime 展开为
+完整 Markdown 后沿同一合同落盘和复审，不把来源路径当作正文。两种输入只能选一种。
+这次 synthesis 就须交付完整 PRD；不能只给摘要并建议后续 Workflow 再编制。
+先从实际源文档生成需求清单，保留范围、主流程、异常流程、权限、数据约束、状态变化、
+非功能要求和可执行验收；按项目取舍，不套用固定条数或固定产品功能表。
+`requirement_coverage` 每项包含唯一 `id`、`source_refs`、正文 `section`、
+`acceptance_ids` 和 `status: covered|deferred|gap`；covered 必须指向声明过的验收 ID，
+其他状态提供具体 `reason`，不得将未覆盖项静默删除。
+`decision_log` 逐项记录问题/决定、依据、理由、异议及处置；没有新决定可为空。
+这些映射与完整正文共同进入 canonical PRD、同版审查和下载文件。
+
+## 简洁正文与权威目录
+
+完整不要求重复抄写。同一条验收、验证命令、来源映射和新增决定只在结构化字段中
+定义一次，使用稳定 ID。Runtime 会将这些字段完整导出为 Markdown 目录；
+`prd_markdown` 负责目标、产品行为、状态与异常、范围、假设和风险解释，并以 ID
+引用对应验收和命令，不再附整份合同 JSON、重复目录或重复命令清单。
+不能只写摘要或裸 ID：正文仍应让读者理解行为和边界，目录给出具体验收及证据方法。
+保留原始需求的必要条款，已有长篇来源可按 composition 方法保留；不以固定字数删需求。
+新 Owner 决定进入 decision_log；原文既定事实按来源覆盖引用，不重复包装成新裁定。
+签收进展、审批和演练执行记录归 readiness 或后续运行证据，不重复塞进产品正文。
+
+准确性靠原文对照，完整性靠动态清单逐项核验，一致性靠交叉质询与反例，角色覆盖靠
+职责与缺口判断，可实施性靠可执行验收。不得凭 digest 齐全或自评分宣布高质量。
+如果真正的产品选择未定，明确 needs_owner；不要把未来审批、测试执行结果或尚未产出的
+artifact 当成待澄清产品问题。已合并问题只表示去重，不表示已有答案。
+最终必审名单包含获准加入的 reviewer；定向续轮只缩小本轮派发对象，不能缩小必审范围。
+
+来源消费声明可使用 `source_attestation` 代替三组 `consumed_*` 名单：提供确切
+`context_pack_id`、`context_pack_sha256` 和 `all_required_sources_read: true`。
+只有确实审阅了当前完整 pack 的全部必需来源、贡献和已完成审查时才可声明 true；
+三组名单须省略。Runtime 核验 immutable pack 摘要后展开原有来源引用与摘要，再走
+现有来源覆盖校验。该声明和逐个回填摘要同样只是作者阅读声明，不是理解或质量证明。

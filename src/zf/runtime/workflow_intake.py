@@ -31,6 +31,7 @@ from zf.runtime.workflow_origin import (
 )
 from zf.runtime.workflow_task_input_artifacts import (
     dedupe_artifact_refs,
+    materialize_channel_prd_reader_source,
     materialize_task_workflow_input,
 )
 
@@ -152,6 +153,15 @@ def build_flow_intake(
         input_contract=task_input_contract or {},
     )
     normalized_source_refs = task_input.source_refs
+    if config is not None and task_input_contract:
+        reader_source = materialize_channel_prd_reader_source(
+            state_dir=_state_dir_for_config(project_root / "zf.yaml", config),
+            workflow_dir=workflow_dir, input_contract=task_input_contract,
+        )
+        if reader_source:
+            source_ref = reader_source
+            source_text = _read_text_ref(source_ref)
+            normalized_source_refs["source_ref"] = source_ref
     intake_payload = {
         "schema_version": "workflow.intake.v1",
         "request_id": request_id,

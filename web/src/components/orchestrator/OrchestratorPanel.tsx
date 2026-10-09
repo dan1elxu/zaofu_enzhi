@@ -1196,7 +1196,6 @@ export function OrchestratorPanel({
           || item.thread_key
           || headlessThreadKey,
         run_id: textValue(item.payload.run_id) || item.turn_id || undefined,
-        backend: textValue(item.payload.backend) || operatorBackend,
         proposal_event_id: item.proposal_event_id,
         source: textValue(item.payload.source) || "kanban-agent-pending-proposal",
       }));

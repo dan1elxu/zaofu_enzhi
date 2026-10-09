@@ -27,6 +27,11 @@ from zf.runtime.sidecar_refs import hydrate_sidecar_ref
 class _ActivationTransport:
     def __init__(self) -> None:
         self.alive: set[str] = {"controller"}
+        self.terminated: list[str] = []
+
+    def terminate(self, role_name: str) -> None:
+        self.alive.discard(role_name)
+        self.terminated.append(role_name)
 
     def is_alive(self, role_name: str) -> bool:
         return role_name in self.alive
@@ -118,6 +123,47 @@ def _payload() -> dict[str, str]:
         "effective_config_digest": "a" * 64,
         "run_contract_digest": "b" * 64,
     }
+
+
+@pytest.mark.parametrize("shared", [False, True])
+def test_cancel_during_spawn_stops_remaining_roles_and_preserves_shared_roles(tmp_path, monkeypatch, shared):
+    orchestrator, transport, coordinator = _orchestrator(tmp_path)
+    if shared:
+        orchestrator.event_writer.append(ZfEvent(
+            type="flow.roles.activation.applied", payload={
+                **_payload(), "workflow_run_id": "other-run",
+                "activation_id": "other-activation", "role_instance_ids": ["prd-dev"],
+            }))
+    real_spawn = coordinator.spawn
+
+    def cancel_during_spawn(role, **kwargs):
+        real_spawn(role, **kwargs)
+        orchestrator.event_writer.append(ZfEvent(
+            type="run.cancelled", payload={"run_id": "run-prd-1"},
+            correlation_id="run-prd-1"))
+
+    monkeypatch.setattr(coordinator, "spawn", cancel_during_spawn)
+    with pytest.raises(FlowRoleBindingError, match="terminal"):
+        activate_flow_roles(orchestrator, payload=_payload())
+    assert [item[0] for item in coordinator.spawned] == ["prd-dev"]
+    assert transport.terminated == ([] if shared else ["prd-dev"])
+    assert "controller" in transport.alive
+    applied = [row for row in orchestrator.event_log.read_all()
+               if row.type == "flow.roles.activation.applied"
+               and (row.payload or {}).get("workflow_run_id") == "run-prd-1"]
+    assert not applied
+    if not shared:
+        assert restore_flow_role_activations(orchestrator) == []
+
+
+def test_terminal_run_does_not_start_roles(tmp_path):
+    orchestrator, transport, coordinator = _orchestrator(tmp_path)
+    orchestrator.event_writer.append(ZfEvent(
+        type="run.cancelled", payload={"run_id": "run-prd-1"}, correlation_id="run-prd-1"))
+    with pytest.raises(FlowRoleBindingError, match="terminal"):
+        activate_flow_roles(orchestrator, payload=_payload())
+    assert not coordinator.spawned
+    assert not transport.terminated
 
 
 def test_activation_manifest_spawns_only_confirmed_flow_roles(

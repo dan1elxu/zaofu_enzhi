@@ -210,6 +210,8 @@ def test_contribution_prompt_states_exact_question_enums() -> None:
     assert "never operator or owner:operator" in prompt
     assert "MUST target exactly one real member_id" in prompt
     assert "finding, risk, or explicit assumption/gate" in prompt
+    assert "it does not mean the question list is empty" in prompt
+    assert "questions and freeze=true together" in prompt
 
 
 def test_adaptive_next_round_preserves_lineage_as_a_contribution_turn(
@@ -324,6 +326,18 @@ def test_provider_prompt_bounds_typed_phase_to_its_context_pack() -> None:
     assert "context_pack is the complete authoritative evidence set" in prompt
     assert "Do not inspect the project filesystem" in prompt
     assert "Do not call tools." in prompt
+
+
+def test_question_dedup_prompt_binds_question_update_id_field() -> None:
+    prompt = channel_reply_response_contract(
+        _channel(),
+        {"thread_id": "main", "target_member_id": "synthesizer"},
+        {"refs": {"question_dedup_request_id": "dedup-1"}},
+    )
+
+    assert "question_updates is present" in prompt
+    assert "use question_id (not canonical_question_id)" in prompt
+    assert "merged or resolved items" in prompt
 
 
 def test_all_typed_reply_prompts_separate_markdown_from_machine_contract() -> None:
@@ -1705,6 +1719,7 @@ def test_consensus_review_is_digest_bound_and_preserves_blocker(
                 "verdict": "blocked",
                 "summary": "The failure mode is missing.",
                 "artifact_digest": "digest-1",
+                "blocker_kind": "revision_request",
                 "blocker_question": (
                     "What happens when the upstream provider times out?"
                 ),
@@ -1722,6 +1737,7 @@ def test_consensus_review_is_digest_bound_and_preserves_blocker(
     )
     assert blocked.payload["member_id"] == "critic"
     assert blocked.payload["artifact_digest"] == "digest-1"
+    assert blocked.payload["blocker_kind"] == "revision_request"
     assert blocked.payload["dissent"] == "The failure mode is missing."
 
     emit_structured_reply_events(

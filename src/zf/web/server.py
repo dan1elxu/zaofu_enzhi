@@ -109,6 +109,7 @@ from zf.runtime.channel_prd_context import (
     workflow_context_from_payload,
 )
 from zf.runtime.channel_profiles import public_channel_profile_catalog
+from zf.web.kanban_channel_context import kanban_channel_group_context
 from zf.runtime.channel_workflow_authority import (
     bind_task_channel_authority,
     channel_workflow_authority_error,
@@ -168,6 +169,8 @@ from zf.web.headless_agent import (
 )
 from zf.web.headless_turn_observability import (
     HeadlessDeltaEmitter as _HeadlessDeltaEmitter,
+    classify_headless_failure,
+    classify_headless_result,
     kanban_turn_timing_payload as _kanban_turn_timing_payload,
 )
 from zf.web.proposal_extraction import (
@@ -562,7 +565,7 @@ _ACTION_ALIASES = {
     "channel.handoff",
     "channel-discussion-mode",
     "channel.discussion_mode",
-    "channel-owner-report",
+    "channel-owner-report", "channel-prd-evaluate",
     "channel.owner_report.request",
     "channel-owner-report-request",
     "workflow-invoke",
@@ -701,6 +704,14 @@ def create_app(
         state_dir=state_dir,
         project_root=project_root,
         config=config,
+    ))
+    from zf.web.channel_delivery_routes import build_channel_delivery_router
+
+    app.include_router(build_channel_delivery_router(
+        default_project_id=default_project_id,
+        default_state_dir=state_dir,
+        default_config=config,
+        default_project_root=project_root,
     ))
 
     react_dist = _react_dist_dir()
@@ -6066,7 +6077,7 @@ def _web_action(
         "channel-pin-message",
         "channel-handoff",
         "channel-discussion-mode",
-        "channel-owner-report",
+        "channel-owner-report", "channel-prd-evaluate",
         "workflow-invoke",
         "research-start",
         "research-adopt",
@@ -6698,8 +6709,6 @@ def _validate_action_payload(
     if action == "channel-owner-report":
         if not str(payload.get("channel_id") or "").strip():
             return "channel_id is required"
-        if not str(payload.get("owner_id") or "").strip():
-            return "owner_id is required"
     if action == "start-operator-session":
         backend = str(payload.get("backend") or "").strip()
         if backend and backend not in {"deterministic", "codex", "claude", "claude-code"}:
@@ -7458,12 +7467,15 @@ def _run_headless_kanban_agent_turn(
         agent_session_emitter=agent_stream,
         flush_interval_s=stream_flush_interval_s,
     )
-
     channel_prd_context = canonical_channel_prd_context(state_dir)
+    channel_group_context = kanban_channel_group_context(
+        state_dir, channel_id=payload.get("channel_id"),
+        thread_id=thread_key or payload.get("thread_id") or "main")
     context_completed_at = time.monotonic()
     provider_started_at = time.monotonic()
     try:
         from zf.web.observability import create_observed_headless_agent
+        from zf.web.kanban_turn_context import kanban_turn_context
 
         agent = create_observed_headless_agent(
             state_dir=state_dir,
@@ -7477,26 +7489,17 @@ def _run_headless_kanban_agent_turn(
             task_id=task_id or "",
             thread_key=thread_key,
             context={
-                "trace_id": str(
-                    payload.get("trace_id") or user_message.correlation_id or ""
+                **kanban_turn_context(
+                    writer, user_message, payload, requested_action=requested_action,
+                    thread_key=thread_key, turn_id=turn_id, run_thread_id=run_thread_id,
+                    project_id=project_id, conversation_id=conversation_id,
+                    runtime_snapshot_ref=runtime_snapshot_ref,
                 ),
-                "pdd_id": str(payload.get("pdd_id") or ""),
-                "fanout_id": str(payload.get("fanout_id") or ""),
-                "requested_action": requested_action,
-                "thread_key": thread_key,
-                "turn_id": turn_id,
-                "run_thread_id": run_thread_id,
-                "project_id": project_id,
-                "conversation_id": conversation_id,
-                "operation_kind": (
-                    "channel_turn" if payload.get("channel_id") else "kanban_turn"
-                ),
-                "runtime_snapshot_ref": runtime_snapshot_ref,
                 "workflow_route_catalog": workflow_route_catalog(config),
                 "canonical_channel_prds": channel_prd_context,
                 "channel_profile_catalog": public_channel_profile_catalog(config),
+                "current_channel_group": channel_group_context,
                 "workflow_context": workflow_context,
-                "plan_discussion": payload.get("plan_discussion") or {},
             },
             on_message=delta_emitter.emit,
             thinking_level=thinking_level,
@@ -7507,6 +7510,7 @@ def _run_headless_kanban_agent_turn(
         provider_completed_at = time.monotonic()
         delta_emitter.flush()
         reason = str(exc)
+        turn_outcome = classify_headless_failure(reason)
         agent_stream.fail(reason=reason, status="failed")
         writer.emit(
             "kanban.agent.turn.failed",
@@ -7520,7 +7524,7 @@ def _run_headless_kanban_agent_turn(
                 "project_id": project_id,
                 "conversation_id": conversation_id,
                 "backend": backend,
-                "status": "failed",
+                "status": "failed", **turn_outcome,
                 "reason": reason,
                 "delta_count": delta_emitter.delta_seq,
                 **_kanban_turn_timing_payload(
@@ -7574,6 +7578,7 @@ def _run_headless_kanban_agent_turn(
             "thread_key": thread_key,
         }
     provider_completed_at = time.monotonic()
+    turn_outcome = classify_headless_result(result)
     from zf.web.observability import emit_headless_telemetry_events
 
     emit_headless_telemetry_events(
@@ -7640,7 +7645,7 @@ def _run_headless_kanban_agent_turn(
         "usage": result.usage,
         "status": result.status,
         "error": result.error,
-        "permission_profile": permission_profile,
+        "permission_profile": permission_profile, **turn_outcome,
     }
     try:
         from zf.runtime.agent_session_output import apply_agent_output_contract
@@ -7736,7 +7741,7 @@ def _run_headless_kanban_agent_turn(
                 "permission_profile": permission_profile,
                 "thread_id": result.thread_id,
                 "provider_session_id": result.provider_session_id,
-                "status": result.status,
+                "status": result.status, **turn_outcome,
                 "reason": result.error or result.status,
                 "delta_count": delta_emitter.delta_seq,
                 "reply_event_id": reply_event.id,
@@ -7829,7 +7834,7 @@ def _run_headless_kanban_agent_turn(
             "permission_profile": permission_profile,
             "thread_id": result.thread_id,
             "provider_session_id": result.provider_session_id,
-            "status": result.status,
+            "status": result.status, **turn_outcome,
             "delta_count": delta_emitter.delta_seq,
             "reply_event_id": reply_event.id,
             "has_action_proposal": action_proposal is not None,
@@ -9245,20 +9250,6 @@ async def _operator_control_socket(
             })
     except WebSocketDisconnect:
         return
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 

@@ -13,7 +13,7 @@ from zf.runtime.channel_roles import (
     load_role_definition_excerpt,
     normalize_role_context_ref,
 )
-from zf.runtime.channel_profiles import load_channel_profile_role_definition
+from zf.runtime.channel_profiles import load_channel_profile_role_definition, public_channel_profile_catalog
 from zf.runtime.channel_question_dedup import (
     question_ledger as canonical_question_ledger,
     question_ledger_digest as canonical_question_ledger_digest,
@@ -22,8 +22,9 @@ from zf.runtime.channel_question_graph import (
     owner_questionnaire,
     question_frontier,
 )
-from zf.runtime.channel_semantic_sources import build_semantic_source_bundle
+from zf.runtime.channel_semantic_sources import DEFAULT_MAX_SEMANTIC_SOURCE_CHARS, build_semantic_source_bundle
 from zf.runtime.channel_templates import CHANNEL_TEMPLATES
+from zf.runtime.channel_skill_context import load_channel_skill_guidance
 
 
 def build_channel_context_pack(
@@ -43,6 +44,7 @@ def build_channel_context_pack(
     agent_context: object = None,
     state_dir: Path | None = None,
     project_root: Path | None = None,
+    config: Any = None,
     max_messages: int = 8,
     max_text_chars: int = 4000,
 ) -> dict[str, Any]:
@@ -100,6 +102,14 @@ def build_channel_context_pack(
         or trigger_refs.get("cross_review_request_id")
         or trigger_refs.get("consensus_review_id")
     )
+    skill_guidance = (
+        load_channel_skill_guidance(
+            safe_resolved_skill_refs, state_dir=Path(state_dir),
+            project_root=project_root,
+        )
+        if requires_complete_ledger and state_dir is not None
+        else []
+    )
     selected = _select_messages(
         list((channel or {}).get("messages") or (channel or {}).get("recent_messages") or []),
         thread_id=thread_id,
@@ -148,6 +158,7 @@ def build_channel_context_pack(
         thread_id=thread_id,
         trigger_message_id=trigger_message_id,
         state_dir=state_dir,
+        max_source_chars=getattr(getattr(config, "channel", None), "semantic_source_max_chars", DEFAULT_MAX_SEMANTIC_SOURCE_CHARS),
     )
     context_pack_id = _stable_context_pack_id(
         channel_id,
@@ -189,8 +200,23 @@ def build_channel_context_pack(
         "role_context_ref": safe_role_context_ref,
         "skill_refs": safe_skill_refs,
         "resolved_skill_refs": safe_resolved_skill_refs,
+        "skill_guidance": skill_guidance,
         "skill_metadata": _skill_metadata(safe_skill_refs),
         "collaboration_contract": collaboration_contract,
+        "channel_profile_catalog": public_channel_profile_catalog(config),
+        "current_channel_group": {
+            "channel_id": channel_id,
+            "thread_id": thread_id,
+            "leader_member_id": str((channel or {}).get("leader_member_id") or ""),
+            "leader_revision": int((channel or {}).get("leader_revision") or 1),
+            "members": [{key: member.get(key) for key in (
+                "member_id", "channel_role", "profile_id", "profile_revision", "status", "permissions",
+            )} for member in (channel or {}).get("members") or [] if isinstance(member, dict)],
+            "member_invitation_decisions": [{key: proposal.get(key) for key in (
+                "proposal_id", "thread_id", "member_id", "status", "decided_by", "decision_event_id",
+            )} for proposal in (channel or {}).get("member_invitation_proposals") or []
+                if isinstance(proposal, dict) and str(proposal.get("thread_id") or "main") == thread_id],
+        },
         "agent_context": (
             redact_obj(agent_context) if isinstance(agent_context, dict) else {}
         ),

@@ -220,7 +220,7 @@ async function createTaskAndStartFlow(
     )),
     120_000,
   );
-  await expect(approve).toContainText("Workflow started", {
+  await expect(approve).toContainText("Workflow start requested", {
     timeout: 45_000,
   });
   await page.getByRole("button", { name: "Minimize Kanban Agent" }).click();

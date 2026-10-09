@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from zf.core.events.model import ZfEvent
+from zf.runtime.cancelled_run_workers import stop_cancelled_dispatch
 from zf.runtime.workflow_runtime_types import WorkflowRuntimeDecision
 from zf.runtime.run_scope import event_run_id, run_aliases
 from zf.runtime.workflow_operation import (
@@ -115,8 +116,6 @@ def _close_cancelled_run(
                 task_id = str(child.get("task_id") or "").strip()
                 if task_id:
                     task_ids.add(task_id)
-            if _fanout_terminal(manifest):
-                continue
             _release_fanout_children(
                 runtime,
                 cancellation=cancellation,
@@ -125,6 +124,8 @@ def _close_cancelled_run(
                 reason=reason,
                 events=events,
             )
+            if _fanout_terminal(manifest):
+                continue
             runtime.event_writer.append(ZfEvent(
                 type="fanout.cancelled",
                 actor="zf-cli",
@@ -168,6 +169,12 @@ def _close_cancelled_run(
         request_hash = str(operation.get("request_hash") or "")
         if not operation_id or not request_hash:
             continue
+        stop_cancelled_dispatch(
+            runtime, role_instance=str(operation.get("role_instance") or ""),
+            task_id=str(operation.get("task_id") or ""),
+            dispatch_id=str(operation.get("dispatch_id") or ""),
+            events=events, cancellation=cancellation,
+        )
         service.cancel(
             operation_id=operation_id,
             request_hash=request_hash,
@@ -186,6 +193,12 @@ def _close_cancelled_run(
         task = runtime.task_store.get(task_id)
         if task is None or task.status in {"done", "cancelled"}:
             continue
+        if _task_owned_by_run(task, run_id, aliases):
+            stop_cancelled_dispatch(
+                runtime, role_instance=str(task.assigned_to or ""),
+                task_id=task.id, dispatch_id=str(task.active_dispatch_id or ""),
+                events=events, cancellation=cancellation,
+            )
         runtime.event_writer.append(ZfEvent(
             type="task.status_changed",
             actor="zf-cli",
@@ -239,6 +252,10 @@ def _release_fanout_children(
         run_id = str(child.get("run_id") or "")
         role_instance = str(child.get("role_instance") or "")
         child_id = str(child.get("child_id") or "")
+        stop_cancelled_dispatch(
+            runtime, role_instance=role_instance, task_id=task_id,
+            dispatch_id=run_id, events=events, cancellation=cancellation,
+        )
         if (
             str(child.get("status") or "") == "dispatched"
             and not _dispatch_lost(
@@ -274,19 +291,6 @@ def _release_fanout_children(
                 task_id,
                 assigned_to="",
                 active_dispatch_id="",
-            )
-        if role_instance and (
-            getattr(runtime, "_last_worker_state", {}).get(role_instance)
-            != "idle"
-            or getattr(runtime, "_last_worker_task_id", {}).get(role_instance)
-            == task_id
-        ):
-            runtime._set_worker_state(
-                role_instance,
-                "idle",
-                reason="cancelled workflow run released fanout child",
-                task_id=task_id,
-                force=True,
             )
 
 

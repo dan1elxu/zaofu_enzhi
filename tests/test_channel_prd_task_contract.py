@@ -3,6 +3,8 @@ from __future__ import annotations
 import hashlib
 from pathlib import Path
 
+import pytest
+
 from zf.core.config.schema import ProjectConfig, ZfConfig
 from zf.core.events import EventLog, EventWriter
 from zf.core.task.contract_validation import validate_task_contract
@@ -381,6 +383,76 @@ def test_ready_channel_prd_compiles_strict_workflow_parent_contract(
     assert snapshot["required_source_outputs"] == ["tests/test_strict_json.py"]
 
 
+
+def test_approved_task_plan_preserves_local_scope_through_controlled_creation(tmp_path):
+    from zf.web.channel_task_plan import normalize_channel_task_submit_payload
+
+    state, writer, service, authority = _ready_prd_fixture(tmp_path, implementation_start=True)
+    payload, details, error = normalize_channel_task_submit_payload({
+        "task_id": "TASK-CHANNEL-PRD", "title": "验证取消收据",
+        "objective": "只验证 Workflow 取消后不再派发", "acceptance": "取得取消收据且无取消后的派发",
+        "acceptance_criteria": ["取消后无派发"], "channel_prd_scope": "approved_task",
+        "verification": "python -m pytest tests/test_cancel.py -q",
+        "verification_tiers": ["runtime"], "scope": ["tests/test_cancel.py"],
+        "explicit_non_goals": ["不交付完整产品"], "channel_authority": authority,
+    })
+    assert not error
+    result = _execute(service, writer, "create-task", payload)
+    assert result["ok"], result
+    task = TaskStore(state / "kanban.json").get("TASK-CHANNEL-PRD")
+    assert task.contract.behavior == "只验证 Workflow 取消后不再派发"
+    assert task.contract.acceptance == "取得取消收据且无取消后的派发"
+    assert task.contract.acceptance_criteria == ["取消后无派发"]
+    assert task.contract.verification == "python -m pytest tests/test_cancel.py -q"
+    assert task.contract.scope == ["tests/test_cancel.py"]
+    assert task.contract.explicit_non_goals == ["不交付完整产品"]
+    assert task.contract.evidence_contract["channel_prd_binding_scope"] == "approved_task"
+    assert task.contract.evidence_contract["implementation_start"] is True
+    assert task.contract.product_contract_ref == authority["source_ref"]
+    assert task.contract.source_revision == "1"
+    assert details["channel_prd_scope"] == "approved_task"
+    assert validate_task_contract(task, config=service.config, project_root=tmp_path) == []
+    snapshot = build_task_contract_snapshot(
+        task, workflow_run_id="cancel-rehearsal", task_map_generation_id="generation-1",
+        base_commit="abc123", task_ref="tasks/TASK-CHANNEL-PRD.json")
+    assert snapshot["verification_commands"][0]["command"] == task.contract.verification
+    assert [row["statement"] for row in snapshot["acceptance_criteria"]] == ["取消后无派发"]
+
+
+def test_scoped_task_does_not_bypass_execution_readiness(tmp_path):
+    state, writer, service, authority = _ready_prd_fixture(tmp_path, implementation_start=False)
+    payload = _task_payload(authority)
+    payload["contract"].update({
+        "acceptance": "只验证取消", "acceptance_criteria": ["取消后无派发"],
+        "verification": "python -m pytest tests/test_cancel.py -q", "verification_tiers": ["runtime"],
+    })
+    payload["contract"]["evidence_contract"]["channel_prd_binding_scope"] = "approved_task"
+    result = _execute(service, writer, "create-task", payload)
+    assert result["ok"], result
+    task = TaskStore(state / "kanban.json").get("TASK-CHANNEL-PRD")
+    assert task.contract.source_mode == "channel_prd"
+    assert task.contract.evidence_contract["implementation_start"] is False
+    from zf.runtime.channel_readiness import channel_task_execution_authorization_error
+    assert "not workflow execution" in channel_task_execution_authorization_error(task)
+
+
+@pytest.mark.parametrize("field,value", [
+    ("behavior", "   "), ("acceptance", ""), ("verification", "\n"),
+    ("acceptance_criteria", []), ("verification_tiers", ["unknown"]),
+])
+def test_scoped_task_rejects_empty_contract_or_unknown_tiers(tmp_path, field, value):
+    state, writer, service, authority = _ready_prd_fixture(tmp_path, implementation_start=True)
+    payload = _task_payload(authority)
+    payload["contract"].update({
+        "behavior": "验证取消", "acceptance": "取消后无派发", "acceptance_criteria": ["取消后无派发"],
+        "verification": "python -m pytest -q", "verification_tiers": ["runtime"],
+    })
+    payload["contract"]["evidence_contract"]["channel_prd_binding_scope"] = "approved_task"
+    payload["contract"][field] = value
+    result = _execute(service, writer, "create-task", payload)
+    assert not result["ok"]
+    assert TaskStore(state / "kanban.json").get("TASK-CHANNEL-PRD") is None
+
 def test_exact_owner_readiness_risk_acceptance_authorizes_task(
     tmp_path: Path,
 ) -> None:
@@ -420,3 +492,5 @@ def test_channel_synthesis_prompt_requires_readiness_and_verification() -> None:
     assert "summary must describe only durable product behavior" in prompt
     assert "acceptance_ids matching those criterion ids" in prompt
     assert "instead of relying on downstream defaults" in prompt
+    assert "Pending Owner/consensus confirmation is not a product readiness gap" in prompt
+    assert "explicit planning-only restriction" in prompt

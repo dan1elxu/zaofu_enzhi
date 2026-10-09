@@ -15,6 +15,7 @@ from zf.runtime.automation_projection import AUTOMATIONS
 from zf.runtime.channel_contracts import CHANNEL_DISCUSSION_MODES
 from zf.runtime.channel_contracts import normalize_permissions
 from zf.runtime.channel_contracts import validate_channel_member_contract
+from zf.runtime.channel_provider_preflight import normalize_channel_dispatch_policy
 from zf.runtime.operator_intent import validate_operator_intent_payload
 from zf.runtime.research_templates import RESEARCH_TEMPLATES_BY_ID
 import hashlib
@@ -222,12 +223,18 @@ def _string_list(value: object) -> list[str]:
     return []
 
 
-def _synthesis_target_member(channel: dict[str, Any]) -> str:
+def _synthesis_target_member(channel: dict[str, Any], thread_id: str = "main") -> str:
     members = [
         item for item in list(channel.get("members") or [])
         if isinstance(item, dict)
     ]
     discussion = channel.get("discussion") if isinstance(channel.get("discussion"), dict) else {}
+    sessions = channel.get("discussions") or {}
+    session = sessions.get(thread_id) or {}
+    synthesizer_id = str(session.get("synthesizer") or discussion.get("synthesizer") or "")
+    configured = next((m for m in members if m.get("member_id") == synthesizer_id), {})
+    if synthesizer_id and _channel_member_can_receive(configured):
+        return synthesizer_id
     default_member_id = str((discussion or {}).get("default_responder_id") or "").strip()
     if default_member_id:
         default_member = next(
@@ -382,6 +389,12 @@ def validate_shared_action_payload(
             and not attachments
         ):
             return "text or attachment is required"
+        refs = payload.get("refs") if isinstance(payload.get("refs"), dict) else {}
+        if "dispatch_policy" in refs:
+            try:
+                normalize_channel_dispatch_policy(refs.get("dispatch_policy"))
+            except ValueError as exc:
+                return str(exc)
     if action == "channel-create":
         name = _required_text(payload, "name") or _required_text(payload, "channel_name")
         if not name:
@@ -409,6 +422,10 @@ def validate_shared_action_payload(
             or _required_text(payload, "text")
         ):
             return "message or objective is required"
+        try:
+            normalize_channel_dispatch_policy(payload.get("dispatch_policy"))
+        except ValueError as exc:
+            return str(exc)
     if action == "kanban-plan-apply":
         response = payload.get("plan_response")
         if not isinstance(response, dict):
@@ -431,6 +448,10 @@ def validate_shared_action_payload(
             or _required_text(payload, "text")
         ):
             return "message or objective is required"
+        try:
+            normalize_channel_dispatch_policy(payload.get("dispatch_policy"))
+        except ValueError as exc:
+            return str(exc)
     if action == "channel-invite-member":
         if not _required_text(payload, "channel_id"):
             return "channel_id is required"
@@ -608,8 +629,13 @@ def validate_shared_action_payload(
     if action == "channel-owner-report":
         if not _required_text(payload, "channel_id"):
             return "channel_id is required"
-        if not _required_text(payload, "owner_id"):
-            return "owner_id is required"
+    if action == "channel-prd-evaluate":
+        if not _required_text(payload, "channel_id"):
+            return "channel_id is required"
+        if not _required_text(payload, "artifact_ref") or not _required_text(payload, "artifact_digest"):
+            return "artifact_ref and artifact_digest are required"
+        if not isinstance(payload.get("prd_revision"), int) or payload["prd_revision"] < 1:
+            return "prd_revision must be a positive integer"
     if action == "automation-run":
         automation_id = _required_text(payload, "automation_id") or _required_text(payload, "id")
         if not automation_id:

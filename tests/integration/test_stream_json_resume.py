@@ -179,37 +179,44 @@ class TestRealClaudeMultiTurnResume:
     def test_turn_two_sees_turn_one(self, tmp_path):
         from zf.runtime.transport_stream_json import StreamJsonTransport
 
-        session_id = str(uuid.uuid4())
+        registry = RoleSessionRegistry(
+            tmp_path / "role_sessions.yaml", project_root=str(tmp_path),
+        )
+        role = RoleConfig(name="test-role", backend="claude-code", transport="stream-json")
         transport = StreamJsonTransport(
             state_dir=tmp_path,
-            default_model="claude-sonnet-4-5-20250514",
+            registry=registry,
+            cwd=tmp_path,
+            timeout_s=90,
+            max_turns=3,
         )
+        transport.init()
+        transport.spawn(role, argv=["claude"], cwd=tmp_path)
+        try:
+            # A unique marker exists only in turn one's provider context.
+            marker = f"ZAOFU_TEST_{uuid.uuid4().hex[:8]}"
+            briefing = tmp_path / "turn1.md"
+            briefing.write_text("Continuity probe; do not read or write files.")
+            transport.send_task(
+                role.instance_id, briefing,
+                f"Remember this marker: {marker}. Do not use tools. Reply only 'acknowledged'.",
+            )
+            first = transport.poll_events()
+            assert transport.is_alive(role.instance_id), [e.payload for e in first]
+            session_id = registry.get_or_create(role.instance_id)
 
-        # Turn 1: establish a unique fact
-        secret = f"ZAOFU_TEST_{uuid.uuid4().hex[:8]}"
-        briefing = tmp_path / "turn1.md"
-        briefing.write_text(f"Remember this secret: {secret}. Reply with 'acknowledged'.")
-        transport.send_task(
-            "test-role",
-            briefing,
-            f"Remember this secret: {secret}. Reply with only 'acknowledged'.",
-        )
-
-        # Turn 2: ask for the secret back
-        briefing2 = tmp_path / "turn2.md"
-        briefing2.write_text("What was the secret I told you in the previous turn?")
-        transport.send_task(
-            "test-role",
-            briefing2,
-            "What was the secret I told you in the previous turn? Reply with just the secret string.",
-        )
-
-        events = transport.poll_events("test-role")
-        text_events = [
-            e for e in events
-            if e.type == "agent.text" and secret in e.payload.get("content", "")
-        ]
-        assert len(text_events) >= 1, (
-            f"Turn 2 should reference {secret} from turn 1. "
-            f"Got events: {[e.payload for e in events]}"
-        )
+            briefing2 = tmp_path / "turn2.md"
+            briefing2.write_text("Recall the previous turn without tools.")
+            transport.send_task(
+                role.instance_id, briefing2,
+                "What was the marker in the previous turn? Do not use tools. Reply with just the marker.",
+            )
+            events = transport.poll_events()
+            assert registry.get_or_create(role.instance_id) == session_id
+            assert transport.is_alive(role.instance_id), [e.payload for e in events]
+            assert any(
+                e.type == "agent.text" and marker in e.payload.get("text", "")
+                for e in events
+            ), f"Turn 2 did not recall turn 1: {[e.payload for e in events]}"
+        finally:
+            transport.shutdown()

@@ -2176,7 +2176,7 @@ class TestApiChannels:
             actor="web",
             payload={
                 "channel_id": "ch-zaofu",
-                "member_id": "owner:min",
+                "member_id": "web",
                 "member_type": "owner_delegate",
             },
             correlation_id="ch-zaofu",
@@ -2212,7 +2212,7 @@ class TestApiChannels:
             json={
                 "channel_id": "ch-zaofu",
                 "thread_id": "main",
-                "owner_id": "owner:min",
+                "owner_id": "web",
                 "member_id": "boss-agent",
                 "period": "current",
             },
@@ -2224,7 +2224,7 @@ class TestApiChannels:
         assert TaskStore(state_dir / "kanban.json").list_all() == []
         detail = local_client.get("/api/channels/ch-zaofu").json()
         generated = [item for item in detail["owner_reports"] if item["status"] == "generated"][0]
-        assert generated["owner_id"] == "owner:min"
+        assert generated["owner_id"] == "web"
         assert generated["blockers"] == ["waiting on provider binding"]
         assert generated["refs"]["request_event_id"]
         assert {
@@ -2252,7 +2252,7 @@ class TestApiChannels:
             actor="web",
             payload={
                 "channel_id": "ch-zaofu",
-                "member_id": "owner:min",
+                "member_id": "web",
                 "member_type": "owner_delegate",
             },
             correlation_id="ch-zaofu",
@@ -2278,7 +2278,7 @@ class TestApiChannels:
             json={
                 "channel_id": "ch-zaofu",
                 "thread_id": "main",
-                "owner_id": "owner:min",
+                "owner_id": "web",
                 "period": "current",
             },
         )

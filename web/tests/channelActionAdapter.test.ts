@@ -259,3 +259,17 @@ assert(
 );
 
 console.log("channelActionAdapter tests passed");
+
+const riskCalls: Array<Record<string, unknown>> = [];
+const riskAdapter = createChannelActionAdapter({
+  activeProjectId: "risk-project", selectedChannelId: "ch-risk", snapshot: null,
+  channelDetail: { consensus: { main: { prd_revision: 2, readiness_verdict: "needs_multi_lens" } } } as unknown as ChannelDetail,
+  prepareTaskAgent: () => {}, readStoredBackend: () => "", refreshChannelDetail: async () => {},
+  submitAction: async (_action, payload) => { riskCalls.push(payload); return { ok: true } as ActionResponse; },
+});
+await riskAdapter.decideConsensus("confirm", "main", "prd.json", "digest");
+await riskAdapter.decideConsensus("confirm", "main", "prd.json", "digest", "", true);
+await riskAdapter.decideConsensus("block", "main", "prd.json", "digest", "missing evidence", true);
+assert(riskCalls[0].accept_readiness_risk !== true, "ordinary confirmation must not infer risk acceptance");
+assert(riskCalls[1].accept_readiness_risk === true, "explicit confirmation preserves risk choice");
+assert(riskCalls[2].accept_readiness_risk !== true, "blocking never accepts a risk");

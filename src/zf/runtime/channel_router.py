@@ -12,6 +12,7 @@ from zf.core.config.schema import ZfConfig
 from zf.core.events import EventWriter
 from zf.core.events.model import ZfEvent
 from zf.runtime.channel_adapter import dispatch_reply_request
+from zf.runtime.channel_reply_queue import reply_coalescing_key, supersede_queued_replies
 from zf.runtime.channel_contracts import (
     MAX_CHANNEL_PARALLEL_REPLIES,
     active_channel_resolved_skill_refs,
@@ -33,8 +34,9 @@ from zf.runtime.channel_context import (
     context_pack_rejection_reason,
 )
 from zf.runtime.channel_projection import project_channel
+from zf.runtime.channel_route_setup import emit_setup_pending_route_block
 from zf.runtime.channel_route_lock import serialized_channel_route
-from zf.runtime.channel_run_owner import provider_run_fields, provider_run_fields_for_request
+from zf.runtime.channel_run_owner import provider_run_fields
 from zf.runtime.channel_sidecar import (
     channel_context_pack_event_payload,
     hydrate_channel_message_text,
@@ -150,8 +152,14 @@ def route_channel_message(
             message_event=message_event,
         )
         return ChannelRouteResult(skipped=[{"reason": "auto_route_not_allowed"}])
-
     channel = project_channel(Path(state_dir), channel_id) or {}
+    reason = emit_setup_pending_route_block(
+        channel=channel, writer=writer, actor=actor, channel_id=channel_id,
+        thread_id=thread_id, message_id=message_id, source=source,
+        message_event=message_event,
+    )
+    if reason:
+        return ChannelRouteResult(skipped=[{"reason": reason}])
     agent_member_ids = _agent_member_ids(channel)
     relay_decision = None
     if not _auto_route_allowed(
@@ -419,7 +427,7 @@ def route_channel_message(
                 profile_binding=member,
                 agent_context=agent_context,
                 state_dir=Path(state_dir),
-                project_root=project_root,
+                project_root=project_root, config=config,
             )
         except SidecarRefError as exc:
             writer.emit(
@@ -521,12 +529,15 @@ def route_channel_message(
         if not busy and not parallel_queued:
             available_slots -= 1
         request_id = _stable_reply_request_id(channel_id, thread_id, message_id, target_member_id)
+        queue_key = reply_coalescing_key(channel, {"request_id": request_id, "message_id": message_id,
+            "target_member_id": target_member_id, "thread_id": thread_id, "routing_reason": routing_reason})
         if busy:
-            _supersede_queued_replies(
+            supersede_queued_replies(
                 writer,
                 channel=channel,
                 channel_id=channel_id,
                 target_member_id=target_member_id,
+                incoming_key=queue_key,
                 actor=actor,
                 source=source,
                 causation_id=detected.id,
@@ -547,7 +558,7 @@ def route_channel_message(
                 "member_id": sender,
                 "status": "queued" if busy or parallel_queued else "pending",
                 "queue_state": (
-                    "latest_only"
+                    ("ordered" if queue_key[0] == "request" else "latest_only")
                     if busy
                     else "parallel_limit"
                     if parallel_queued
@@ -894,41 +905,6 @@ def _member_busy(channel: dict[str, Any], member_id: str) -> bool:
         if str(item.get("status") or "") in BUSY_REPLY_STATUSES:
             return True
     return False
-
-
-def _supersede_queued_replies(
-    writer: EventWriter,
-    *,
-    channel: dict[str, Any],
-    channel_id: str,
-    target_member_id: str,
-    actor: str,
-    source: str,
-    causation_id: str,
-    task_id: str | None,
-) -> None:
-    for item in channel.get("reply_requests") or []:
-        if str(item.get("target_member_id") or "") != target_member_id:
-            continue
-        if str(item.get("status") or "") != "queued":
-            continue
-        writer.emit(
-            "channel.agent.reply.failed",
-            actor=actor,
-            task_id=task_id,
-            causation_id=causation_id,
-            correlation_id=channel_id,
-            payload={
-                "channel_id": channel_id,
-                "thread_id": str(item.get("thread_id") or "main"),
-                "request_id": str(item.get("request_id") or ""),
-                "message_id": str(item.get("message_id") or ""),
-                "target_member_id": target_member_id,
-                "reason": "superseded by latest queued mention",
-                **provider_run_fields_for_request(channel_id, item),
-                "source": source,
-            },
-        )
 
 
 def _has_duplicate_request(channel: dict[str, Any], message_id: str, target_member_id: str) -> bool:

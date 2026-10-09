@@ -1916,6 +1916,7 @@ export interface ChannelDiscussionAttention {
   running_reply_count: number;
   completed_reply_count: number;
   failed_reply_count: number;
+  context_rejections?: Array<{ context_pack_id: string; target_member_id: string; reason: string }>;
   open_question_count: number;
   owner_question_count: number;
   total_question_count: number;
@@ -1944,6 +1945,7 @@ export interface ChannelSummary {
   attention?: Array<Record<string, unknown>>;
   syntheses?: Array<Record<string, unknown>>;
   synthesis_requests?: Array<Record<string, unknown>>;
+  cross_reviews?: Array<Record<string, unknown>>;
   workflow_requests?: Array<Record<string, unknown>>;
   mentions_detected?: Array<Record<string, unknown>>;
   routes?: Array<Record<string, unknown>>;
@@ -2660,6 +2662,7 @@ export interface WorkspaceProjectsPage {
 }
 
 export interface ChannelDetail extends ChannelSummary {
+  member_invitation_proposals?: Array<Record<string, unknown>>;
   empty?: boolean;
   schema_version?: string;
   generated_at?: string;

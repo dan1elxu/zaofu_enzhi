@@ -1,6 +1,11 @@
 from __future__ import annotations
 
+from tests.channel_wait import wait_for_channel
+
+import json
+
 import time
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -36,6 +41,7 @@ from zf.runtime.kanban_plan_requests import (
 )
 from zf.runtime.orchestrator_reactor import EventReactorMixin
 from zf.web.channel_setup_plan import normalize_channel_setup_submit_payload
+from zf.web.kanban_channel_context import kanban_channel_group_context
 from zf.web.plan_extraction import extract_plan_request
 
 
@@ -218,6 +224,7 @@ def test_prd_template_persists_version_digest_roles_and_discussion(
         for member in members.values()
     )
     assert channel["leader_member_id"] == "product_pm"
+    assert channel["discussion"]["default_responder_id"] == "synthesizer"
     assert "propose_workflow" in members["product_pm"]["permissions"]
     assert all(
         "propose_workflow" not in member["permissions"]
@@ -241,13 +248,48 @@ def test_prd_template_persists_version_digest_roles_and_discussion(
             "overrides": {
                 "backend": "fake",
                 "model": "different-model",
-                "role_overrides": {
-                    "security_reviewer": {"enabled": False},
-                },
+                "role_overrides": {"security_reviewer": {"enabled": False}},
             },
         },
     )
     assert conflict["status"] == "conflict"
+
+
+def test_direct_and_template_creation_share_identity_lock(tmp_path: Path) -> None:
+    _state_dir, log, writer, service = _runtime(tmp_path)
+    barrier = threading.Barrier(2)
+    results: list[dict] = []
+
+    def run(action: str, payload: dict) -> None:
+        barrier.wait()
+        results.append(_execute(service, writer, action, payload))
+
+    threads = [
+        threading.Thread(
+            target=run,
+            args=("channel-create", {"channel_id": "ch-race", "name": "race"}),
+        ),
+        threading.Thread(
+            target=run,
+            args=(
+                "channel-create-from-template",
+                {
+                    "template_id": "quick-change",
+                    "channel_id": "ch-race",
+                    "overrides": {"backend": "fake"},
+                },
+            ),
+        ),
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    created = [event for event in log.read_all() if event.type == "channel.created"]
+    assert len(created) == 1
+    assert len(results) == 2
+    assert {bool(result.get("ok")) for result in results} == {True, False}
 
 
 def test_template_default_uses_synthesis_adaptive_round_policy(
@@ -414,6 +456,10 @@ def test_channel_setup_plan_normalizes_optional_disabled_roles_alias() -> None:
     }
     assert "disabled_roles" not in payload["overrides"]
     assert details["member_count"] == 4
+    assert details["moderator_member_id"] == "product_pm"
+    assert details["leader_member_id"] == "product_pm"
+    assert details["default_responder_id"] == "synthesizer"
+    assert details["workflow_trigger"] == "moderator_propose_workflow"
     _, _, required_error = normalize_channel_setup_submit_payload({
         "template_id": "prd-clarification",
         "mode": "multi_lens",
@@ -526,6 +572,30 @@ def test_all_templates_materialize_every_skill_ref(tmp_path: Path):
                     str(state_dir / "runtime-skills")
                 )
         assert not (tmp_path / "skills").exists()
+
+
+def test_strict_direct_channel_creation_exposes_setup_pending_anchors(
+    tmp_path: Path,
+) -> None:
+    state_dir, _log, writer, service = _runtime(tmp_path)
+    result = _execute(
+        service,
+        writer,
+        "channel-create",
+        {
+            "channel_id": "ch-strict-pending",
+            "name": "Strict pending",
+            "strict_control_anchors": True,
+        },
+    )
+
+    assert result["ok"] is True
+    channel = project_channel(state_dir, "ch-strict-pending")
+    assert channel is not None
+    assert channel["control_anchor_policy"] == "strict"
+    assert channel["setup_pending"] is True
+    assert "missing_moderator" in channel["setup_blockers"]
+    assert "missing_default_responder" in channel["setup_blockers"]
 
 
 def test_template_preflight_rejects_unknown_override_without_partial_channel(
@@ -666,11 +736,27 @@ def test_create_and_start_is_one_action_with_seeded_requirement_and_followup(
     assert result["max_rounds"] == 4
     assert result["mode"] == "multi_lens"
     assert result["engine_mode"] == "fanout_then_synthesis"
+    assert result["leader_member_id"] == "tech_leader"
+    assert result["default_responder_id"] == "tech_leader"
+    assert result["workflow_trigger"] == "moderator_propose_workflow"
     channel = project_channel(state_dir, "ch-auto") or {}
     assert channel["discussion"]["default_responder_id"] == "tech_leader"
     assert channel["discussion"]["mode"] == "multi_lens"
     assert channel["discussion"]["engine_mode"] == "fanout_then_synthesis"
     assert channel["discussions"]["main"]["state"] == "phase1_blind"
+    context = kanban_channel_group_context(
+        state_dir,
+        channel_id="ch-auto",
+        thread_id="main",
+    )
+    assert context["leader_member_id"] == "tech_leader"
+    assert context["default_responder_id"] == "tech_leader"
+    assert context["workflow_trigger"] == "moderator_propose_workflow"
+    assert {member["channel_role"] for member in context["members"]} == {
+        "tech_leader",
+        "dev_reviewer",
+        "qa_analyst",
+    }
     reply_targets = {
         str(event.payload.get("target_member_id") or "")
         for event in log.read_all()
@@ -719,6 +805,101 @@ def test_create_and_start_is_one_action_with_seeded_requirement_and_followup(
     )
     assert followup["ok"] is True
     assert followup["route"]["targets"] == ["tech_leader"]
+
+
+def test_create_and_start_trigger_only_does_not_dispatch_provider(
+    tmp_path: Path,
+):
+    state_dir, log, writer, service = _runtime(tmp_path)
+
+    result = _execute(
+        service,
+        writer,
+        "channel-create-and-start",
+        {
+            "template_id": "quick-change",
+            "channel_id": "ch-trigger-only",
+            "message": "Keep the workflow paused after triggering.",
+            "dispatch_policy": "trigger_only",
+            "overrides": {"backend": "fake"},
+        },
+    )
+
+    assert result["ok"] is True
+    assert result["dispatch_policy"] == "trigger_only"
+    assert result["provider_preflight"]["status"] == "deferred"
+    channel = project_channel(state_dir, "ch-trigger-only") or {}
+    assert channel["reply_requests"]
+    assert all(
+        request["status"] in {"pending", "queued"}
+        for request in channel["reply_requests"]
+    )
+    assert not [
+        event for event in log.read_all()
+        if event.type == "channel.agent.reply.started"
+        and event.payload.get("channel_id") == "ch-trigger-only"
+    ]
+    posted = next(
+        event for event in log.read_all()
+        if event.type == "channel.message.posted"
+        and event.payload.get("channel_id") == "ch-trigger-only"
+    )
+    assert posted.payload["refs"]["dispatch_policy"] == "trigger_only"
+    completion = next(
+        event for event in log.read_all()
+        if event.type == "runtime.action.completed"
+        and event.payload.get("action") == "channel-create-and-start"
+    )
+    assert completion.payload["dispatch_policy"] == "trigger_only"
+
+
+def test_create_and_start_blocks_before_channel_creation_when_provider_preflight_fails(
+    tmp_path: Path,
+    monkeypatch,
+):
+    state_dir, log, writer, service = _runtime(tmp_path)
+    monkeypatch.setattr(
+        "zf.runtime.control_actions_channel_templates.channel_provider_preflight",
+        lambda members, **kwargs: {
+            "schema_version": "channel.provider-preflight.v1",
+            "status": "blocked",
+            "dispatch_policy": kwargs.get("dispatch_policy", "auto"),
+            "backends": ["codex"],
+            "checks": [{
+                "backend": "codex",
+                "status": "blocked",
+                "detail": "authenticate with `codex login`",
+            }],
+            "blockers": ["codex: authenticate with `codex login`"],
+            "reason": "codex: authenticate with `codex login`",
+        },
+    )
+
+    result = _execute(
+        service,
+        writer,
+        "channel-create-and-start",
+        {
+            "template_id": "quick-change",
+            "channel_id": "ch-preflight-blocked",
+            "message": "Do not create a half-started channel.",
+            "overrides": {"backend": "codex"},
+        },
+    )
+
+    assert result["ok"] is False
+    assert result["status"] == "provider_preflight_blocked"
+    assert project_channel(state_dir, "ch-preflight-blocked") is None
+    assert not [
+        event for event in log.read_all()
+        if event.type == "channel.created"
+        and event.payload.get("channel_id") == "ch-preflight-blocked"
+    ]
+    failed = next(
+        event for event in log.read_all()
+        if event.type == "channel.provider.preflight.failed"
+    )
+    assert failed.payload["backends"] == ["codex"]
 
 
 def test_controlled_question_resolution_and_consensus_confirmation(
@@ -1042,7 +1223,8 @@ def test_action_bound_plan_selection_creates_channel_members_and_starts(
         state_dir,
         requirement.payload,
         strict=True,
-    ) == "The migration must preserve Task contract refs and provider session continuity."
+    ) == requirement_seed.payload["message"] + "\n\n" + origin.payload["message"]
+    assert requirement.payload["refs"]["discussion_seed"] == request["discussion_seed"]
     assert requirement.payload["refs"]["plan_requirement_event_ids"] == [
         requirement_seed.id,
         origin.id,
@@ -1369,6 +1551,7 @@ def test_discussion_start_dispatches_participants_and_synthesis_once(
     )
     EventReactorMixin._on_channel_synthesis_requested(host, synthesis_request)
     EventReactorMixin._on_channel_synthesis_requested(host, synthesis_request)
+    wait_for_channel(lambda: any(e.type == "channel.consensus.signed" and e.payload.get("member_id") == "tech_leader" for e in log.read_all()))
 
     events = log.read_all()
     synthesis_messages = [
@@ -1392,20 +1575,15 @@ def test_discussion_start_dispatches_participants_and_synthesis_once(
     artifact = (
         state_dir / syntheses[0].payload["artifact_ref"]
     ).read_text(encoding="utf-8")
-    for heading in (
-        "## Source Requirement",
-        "## Requirement",
-        "## Decisions",
-        "## Assumptions",
-        "## Out of Scope",
-        "## Acceptance Criteria",
-        "## Risks",
-        "## Open Questions",
-        "## Recommended Workflow",
-        "## Provenance",
-    ):
-        assert heading in artifact
-    assert "Review the requested change." in artifact
+    prd = json.loads(artifact)["body"]
+    assert prd["markdown"].startswith("# Deterministic test PRD")
+    assert "Preserve README.md." in prd["markdown"]
+    assert "REQ-MOCK-01" in prd["markdown"]
+    assert "## Provenance" in prd["markdown"]
+    assert synthesis_messages[0].payload["refs"]["prd_document_contract"] == "full.v1"
+    requirement = next(event for event in events if event.type == "channel.message.posted"
+                       and event.payload.get("thread_id") == "review-1")
+    assert f"event:{requirement.id}" in prd["source_refs"]
     consensus = [
         event for event in events
         if event.type == "channel.consensus.proposed"
@@ -1425,6 +1603,7 @@ def test_discussion_start_dispatches_participants_and_synthesis_once(
     )
     react_channel_consensus_proposed(host, consensus[0])
     react_channel_consensus_proposed(host, consensus[0])
+    wait_for_channel(lambda: len([e for e in log.read_all() if e.type == "channel.consensus.signed"]) == 3)
     signed = {
         event.payload.get("member_id")
         for event in log.read_all()
