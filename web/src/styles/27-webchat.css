@@ -1,0 +1,972 @@
+.headless-chat {
+  position: relative;
+}
+
+.webchat-resource-actions,
+.webchat-profile-actions,
+.webchat-attachments,
+.webchat-attachment-chip,
+.webchat-interaction-actions,
+.webchat-export {
+  display: flex;
+  align-items: center;
+}
+
+.webchat-resource-menu {
+  position: relative;
+  display: inline-flex;
+  flex: 0 0 auto;
+}
+
+.webchat-resource-menu > .webchat-composer-icon.active {
+  background: var(--surface-2);
+  color: var(--text);
+}
+
+.webchat-resource-popover {
+  position: absolute;
+  bottom: calc(100% + 9px);
+  left: 0;
+  z-index: 30;
+  display: grid;
+  width: min(286px, calc(100vw - 32px));
+  gap: 2px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--popover);
+  padding: 6px;
+  box-shadow: 0 16px 38px var(--shadow);
+}
+
+.webchat-resource-menu-title {
+  padding: 5px 7px 7px;
+  color: var(--muted-foreground);
+  font-size: var(--text-11);
+  font-weight: 650;
+  text-transform: uppercase;
+}
+
+.webchat-resource-popover > button {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted-foreground);
+  padding: 8px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.webchat-resource-popover > button:hover,
+.webchat-resource-popover > button.active {
+  background: var(--surface-2);
+  color: var(--text);
+}
+
+.webchat-resource-popover > button > span {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+
+.webchat-resource-popover strong,
+.webchat-resource-popover small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.webchat-resource-popover strong {
+  color: var(--text);
+  font-size: var(--text-13);
+  font-weight: 580;
+}
+
+.webchat-resource-popover small {
+  color: var(--muted-foreground);
+  font-size: var(--text-11);
+}
+
+.webchat-resource-popover em {
+  min-width: 20px;
+  border-radius: 8px;
+  background: var(--surface-3);
+  padding: 2px 5px;
+  color: var(--muted-foreground);
+  font-size: var(--text-11);
+  font-style: normal;
+  text-align: center;
+}
+
+.webchat-resource-menu-status {
+  display: grid;
+  gap: 6px;
+  margin-top: 4px;
+  border-top: 1px solid var(--line-soft);
+  padding: 8px 7px 4px;
+  color: var(--muted-foreground);
+  font-size: var(--text-11);
+}
+
+.webchat-resource-menu-status > span {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 6px;
+}
+
+.webchat-resource-menu-status strong {
+  margin-left: auto;
+  color: var(--text-secondary);
+  font-weight: 560;
+}
+
+.webchat-interactions {
+  display: grid;
+  width: var(--headless-lane-width);
+  margin: 0 auto;
+  gap: 8px;
+}
+
+.webchat-interaction-record {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  border-left: 2px solid color-mix(in oklab, var(--brand) 55%, var(--line));
+  padding: 6px 8px;
+  color: var(--muted-foreground);
+}
+
+.webchat-interaction-record > span:nth-child(2) {
+  display: grid;
+  min-width: 0;
+}
+
+.webchat-interaction-record small {
+  font-size: var(--text-10);
+}
+
+.webchat-interaction-record strong {
+  overflow: hidden;
+  color: var(--text);
+  font-size: var(--text-12);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.webchat-interaction-record button,
+.webchat-interaction-panel button,
+.webchat-pending-row button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  min-height: 28px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--text);
+  padding: 4px 8px;
+  font-size: var(--text-12);
+  cursor: pointer;
+}
+
+.webchat-interaction-record button:hover,
+.webchat-interaction-panel button:hover:not(:disabled),
+.webchat-pending-row button:hover:not(:disabled) {
+  border-color: color-mix(in oklab, var(--brand) 45%, var(--line));
+  background: var(--surface-2);
+}
+
+.webchat-interaction-panel button:disabled,
+.webchat-pending-row button:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+.webchat-interaction-panel button.primary,
+.webchat-approval-actions button.primary {
+  border-color: var(--brand);
+  background: var(--brand);
+  color: var(--brand-foreground);
+}
+
+.webchat-interaction-panel button.icon {
+  width: 30px;
+  padding: 0;
+}
+
+.webchat-interaction-panel {
+  display: grid;
+  min-width: 0;
+  gap: 9px;
+  color: var(--text);
+}
+
+.webchat-interaction-panel.thread {
+  border: 1px solid color-mix(in oklab, var(--brand) 30%, var(--line));
+  border-radius: 8px;
+  background: var(--card);
+  padding: 10px;
+}
+
+.webchat-interaction-panel.composer {
+  border-top: 1px solid color-mix(in oklab, var(--brand) 24%, var(--line));
+  border-bottom: 1px solid var(--line-soft);
+  padding: 9px 10px 10px;
+}
+
+.webchat-interaction-panel > header {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+}
+
+.webchat-interaction-panel > header > span:nth-child(2) {
+  display: grid;
+  min-width: 0;
+  gap: 1px;
+}
+
+.webchat-interaction-panel > header small {
+  color: var(--muted-foreground);
+  font-size: var(--text-10);
+}
+
+.webchat-interaction-panel > header strong {
+  overflow-wrap: anywhere;
+  font-size: var(--text-13);
+}
+
+.webchat-interaction-panel > header > button {
+  width: 30px;
+  padding: 0;
+  border-color: transparent;
+  background: transparent;
+  color: var(--muted-foreground);
+}
+
+.webchat-interaction-icon {
+  display: inline-flex;
+  color: var(--brand);
+}
+
+.webchat-question-body,
+.webchat-approval-body {
+  display: grid;
+  min-width: 0;
+  gap: 9px;
+}
+
+.webchat-question-progress,
+.webchat-question-progress > span,
+.webchat-question-body footer,
+.webchat-approval-actions {
+  display: flex;
+  align-items: center;
+}
+
+.webchat-question-progress {
+  justify-content: space-between;
+  color: var(--muted-foreground);
+  font-size: var(--text-11);
+}
+
+.webchat-question-progress > span {
+  gap: 3px;
+}
+
+.webchat-question-progress button {
+  width: 18px;
+  min-height: 18px;
+  border: 0;
+  background: transparent;
+  padding: 0;
+}
+
+.webchat-question-progress button > span {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--line);
+}
+
+.webchat-question-progress button.active > span {
+  background: var(--brand);
+}
+
+.webchat-question-copy {
+  display: grid;
+  gap: 3px;
+}
+
+.webchat-question-copy small,
+.webchat-question-copy span {
+  color: var(--muted-foreground);
+  font-size: var(--text-11);
+}
+
+.webchat-question-copy p,
+.webchat-approval-body > p {
+  margin: 0;
+  overflow-wrap: anywhere;
+  font-size: var(--text-13);
+  line-height: var(--leading-body);
+}
+
+.webchat-question-options {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.webchat-question-options > button {
+  min-width: 0;
+  min-height: 42px;
+  align-items: flex-start;
+  justify-content: flex-start;
+  text-align: left;
+}
+
+.webchat-question-options > button.selected {
+  border-color: color-mix(in oklab, var(--brand) 65%, var(--line));
+  background: color-mix(in oklab, var(--brand) 7%, var(--surface));
+  color: var(--brand);
+}
+
+.webchat-question-options > button > span {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+
+.webchat-question-options strong,
+.webchat-question-options small {
+  overflow-wrap: anywhere;
+}
+
+.webchat-question-options strong {
+  color: var(--text);
+  font-size: var(--text-12);
+}
+
+.webchat-question-options small {
+  color: var(--muted-foreground);
+  font-size: var(--text-11);
+}
+
+.webchat-question-body textarea {
+  box-sizing: border-box;
+  width: 100%;
+  min-height: 58px;
+  resize: vertical;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--text);
+  padding: 8px;
+  font: inherit;
+  font-size: var(--text-13);
+}
+
+.webchat-question-body footer {
+  gap: 6px;
+}
+
+.webchat-question-body footer > span {
+  flex: 1;
+}
+
+.webchat-approval-actions {
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
+.webchat-approval-body details {
+  min-width: 0;
+  color: var(--muted-foreground);
+  font-size: var(--text-11);
+}
+
+.webchat-approval-body summary {
+  width: fit-content;
+  cursor: pointer;
+}
+
+.webchat-approval-body pre {
+  max-height: 180px;
+  overflow: auto;
+  border: 1px solid var(--line-soft);
+  border-radius: 6px;
+  background: var(--panel-2);
+  padding: 7px;
+  color: var(--text);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.webchat-interaction-route-note,
+.webchat-interaction-error {
+  border-left: 2px solid var(--warn);
+  padding-left: 8px;
+  color: var(--muted-foreground);
+  font-size: var(--text-12);
+}
+
+.webchat-interaction-error {
+  color: var(--err);
+}
+
+.webchat-pending-controls {
+  display: grid;
+  border-bottom: 1px solid var(--line-soft);
+  padding: 4px 8px;
+}
+
+.webchat-pending-row {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto auto;
+  min-height: 34px;
+  align-items: center;
+  gap: 7px;
+  color: var(--muted-foreground);
+  font-size: var(--text-11);
+}
+
+.webchat-pending-row + .webchat-pending-row {
+  border-top: 1px solid var(--line-soft);
+}
+
+.webchat-pending-icon,
+.webchat-pending-actions {
+  display: inline-flex;
+  align-items: center;
+}
+
+.webchat-pending-icon {
+  color: var(--brand);
+}
+
+.webchat-pending-copy {
+  display: flex;
+  min-width: 0;
+  gap: 6px;
+}
+
+.webchat-pending-copy strong {
+  flex: none;
+  color: var(--text);
+  font-size: var(--text-11);
+}
+
+.webchat-pending-copy > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.webchat-pending-actions {
+  gap: 2px;
+}
+
+.webchat-pending-actions button {
+  width: 26px;
+  min-height: 26px;
+  border-color: transparent;
+  background: transparent;
+  padding: 0;
+  color: var(--muted-foreground);
+}
+
+.webchat-resource-actions button,
+.webchat-resource-actions a,
+.webchat-profile-actions button,
+.webchat-search button,
+.webchat-export,
+.webchat-compact-form button,
+.webchat-compare-row button {
+  min-height: 28px;
+  gap: 5px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--text);
+  padding: 4px 8px;
+  font-size: var(--text-12);
+  text-decoration: none;
+  cursor: pointer;
+}
+
+.webchat-drawer {
+  position: absolute;
+  z-index: 8;
+  top: 83px;
+  right: 0;
+  bottom: 0;
+  display: flex;
+  width: min(560px, 100%);
+  min-height: 0;
+  flex-direction: column;
+  border-left: 1px solid var(--line);
+  background: var(--panel);
+  box-shadow: -12px 0 28px color-mix(in oklab, var(--text) 10%, transparent);
+}
+
+.webchat-drawer-header {
+  display: flex;
+  min-height: 44px;
+  align-items: center;
+  justify-content: space-between;
+  border-bottom: 1px solid var(--line);
+  padding: 6px 10px 6px 14px;
+}
+
+.webchat-drawer-header > span,
+.webchat-resource-title,
+.webchat-why-not,
+.webchat-observed-terminal,
+.webchat-child-artifacts > span,
+.webchat-profile-boundary {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.webchat-drawer-body {
+  display: grid;
+  grid-template-columns: minmax(180px, 0.8fr) minmax(240px, 1.2fr);
+  min-height: 0;
+  flex: 1;
+  overflow: hidden;
+}
+
+.webchat-resource-list,
+.webchat-resource-detail,
+.webchat-conversation-tools,
+.webchat-compact-form,
+.webchat-search-results,
+.webchat-profile-form {
+  min-width: 0;
+}
+
+.webchat-resource-list {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  border-right: 1px solid var(--line);
+  padding: 8px;
+  overflow: auto;
+}
+
+.webchat-resource-list > button {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 2px 7px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text);
+  padding: 7px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.webchat-resource-list > button:hover,
+.webchat-resource-list > button.active {
+  border-color: var(--line);
+  background: var(--surface-2);
+}
+
+.webchat-resource-list > button strong,
+.webchat-resource-list > button small {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.webchat-resource-list > button small {
+  grid-column: 1 / -1;
+  color: var(--muted-foreground);
+  font-size: var(--text-11);
+}
+
+.webchat-resource-detail {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px;
+  overflow: auto;
+}
+
+.webchat-resource-title {
+  justify-content: space-between;
+}
+
+.webchat-visibility,
+.webchat-activity-kind,
+.webchat-capability-list span {
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  color: var(--muted-foreground);
+  padding: 2px 5px;
+  font-size: var(--text-10);
+}
+
+.webchat-visibility.published {
+  border-color: color-mix(in oklab, var(--ok) 45%, var(--line));
+  color: var(--ok);
+}
+
+.webchat-visibility.adopted {
+  border-color: color-mix(in oklab, var(--brand) 45%, var(--line));
+  color: var(--brand);
+}
+
+.webchat-resource-meta {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+}
+
+.webchat-resource-meta div {
+  display: grid;
+  grid-template-columns: 76px minmax(0, 1fr);
+  gap: 6px;
+}
+
+.webchat-resource-meta dt {
+  color: var(--muted-foreground);
+}
+
+.webchat-resource-meta dd {
+  min-width: 0;
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.webchat-resource-actions,
+.webchat-profile-actions,
+.webchat-capability-list {
+  flex-wrap: wrap;
+  gap: 5px;
+}
+
+.webchat-artifact-preview,
+.webchat-profile-diff {
+  min-height: 140px;
+  margin: 0;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--bg);
+  padding: 9px;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.webchat-compare-row,
+.webchat-search,
+.webchat-compact-form {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.webchat-compare-row select,
+.webchat-search input,
+.webchat-profile-form select,
+.webchat-compact-form textarea,
+.webchat-correction textarea {
+  min-width: 0;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--text);
+  padding: 6px 8px;
+}
+
+.webchat-resource-error {
+  color: var(--danger);
+}
+
+.webchat-activity-row {
+  grid-template-columns: auto minmax(0, 1fr) !important;
+}
+
+.webchat-activity-dot {
+  width: 8px;
+  height: 8px;
+  margin-top: 4px;
+  border-radius: 50%;
+  background: var(--muted-foreground);
+}
+
+.webchat-activity-dot.running,
+.webchat-activity-dot.active {
+  background: var(--ok);
+}
+
+.webchat-why-not,
+.webchat-observed-terminal {
+  align-items: flex-start;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 8px;
+  color: var(--muted-foreground);
+}
+
+.webchat-child-artifacts {
+  display: grid;
+  gap: 5px;
+}
+
+.webchat-child-artifacts code {
+  overflow-wrap: anywhere;
+}
+
+.webchat-child-open {
+  align-self: flex-start;
+}
+
+.webchat-child-controls {
+  display: grid;
+  gap: 7px;
+  border-top: 1px solid var(--line);
+  padding-top: 10px;
+}
+
+.webchat-child-controls label {
+  display: grid;
+  gap: 5px;
+  color: var(--muted-foreground);
+  font-size: var(--text-11);
+}
+
+.webchat-child-controls textarea {
+  width: 100%;
+  min-width: 0;
+  resize: vertical;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--text);
+  padding: 7px 8px;
+}
+
+.webchat-child-controls > div {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.webchat-child-control-notice {
+  margin: 0;
+  color: var(--muted-foreground);
+  font-size: var(--text-11);
+}
+
+.webchat-conversation-tools,
+.webchat-compact-form {
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--line);
+}
+
+.webchat-conversation-tools {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.webchat-search {
+  min-width: 0;
+  flex: 1;
+}
+
+.webchat-search input {
+  flex: 1;
+}
+
+.webchat-compact-form textarea {
+  flex: 1;
+  resize: vertical;
+}
+
+.webchat-search-results {
+  display: grid;
+  gap: 8px;
+  padding: 10px 12px;
+  overflow: auto;
+}
+
+.webchat-search-results article {
+  border-bottom: 1px solid var(--line-soft);
+  padding-bottom: 8px;
+}
+
+.webchat-search-results article p {
+  margin: 4px 0 7px;
+  overflow-wrap: anywhere;
+}
+
+.webchat-search-results article > div,
+.webchat-correction > div {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+
+.webchat-search-results button,
+.webchat-correction button {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.webchat-correction {
+  position: absolute;
+  inset: auto 12px 12px;
+  display: grid;
+  gap: 7px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel);
+  padding: 10px;
+  box-shadow: var(--shadow-lg);
+}
+
+.webchat-profile-form {
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+  overflow: auto;
+}
+
+.webchat-profile-form > label {
+  display: grid;
+  gap: 4px;
+}
+
+.webchat-profile-form fieldset {
+  min-width: 0;
+  margin: 0;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+}
+
+.webchat-profile-options {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 5px;
+}
+
+.webchat-profile-options label {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 5px;
+  overflow-wrap: anywhere;
+}
+
+.webchat-attachment-chip button,
+.webchat-composer-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  background: transparent;
+  color: var(--muted-foreground);
+  cursor: pointer;
+}
+
+.webchat-attachments {
+  min-width: 0;
+  flex: 1;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+
+.webchat-composer-icon {
+  width: 30px;
+  height: 30px;
+  border-radius: 6px;
+}
+
+.webchat-composer-icon:hover {
+  background: var(--surface-2);
+  color: var(--text);
+}
+
+.webchat-attachment-chip {
+  min-width: 0;
+  max-width: 180px;
+  gap: 4px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 3px 5px;
+  color: var(--muted-foreground);
+  font-size: var(--text-11);
+}
+
+.webchat-attachment-chip > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+@media (max-width: 720px) {
+  .webchat-interaction-record {
+    grid-template-columns: auto minmax(0, 1fr);
+  }
+
+  .webchat-interaction-record > button {
+    grid-column: 2;
+    justify-self: start;
+  }
+
+  .webchat-question-options {
+    grid-template-columns: 1fr;
+  }
+
+  .webchat-pending-row {
+    grid-template-columns: auto minmax(0, 1fr) auto;
+  }
+
+  .webchat-pending-row > small {
+    display: none;
+  }
+
+  .webchat-drawer {
+    top: 83px;
+    width: 100%;
+    border-left: 0;
+  }
+
+  .webchat-drawer-body {
+    grid-template-columns: 1fr;
+    overflow: auto;
+  }
+
+  .webchat-resource-list {
+    max-height: 34vh;
+    border-right: 0;
+    border-bottom: 1px solid var(--line);
+  }
+
+  .webchat-conversation-tools,
+  .webchat-compact-form {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .webchat-profile-options {
+    grid-template-columns: 1fr;
+  }
+}

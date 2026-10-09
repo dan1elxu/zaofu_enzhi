@@ -37,6 +37,7 @@ import {
   contributionRowLabel,
   presentContribution,
 } from "./contributionPresentation";
+import { isSettledTurn, windowAgentTurns } from "./turnWindow";
 
 interface AgentSessionTimelineProps {
   onPreviewReference?: (item: PreviewItem) => void;
@@ -259,6 +260,12 @@ function ThreadPane({
   showRunProvider: boolean;
   thread: AgentSessionThread;
 }) {
+  const [settledTurnLimit, setSettledTurnLimit] = useState(120);
+  useEffect(() => setSettledTurnLimit(120), [thread.id]);
+  const turnWindow = useMemo(
+    () => windowAgentTurns(thread.turns, settledTurnLimit),
+    [settledTurnLimit, thread.turns],
+  );
   return (
     <section className="agent-session-pane" aria-label={thread.title}>
       {!compact ? (
@@ -269,7 +276,16 @@ function ThreadPane({
         </div>
       ) : null}
       <div className="agent-turn-list">
-        {thread.turns.length ? thread.turns.map((turn) => {
+        {turnWindow.hiddenSettledCount ? (
+          <button
+            className="agent-history-load"
+            type="button"
+            onClick={() => setSettledTurnLimit((current) => current + 120)}
+          >
+            Show earlier completed turns · {turnWindow.hiddenSettledCount}
+          </button>
+        ) : null}
+        {turnWindow.turns.length ? turnWindow.turns.map((turn) => {
           const attachedContributionIds = new Set(
             turn.cards
               .filter((card) => card.kind === "contribution" && turn.runs.some((run) => run.id === card.runId))
@@ -484,14 +500,31 @@ function RunBlock({
     // frontend-stress OBS-1 (2026-07-15): keep only real notices on a completed
     // run; progress placeholders collapse (see notices.ts).
     const notices = completedRunNotices(parts, run.status);
-    // Tool trail is working-state only (operator decision 2026-07-16): live
-    // activity (current tool + "Tool call N" + folded earlier steps) stays
-    // visible while the run works; once the reply lands the trail is dropped
-    // on BOTH chat surfaces — the conversation reads prose-first, and deep
-    // audit lives in trace/events, not the chat bubble.
-    const showTools = runWorking;
-    const tools = showTools ? parts.filter((part) => part.kind !== "thinking" && part.kind !== "status") : [];
+    const tools = parts.filter((part) => part.kind !== "thinking" && part.kind !== "status");
     if (!thinking.length && !tools.length && !notices.length) return null;
+    if (!runWorking) {
+      const activityFailed = [...thinking, ...tools].some((part) => (
+        part.kind === "error" || part.state === "failed"
+      ));
+      const activityCount = thinking.length + tools.length;
+      return (
+        <div className="agent-chat-details settled">
+          {notices.length ? renderPartList(notices, "agent-notice-list") : null}
+          {activityCount ? (
+            <details className={`agent-activity-fold ${activityFailed ? "error" : ""}`.trim()} open={activityFailed || undefined}>
+              <summary>
+                <ChevronRight className="agent-run-detail-chevron" size={14} />
+                <span>{activityFailed ? "Activity needs attention" : `Activity · ${activityCount} ${activityCount === 1 ? "step" : "steps"}`}</span>
+              </summary>
+              <div className="agent-activity-fold-body">
+                {thinking.length ? renderPartList(thinking, "agent-thinking-list") : null}
+                {tools.length ? renderPartList(tools, "agent-process-list", true) : null}
+              </div>
+            </details>
+          ) : null}
+        </div>
+      );
+    }
     return (
       <div className="agent-chat-details">
         {notices.length ? renderPartList(notices, "agent-notice-list") : null}
@@ -870,9 +903,10 @@ function ToolStepsSegment({
   ) : null;
   if (segment.grouped.length === 0) return <>{liveCountLine}{renderParts(segment.standalone)}</>;
   const n = segment.total;
+  const groupedFailed = segment.grouped.some((part) => part.kind === "error" || part.state === "failed");
   return (
     <>
-      <details className="agent-tool-steps">
+      <details className="agent-tool-steps" open={groupedFailed || undefined}>
         <summary>
           <ChevronRight className="agent-run-detail-chevron" size={13} />
           <span>See {n} step{n === 1 ? "" : "s"}</span>
@@ -1284,19 +1318,6 @@ function StackedCards({
       )})}
     </div>
   );
-}
-
-function isSettledTurn(turn: AgentSessionTurn): boolean {
-  const runActive = turn.runs.some((run) => (
-    run.status === "streaming"
-    || run.status === "submitted"
-    || run.status === "queued"
-    || run.status === "waiting_input"
-  ));
-  const cardActive = turn.cards.some((card) => (
-    card.status !== "completed" && card.status !== "stale" && card.status !== "cancelled"
-  ));
-  return !runActive && !cardActive;
 }
 
 function ContributionCard({ card }: { card: AgentSessionCard }) {

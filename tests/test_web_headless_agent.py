@@ -408,7 +408,8 @@ def _fake_codex_user_input_request_script(tmp_path: Path) -> Path:
     script.write_text(
         "\n".join(
             [
-                "import json, sys",
+                "import json, os, sys",
+                "expected_code = int(os.environ.get('FAKE_CODEX_USER_INPUT_ERROR_CODE', '-32001'))",
                 "for line in sys.stdin:",
                 "    if not line.strip():",
                 "        continue",
@@ -417,10 +418,11 @@ def _fake_codex_user_input_request_script(tmp_path: Path) -> Path:
                 "    req_id = msg.get('id')",
                 "    if req_id == 99 and not method:",
                 "        error = msg.get('error', {})",
-                "        assert error.get('code') == -32601, msg",
-                "        assert 'plan_request' in error.get('message', ''), msg",
-                "        print(json.dumps({'jsonrpc':'2.0','method':'item/agentMessage/delta','params':{'delta':'input rejected safely'}}), flush=True)",
-                "        print(json.dumps({'jsonrpc':'2.0','method':'turn/completed','params':{'turn':{'status':'completed'}}}), flush=True)",
+                "        assert error.get('code') == expected_code, msg",
+                "        if expected_code == -32601:",
+                "            assert 'plan_request' in error.get('message', ''), msg",
+                "            print(json.dumps({'jsonrpc':'2.0','method':'item/agentMessage/delta','params':{'delta':'input rejected safely'}}), flush=True)",
+                "            print(json.dumps({'jsonrpc':'2.0','method':'turn/completed','params':{'turn':{'status':'completed'}}}), flush=True)",
                 "    elif req_id and method == 'initialize':",
                 "        print(json.dumps({'jsonrpc':'2.0','id':req_id,'result':{'serverInfo':{'name':'fake-codex'}}}), flush=True)",
                 "    elif method == 'initialized':",
@@ -1147,9 +1149,45 @@ def test_codex_headless_v2_file_change_uses_accept_decline_decision(
     assert result.ok is True
 
 
-def test_codex_headless_rejects_native_user_input_with_protocol_error(
+def test_codex_headless_captures_native_user_input_as_pending_interaction(
     tmp_path: Path,
 ) -> None:
+    script = _fake_codex_user_input_request_script(tmp_path)
+    codex = CodexHeadlessBackend(command=f"{sys.executable} {script}")
+    messages = []
+
+    result = codex.run_turn(
+        prompt="ask for the route",
+        cwd=tmp_path,
+        system_prompt="system",
+        thread_id="zf-thread",
+        provider_session_id="",
+        on_session_id=lambda _: None,
+        on_message=messages.append,
+        timeout_s=5,
+        permission_profile="read_only",
+    )
+
+    assert result.ok is True
+    assert result.status == "waiting_input"
+    assert result.reply == ""
+    assert len(messages) == 1
+    assert messages[0].type == "question"
+    assert messages[0].raw["native_interaction"]["questions"] == [
+        {
+            "id": "route",
+            "question": "Which route?",
+            "options": [{"label": "A"}, {"label": "B"}],
+        }
+    ]
+
+
+def test_codex_headless_legacy_rollout_rejects_native_user_input(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("ZF_KANBAN_WEBCHAT_RUNTIME", "legacy")
+    monkeypatch.setenv("FAKE_CODEX_USER_INPUT_ERROR_CODE", "-32601")
     script = _fake_codex_user_input_request_script(tmp_path)
     codex = CodexHeadlessBackend(command=f"{sys.executable} {script}")
 
@@ -1166,6 +1204,7 @@ def test_codex_headless_rejects_native_user_input_with_protocol_error(
     )
 
     assert result.ok is True
+    assert result.status == "completed"
     assert result.reply == "input rejected safely"
 
 
@@ -2233,7 +2272,8 @@ def test_chat_orchestrator_rejects_combined_plan_and_approve_output(
         },
     )
 
-    assert response.status_code == 200
+    assert response.status_code == 422
+    assert response.json()["status"] == "invalid_interaction_contract"
     reply = response.json()["reply"]
     assert "action_proposal" not in reply
     assert reply["plan_request"]["valid"] is False

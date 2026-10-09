@@ -1,0 +1,87 @@
+[
+  {
+    "id": "legacy-user-1",
+    "type": "user.message",
+    "payload": {
+      "message_id": "message-user-1",
+      "conversation_id": "kanban:fixture",
+      "thread_key": "main"
+    }
+  },
+  {
+    "id": "legacy-reply-1",
+    "type": "kanban.agent.reply",
+    "payload": {
+      "turn_id": "turn-1",
+      "conversation_id": "kanban:fixture",
+      "thread_key": "main",
+      "plan_request": {
+        "request_id": "plan-1",
+        "question": "Choose a workflow"
+      },
+      "action_proposal": {
+        "proposal_id": "proposal-1",
+        "action": "workflow-start"
+      }
+    }
+  },
+  {
+    "id": "legacy-plan-1",
+    "type": "kanban.agent.plan.requested",
+    "payload": {
+      "turn_id": "turn-1",
+      "request_id": "plan-1"
+    }
+  },
+  {
+    "id": "legacy-proposal-1",
+    "type": "kanban.agent.action.proposed",
+    "payload": {
+      "turn_id": "turn-1",
+      "proposal": {
+        "proposal_id": "proposal-1",
+        "action": "workflow-start"
+      }
+    }
+  },
+  {
+    "id": "legacy-receipt-1",
+    "type": "runtime.action.completed",
+    "payload": {
+      "action": "workflow-start",
+      "status": "completed",
+      "reply_event_id": "legacy-reply-1"
+    }
+  },
+  {
+    "id": "legacy-turn-1-done",
+    "type": "kanban.agent.turn.completed",
+    "payload": {
+      "turn_id": "turn-1",
+      "logical_state": "completed",
+      "status": "completed"
+    }
+  },
+  {
+    "id": "legacy-reply-2",
+    "type": "kanban.agent.reply",
+    "payload": {
+      "turn_id": "turn-2",
+      "conversation_id": "kanban:fixture",
+      "thread_key": "main",
+      "plan_request": {
+        "request_id": "plan-2",
+        "question": "Which scope?"
+      }
+    }
+  },
+  {
+    "id": "legacy-turn-2-provider-exit",
+    "type": "kanban.agent.turn.completed",
+    "payload": {
+      "turn_id": "turn-2",
+      "logical_state": "waiting_input",
+      "status": "waiting_input"
+    }
+  }
+]

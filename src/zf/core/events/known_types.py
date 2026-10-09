@@ -429,6 +429,13 @@ KNOWN_EVENT_TYPES: frozenset[str] = frozenset({
     "agent.session.run.failed", "agent.session.run.cancelled",
     "agent.session.part.started", "agent.session.part.delta",
     "agent.session.part.completed", "agent.session.part.failed",
+    # Durable WebChat runtime occurrence ledger. Bodies/current state remain in
+    # sanctioned sidecars and AgentTurnStore; these events carry refs/digests.
+    "agent.session.interaction.answered", "agent.session.queue.recorded",
+    "agent.session.control.recorded", "agent.session.turn.recovery_queued",
+    "agent.session.turn.recovery_failed",
+    "agent.artifact.captured", "agent.artifact.published",
+    "agent.artifact.adopted", "agent.profile.proposed", "agent.profile.applied",
     "provider.permission.snapshot.recorded",
     "provider.permission.snapshot.drift",
     "channel.created", "channel.archived",

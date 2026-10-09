@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+from collections.abc import Callable
 from typing import Any
 
 from zf.core.events.model import ZfEvent
@@ -44,6 +45,7 @@ class HeadlessDeltaEmitter:
         conversation_id: str,
         backend: str,
         agent_session_emitter: AgentSessionStreamEmitter | None = None,
+        commit_callback: Callable[[HeadlessMessage], None] | None = None,
         flush_interval_s: float = 0.15,
     ) -> None:
         self.writer = writer
@@ -56,6 +58,7 @@ class HeadlessDeltaEmitter:
         self.conversation_id = conversation_id
         self.backend = backend
         self.agent_session_emitter = agent_session_emitter
+        self.commit_callback = commit_callback
         self.flush_interval_s = flush_interval_s
         self.delta_seq = 0
         self._pending_text: list[str] = []
@@ -126,6 +129,8 @@ class HeadlessDeltaEmitter:
         # Turn deltas are ephemeral UI transport. The committed reply remains
         # in events.jsonl and is sufficient to rebuild completed history.
         self.delta_seq += 1
+        if self.commit_callback is not None:
+            self.commit_callback(message)
         bus = live_delta_bus_for_writer(self.writer)
         if bus is None:
             return

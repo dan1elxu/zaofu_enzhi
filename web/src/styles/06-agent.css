@@ -359,6 +359,43 @@
   color: var(--muted-foreground);
 }
 
+.headless-chat.welcome .headless-thread {
+  flex: 0 0 clamp(132px, 24%, 180px);
+  min-height: 0;
+  margin-top: auto;
+  padding: 0;
+  overflow: auto;
+}
+
+.headless-chat.welcome .agent-session-empty.inline {
+  min-height: 100%;
+  gap: 9px;
+  justify-content: flex-end;
+  color: var(--text);
+}
+
+.headless-chat.welcome .agent-session-empty.inline > svg {
+  width: 38px;
+  height: 38px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 9px;
+}
+
+.headless-chat.welcome .agent-session-empty.inline > strong {
+  max-width: min(100%, 520px);
+  font-size: 24px;
+  font-weight: 650;
+  line-height: 1.2;
+}
+
+.headless-chat.welcome .agent-session-empty.inline > span {
+  max-width: min(100%, 480px);
+  color: var(--muted-foreground);
+  font-size: var(--text-13);
+  line-height: 1.45;
+}
+
 .headless-chat .agent-session-panes.split .agent-turn-list {
   width: 100%;
   padding-inline: 12px;

@@ -105,7 +105,6 @@ from zf.runtime.hook_registry import project_hook_registry
 from zf.runtime.kanban_agent_summary import project_kanban_agent_summary
 from zf.runtime.channel_prd_context import canonical_channel_prd_context
 from zf.runtime.channel_prd_context import (
-    workflow_context_for_project,
     workflow_context_from_payload,
 )
 from zf.runtime.channel_profiles import public_channel_profile_catalog
@@ -163,7 +162,6 @@ from zf.web.project_init_service import (
     initialize_admitted_project,
 )
 from zf.web.headless_agent import (
-    HeadlessThreadStore,
     KanbanHeadlessAgent,
     canonical_headless_backend,
 )
@@ -178,9 +176,14 @@ from zf.web.proposal_extraction import (
     extract_action_proposal,
 )
 from zf.web import plan_runtime, terminal_routes
-from zf.web.agent_session_runtime import (
-    begin_agent_session_run,
-    run_key,
+from zf.web.webchat_execution_bridge import (
+    handle_headless_kanban_agent_chat as _handle_headless_kanban_agent_chat,
+    headless_stream_flush_interval_s as _headless_stream_flush_interval_s,
+    kanban_agent_sidecar_threshold_bytes as _kanban_agent_sidecar_threshold_bytes,
+    prepare_headless_runtime_context,
+    resume_durable_webchat_turn,
+    safe_dispatch_next_durable_webchat_queue,
+    schedule_durable_webchat_recovery,
 )
 from zf.web.provider_dev_chat import (
     handle_agent_session_cancel,
@@ -684,6 +687,12 @@ def create_app(
     state_dir = Path(state_dir).resolve()
     project_root = _resolve_project_root_for_state(state_dir, project_root)
     app.state.kanban_agent_recovery = reconcile_kanban_startup(state_dir, config=config)
+    app.state.webchat_recovery_scheduled = schedule_durable_webchat_recovery(
+        state_dir=state_dir,
+        project_root=project_root,
+        config=config,
+        chat_handler=_handle_chat_orchestrator,
+    )
     default_project_id = (
         _default_project_id(config=config, project_root=project_root)
         if default_project_enabled else ""
@@ -697,6 +706,42 @@ def create_app(
         default_project_root=project_root,
         mutation_auth_error=_web_mutation_auth_error,
         session_cookie=_web_session_cookie,
+    ))
+    from zf.web.webchat_routes import build_webchat_router
+    from zf.web.webchat_runtime import durable_webchat_enabled
+
+    app.include_router(build_webchat_router(
+        resolve_ctx=lambda project_id: _resolve_api_project(
+            project_id,
+            default_project_id=default_project_id,
+            default_state_dir=state_dir,
+            default_config=config,
+            default_project_root=project_root,
+        ),
+        mutation_auth_error=_web_mutation_auth_error,
+        session_cookie=_web_session_cookie,
+        resume_turn=(
+            lambda context, turn, interaction: resume_durable_webchat_turn(
+                context,
+                turn,
+                interaction,
+                chat_handler=_handle_chat_orchestrator,
+            )
+            if durable_webchat_enabled()
+            else None
+        ),
+        dispatch_queue=(
+            lambda context, source_turn: safe_dispatch_next_durable_webchat_queue(
+                state_dir=context.state_dir,
+                writer=EventWriter(event_log_from_project(context.state_dir, config=context.config)),
+                durable_run=source_turn,
+                backend=str(source_turn.get("backend") or ""),
+                permission_profile=str(source_turn.get("permission_profile") or "read_only"),
+                project_root=context.project_root,
+                config=context.config,
+                chat_handler=_handle_chat_orchestrator,
+            ) if durable_webchat_enabled() else None
+        ),
     ))
     from zf.web.artifact_query_routes import build_artifact_query_router
 
@@ -7078,6 +7123,8 @@ def _handle_chat_orchestrator(
             backend=headless_backend,
             project_root=_resolve_project_root_for_state(state_dir, project_root),
             config=config,
+            task_id_from_payload=_task_id_from_payload,
+            run_turn=_run_headless_kanban_agent_turn,
         )
     if _is_lifecycle_probe_request(payload, message):
         return _handle_kanban_agent_lifecycle_probe(
@@ -7154,170 +7201,6 @@ def _channel_workflow_planning_authority_error(
     )
 
 
-def _handle_headless_kanban_agent_chat(
-    state_dir: Path,
-    writer: EventWriter,
-    *,
-    requested: ZfEvent,
-    user_message: ZfEvent,
-    action: str,
-    requested_action: str,
-    payload: dict,
-    message: str,
-    backend: str,
-    project_root: Path,
-    config: ZfConfig | None = None,
-) -> dict:
-    task_id = _task_id_from_payload(payload)
-    workflow_context = workflow_context_for_project(payload, project_root)
-    thread_key = str(payload.get("thread_key") or "").strip()
-    permission_profile = normalize_permission_profile(payload.get("permission_profile"))
-    turn_id = str(payload.get("turn_id") or uuid.uuid4())
-    project_id = str(payload.get("project_id") or "")
-    conversation_id = str(payload.get("conversation_id") or "")
-    run_thread_id = thread_key or str(payload.get("thread_id") or "").strip() or "main"
-    begin_agent_session_run(
-        run_key(
-            run_id=turn_id,
-            thread_id=run_thread_id,
-            project_id=project_id,
-            conversation_id=conversation_id,
-        ),
-        provider=backend,
-    )
-    turn_created = writer.emit(
-        "kanban.agent.turn.created",
-        actor="web",
-        task_id=task_id,
-        causation_id=user_message.id,
-        correlation_id=user_message.correlation_id,
-        payload={
-            "turn_id": turn_id,
-            "thread_key": thread_key,
-            "project_id": project_id,
-            "conversation_id": conversation_id,
-            "backend": backend,
-            "permission_profile": permission_profile,
-            "scope": str(payload.get("scope") or "project"),
-            "message_event_id": user_message.id,
-            "requested_action": requested_action,
-        },
-    )
-    turn_started = writer.emit(
-        "kanban.agent.turn.started",
-        actor="web",
-        task_id=task_id,
-        causation_id=turn_created.id,
-        correlation_id=user_message.correlation_id,
-        payload={
-            "turn_id": turn_id,
-            "thread_key": thread_key,
-            "project_id": project_id,
-            "conversation_id": conversation_id,
-            "backend": backend,
-            "permission_profile": permission_profile,
-            "message_event_id": user_message.id,
-        },
-    )
-    thinking_level = _headless_thinking_level(payload)
-    runner_kwargs = {
-        "state_dir": state_dir,
-        "writer": writer,
-        "user_message": user_message,
-        "turn_started": turn_started,
-        "action": action,
-        "requested_action": requested_action,
-        "payload": dict(payload),
-        "message": message,
-        "backend": backend,
-        "project_root": project_root,
-        "workflow_context": workflow_context,
-        "task_id": task_id,
-        "thread_key": thread_key,
-        "turn_id": turn_id,
-        "run_thread_id": run_thread_id,
-        "project_id": project_id,
-        "conversation_id": conversation_id,
-        "thinking_level": thinking_level,
-        "permission_profile": permission_profile,
-        "config": config,
-    }
-    if _headless_chat_sync(payload):
-        return _run_headless_kanban_agent_turn(**runner_kwargs)
-
-    def run_background() -> None:
-        bg_writer = EventWriter(event_log_from_project(state_dir, config=config))
-        _run_headless_kanban_agent_turn(
-            **{
-                **runner_kwargs,
-                "writer": bg_writer,
-            }
-        )
-
-    threading.Thread(
-        target=run_background,
-        name=f"zf-kanban-agent-{turn_id[:8]}",
-        daemon=True,
-    ).start()
-    return {
-        "_status_code": 202,
-        "ok": True,
-        "status": "accepted",
-        "action": action,
-        "requested_action": requested_action,
-        "reason": "headless kanban agent turn accepted; stream events carry progress",
-        "event_id": user_message.id,
-        "turn_event_id": turn_started.id,
-        "turn_id": turn_id,
-        "thread_key": thread_key,
-        "trace_id": user_message.correlation_id,
-        "backend": backend,
-        "permission_profile": permission_profile,
-    }
-
-
-def _headless_chat_sync(payload: dict) -> bool:
-    if payload.get("sync") is True:
-        return True
-    return os.environ.get("ZF_KANBAN_AGENT_HEADLESS_SYNC", "").strip() in {"1", "true", "yes"}
-
-
-def _headless_thinking_level(payload: dict) -> str:
-    return str(
-        payload.get("thinking_level")
-        or os.environ.get("ZF_KANBAN_AGENT_HEADLESS_THINKING_LEVEL", "")
-    ).strip()
-
-
-_HEADLESS_STREAM_FLUSH_INTERVAL_S = 0.15
-_KANBAN_AGENT_SIDECAR_THRESHOLD_BYTES = 4 * 1024
-
-
-def _headless_stream_flush_interval_s() -> float:
-    raw = str(
-        os.environ.get("ZF_KANBAN_AGENT_STREAM_FLUSH_INTERVAL_S")
-        or os.environ.get("ZF_KANBAN_AGENT_HEADLESS_STREAM_FLUSH_INTERVAL_S")
-        or _HEADLESS_STREAM_FLUSH_INTERVAL_S
-    ).strip()
-    try:
-        value = float(raw)
-    except ValueError:
-        return _HEADLESS_STREAM_FLUSH_INTERVAL_S
-    return min(max(value, 0.05), 2.0)
-
-
-def _kanban_agent_sidecar_threshold_bytes() -> int:
-    raw = str(
-        os.environ.get("ZF_KANBAN_AGENT_SIDECAR_THRESHOLD_BYTES")
-        or _KANBAN_AGENT_SIDECAR_THRESHOLD_BYTES
-    ).strip()
-    try:
-        value = int(raw)
-    except ValueError:
-        return _KANBAN_AGENT_SIDECAR_THRESHOLD_BYTES
-    return max(1, value)
-
-
 def _run_headless_kanban_agent_turn(
     *,
     state_dir: Path,
@@ -7340,95 +7223,70 @@ def _run_headless_kanban_agent_turn(
     thinking_level: str = "",
     permission_profile: str = "read_only",
     config: ZfConfig | None = None,
+    durable_run: Any | None = None,
+    process_run_id: str = "",
 ) -> dict:
     turn_started_at = time.monotonic()
     context_started_at = turn_started_at
     runtime_snapshot_ref = ""
     task = None
-    try:
-        from types import SimpleNamespace
+    durable_part_recorder = None
+    from zf.web.agent_turn_store import AgentTurnConflict, AgentTurnStore
 
-        from zf.core.task.store import TaskStore
-        from zf.runtime.runtime_snapshot import (
-            RuntimeSnapshotInput,
-            build_runtime_snapshot,
-            runtime_snapshot_event_payload,
-            write_runtime_snapshot,
-        )
-
-        task = TaskStore(state_dir / "kanban.json").get(task_id) if task_id else None
-        if task is not None:
-            workflow_context = bind_task_channel_authority(
-                workflow_context,
-                task,
-            )
-        role = SimpleNamespace(
-            name="kanban-agent",
-            instance_id="kanban-agent",
-            role_kind="operator",
+    def dispatch_next_queue() -> dict[str, Any] | None:
+        return safe_dispatch_next_durable_webchat_queue(
+            state_dir=state_dir,
+            writer=writer,
+            durable_run=durable_run,
             backend=backend,
-            publishes=[],
-        )
-        thread_store = HeadlessThreadStore(
-            state_dir=state_dir,
+            permission_profile=permission_profile,
             project_root=project_root,
+            config=config,
+            chat_handler=_handle_chat_orchestrator,
         )
-        stored_thread_id = thread_store.thread_id(
-            scope=str(payload.get("scope") or "project"),
-            task_id=task_id or "",
-            thread_key=thread_key,
+
+    if durable_run is not None:
+        from zf.web.webchat_runtime import (
+            DurablePartRecorder,
+            fail_durable_run,
+            mark_durable_run_running,
         )
-        snapshot = build_runtime_snapshot(RuntimeSnapshotInput(
-            state_dir=state_dir,
-            project_root=project_root,
-            project_id=project_id,
-            source="headless_run",
-            task=task,
-            role=role,
-            dispatch_id=turn_id,
-            run_id=turn_id,
-            trace_id=user_message.correlation_id or "",
-            refs={
-                "headless_thread_ref": (
-                    thread_store.path_for(stored_thread_id)
-                ),
-            },
-            output_contract={
-                "expected_event": "kanban.agent.reply",
-                "verification_tiers": [],
-                "evidence_contract": {},
-            },
-        ))
-        snapshot_result = write_runtime_snapshot(
-            snapshot,
-            state_dir=state_dir,
-            project_root=project_root,
-        )
-        runtime_snapshot_ref = snapshot_result.snapshot_ref
-        writer.append(ZfEvent(
-            type="runtime.snapshot.recorded",
-            actor="web",
-            task_id=task_id,
-            payload=runtime_snapshot_event_payload(snapshot_result),
-            causation_id=turn_started.id,
-            correlation_id=user_message.correlation_id,
-        ))
-    except Exception as snapshot_exc:
+
         try:
-            writer.append(ZfEvent(
-                type="runtime.snapshot.invalid",
-                actor="web",
-                task_id=task_id,
-                payload={
-                    "source": "headless_run",
-                    "reason": str(snapshot_exc),
-                    "run_id": turn_id,
-                },
-                causation_id=turn_started.id,
-                correlation_id=user_message.correlation_id,
-            ))
-        except Exception:
-            pass
+            mark_durable_run_running(state_dir, durable_run)
+            durable_part_recorder = DurablePartRecorder(
+                state_dir=state_dir,
+                run=durable_run,
+            )
+        except AgentTurnConflict as exc:
+            return {
+                "_status_code": 409,
+                "ok": False,
+                "status": "turn_conflict",
+                "action": action,
+                "requested_action": requested_action,
+                "reason": str(exc),
+                "turn_id": turn_id,
+                "process_run_id": process_run_id or turn_id,
+                "thread_key": thread_key,
+            }
+    runtime_context = prepare_headless_runtime_context(
+        state_dir=state_dir,
+        project_root=project_root,
+        project_id=project_id,
+        payload=payload,
+        backend=backend,
+        task_id=task_id,
+        thread_key=thread_key,
+        turn_id=turn_id,
+        workflow_context=workflow_context,
+        writer=writer,
+        turn_started=turn_started,
+        user_message=user_message,
+    )
+    task = runtime_context.task
+    workflow_context = runtime_context.workflow_context
+    runtime_snapshot_ref = runtime_context.snapshot_ref
     stream_flush_interval_s = _headless_stream_flush_interval_s()
     agent_stream = AgentSessionStreamEmitter(
         writer=writer,
@@ -7465,6 +7323,7 @@ def _run_headless_kanban_agent_turn(
         conversation_id=conversation_id,
         backend=backend,
         agent_session_emitter=agent_stream,
+        commit_callback=durable_part_recorder,
         flush_interval_s=stream_flush_interval_s,
     )
     channel_prd_context = canonical_channel_prd_context(state_dir)
@@ -7495,11 +7354,23 @@ def _run_headless_kanban_agent_turn(
                     project_id=project_id, conversation_id=conversation_id,
                     runtime_snapshot_ref=runtime_snapshot_ref,
                 ),
+                "process_run_id": process_run_id or turn_id,
                 "workflow_route_catalog": workflow_route_catalog(config),
                 "canonical_channel_prds": channel_prd_context,
                 "channel_profile_catalog": public_channel_profile_catalog(config),
                 "current_channel_group": channel_group_context,
                 "workflow_context": workflow_context,
+                "attachment_refs": payload.get("attachment_refs") or [],
+                "conversation_summary": (
+                    durable_run
+                    and AgentTurnStore(state_dir).get(durable_run.turn_id)
+                    .get("request", {}).get("compact_summary", {})
+                ) or {},
+                "agent_profile": (
+                    durable_run
+                    and AgentTurnStore(state_dir).get(durable_run.turn_id)
+                    .get("request", {}).get("agent_profile", {})
+                ) or {},
             },
             on_message=delta_emitter.emit,
             thinking_level=thinking_level,
@@ -7511,6 +7382,8 @@ def _run_headless_kanban_agent_turn(
         delta_emitter.flush()
         reason = str(exc)
         turn_outcome = classify_headless_failure(reason)
+        if durable_run is not None:
+            fail_durable_run(state_dir, durable_run, reason=reason)
         agent_stream.fail(reason=reason, status="failed")
         writer.emit(
             "kanban.agent.turn.failed",
@@ -7576,6 +7449,7 @@ def _run_headless_kanban_agent_turn(
             "event_id": user_message.id,
             "turn_id": turn_id,
             "thread_key": thread_key,
+            "queue_dispatch": dispatch_next_queue(),
         }
     provider_completed_at = time.monotonic()
     turn_outcome = classify_headless_result(result)
@@ -7708,6 +7582,14 @@ def _run_headless_kanban_agent_turn(
         writer.append(proposal_event)
     plan_completed_at = time.monotonic()
     if not result.ok:
+        if durable_run is not None:
+            from zf.web.webchat_runtime import fail_durable_run
+
+            fail_durable_run(
+                state_dir,
+                durable_run,
+                reason=result.error or result.status,
+            )
         agent_stream.fail(
             reason=result.error or result.status,
             status=result.status,
@@ -7800,10 +7682,119 @@ def _run_headless_kanban_agent_turn(
             "turn_id": turn_id,
             "thread_key": thread_key,
             "reply": redact_obj(reply),
+            "queue_dispatch": dispatch_next_queue(),
         }
+    durable_settlement: dict[str, Any] = {"state": "completed", "applied": False}
+    if durable_run is not None:
+        from zf.web.webchat_runtime import settle_durable_reply
+
+        durable_settlement = settle_durable_reply(
+            state_dir=state_dir,
+            run=durable_run,
+            reply=result.reply,
+            provider_session_id=result.provider_session_id,
+            ok=True,
+            plan_request=(plan_draft.request if plan_draft is not None else None),
+            action_proposal=action_proposal,
+            invalid_interaction_draft=(
+                durable_part_recorder.invalid_interaction_draft
+                if durable_part_recorder is not None
+                else None
+            ),
+        )
+        if not durable_settlement.get("applied") and durable_settlement.get("state") == "cancelled":
+            agent_stream.fail(
+                reason="operator_cancelled",
+                status="cancelled",
+                provider_session_id=result.provider_session_id,
+            )
+            return {
+                "_status_code": 409,
+                "ok": False,
+                "status": "cancelled",
+                "action": action,
+                "requested_action": requested_action,
+                "reason": "late provider completion ignored after cancellation",
+                "event_id": user_message.id,
+                "reply_event_id": reply_event.id,
+                "turn_id": turn_id,
+                "thread_key": thread_key,
+                "queue_dispatch": dispatch_next_queue(),
+            }
+        if durable_settlement.get("applied") and durable_settlement.get("state") == "failed":
+            reason = "; ".join(
+                str(item) for item in durable_settlement.get("errors", []) if str(item)
+            ) or "durable WebChat settlement rejected"
+            agent_stream.fail(
+                reason=reason,
+                status="invalid_interaction_contract",
+                provider_session_id=result.provider_session_id,
+            )
+            writer.emit(
+                "kanban.agent.turn.failed",
+                actor="web",
+                task_id=task_id,
+                causation_id=reply_event.id,
+                correlation_id=user_message.correlation_id,
+                payload={
+                    "turn_id": turn_id,
+                    "thread_key": thread_key,
+                    "project_id": project_id,
+                    "conversation_id": conversation_id,
+                    "backend": backend,
+                    "status": "invalid_interaction_contract",
+                    "reason": reason,
+                    "artifact_ref": str(
+                        durable_settlement.get("invalid_artifact", {}).get("storage_uri") or ""
+                    ),
+                    "delta_count": delta_emitter.delta_seq,
+                    **_kanban_turn_timing_payload(
+                        turn_started_at=turn_started_at,
+                        context_started_at=context_started_at,
+                        context_completed_at=context_completed_at,
+                        provider_started_at=provider_started_at,
+                        provider_completed_at=provider_completed_at,
+                        first_output_at=delta_emitter.first_output_at,
+                    ),
+                },
+            )
+            for event_type in ("runtime.action.failed", "web.action.failed"):
+                writer.emit(
+                    event_type,
+                    actor="web",
+                    task_id=task_id,
+                    causation_id=reply_event.id,
+                    correlation_id=user_message.correlation_id,
+                    payload={
+                        "action": action,
+                        "requested_action": requested_action,
+                        "status": "invalid_interaction_contract",
+                        "reason": reason,
+                        "reply_event_id": reply_event.id,
+                    },
+                )
+            return {
+                "_status_code": 422,
+                "ok": False,
+                "status": "invalid_interaction_contract",
+                "action": action,
+                "requested_action": requested_action,
+                "reason": reason,
+                "event_id": user_message.id,
+                "reply_event_id": reply_event.id,
+                "turn_id": turn_id,
+                "thread_key": thread_key,
+                "reply": redact_obj(reply),
+                "queue_dispatch": dispatch_next_queue(),
+            }
+    logical_turn_state = str(durable_settlement.get("state") or "completed")
     agent_stream.complete(
-        status=result.status,
-        reason="headless kanban agent reply completed",
+        status=logical_turn_state,
+        reason=(
+            "headless kanban agent is waiting for owner input"
+            if logical_turn_state == "waiting_input"
+            else "headless kanban agent reply completed"
+        ),
         provider_session_id=result.provider_session_id,
         usage=result.usage,
         permission_snapshot=result.permission_snapshot,
@@ -7834,10 +7825,11 @@ def _run_headless_kanban_agent_turn(
             "permission_profile": permission_profile,
             "thread_id": result.thread_id,
             "provider_session_id": result.provider_session_id,
-            "status": result.status, **turn_outcome,
+            "status": logical_turn_state, **turn_outcome,
             "delta_count": delta_emitter.delta_seq,
             "reply_event_id": reply_event.id,
             "has_action_proposal": action_proposal is not None,
+            "logical_state": logical_turn_state,
             **_kanban_turn_timing_payload(
                 turn_started_at=turn_started_at,
                 context_started_at=context_started_at,
@@ -7850,8 +7842,8 @@ def _run_headless_kanban_agent_turn(
             ),
         },
     )
-    # Terminal: drop the turn's ephemeral delta scratch so new SSE
-    # subscribers never replay a finished turn (2026-07-16 P1).
+    # The provider attempt is settled even when the logical turn waits for
+    # input; durable parts/interactions are now the replay source.
     _bus = live_delta_bus_for_writer(writer)
     if _bus is not None:
         _bus.discard(turn_id)
@@ -7870,7 +7862,7 @@ def _run_headless_kanban_agent_turn(
             "permission_profile": permission_profile,
             "thread_id": result.thread_id,
             "provider_session_id": result.provider_session_id,
-            "status": result.status,
+            "status": logical_turn_state,
             "reply_event_id": reply_event.id,
             "has_action_proposal": action_proposal is not None,
         },
@@ -7884,7 +7876,7 @@ def _run_headless_kanban_agent_turn(
         payload={
             "action": action,
             "requested_action": requested_action,
-            "status": "completed",
+            "status": logical_turn_state,
             "backend": backend,
             "permission_profile": permission_profile,
             "message_event_id": user_message.id,
@@ -7900,18 +7892,28 @@ def _run_headless_kanban_agent_turn(
         payload={
             "action": action,
             "requested_action": requested_action,
-            "status": "completed",
+            "status": logical_turn_state,
             "backend": backend,
             "reply_event_id": reply_event.id,
         },
     )
+    queue_dispatch = (
+        dispatch_next_queue()
+        if logical_turn_state
+        in {"completed", "failed", "cancelled", "abandoned"}
+        else None
+    )
     return {
         "_status_code": 200,
         "ok": True,
-        "status": "completed",
+        "status": logical_turn_state,
         "action": action,
         "requested_action": requested_action,
-        "reason": "headless kanban agent reply completed",
+        "reason": (
+            "headless kanban agent is waiting for owner input"
+            if logical_turn_state == "waiting_input"
+            else "headless kanban agent reply completed"
+        ),
         "event_id": user_message.id,
         "reply_event_id": reply_event.id,
         "turn_id": turn_id,
@@ -7919,6 +7921,7 @@ def _run_headless_kanban_agent_turn(
         "trace_id": user_message.correlation_id,
         "permission_profile": permission_profile,
         "reply": redact_obj(reply),
+        "queue_dispatch": queue_dispatch,
     }
 
 

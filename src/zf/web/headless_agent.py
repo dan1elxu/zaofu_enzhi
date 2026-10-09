@@ -838,9 +838,14 @@ class CodexHeadlessBackend:
                         usage=usage,
                         resumed=resumed,
                     )
+                native_waiting = client.native_interaction_requested
                 return HeadlessTurnResult(
-                    ok=not incomplete,
-                    status="incomplete" if incomplete else "completed",
+                    ok=native_waiting or not incomplete,
+                    status=(
+                        "waiting_input"
+                        if native_waiting
+                        else ("incomplete" if incomplete else "completed")
+                    ),
                     backend=self.backend_id,
                     thread_id=thread_id,
                     provider_session_id=codex_thread_id,
@@ -1027,7 +1032,7 @@ class KanbanHeadlessAgent:
                 on_message=on_message,
                 timeout_s=self.timeout_s,
                 thinking_level=thinking_level,
-                run_id=str(context.get("turn_id") or ""),
+                run_id=str(context.get("process_run_id") or context.get("turn_id") or ""),
                 run_thread_id=str(context.get("run_thread_id") or thread_key),
                 project_id=str(context.get("project_id") or ""),
                 conversation_id=str(context.get("conversation_id") or ""),
@@ -1045,7 +1050,7 @@ class KanbanHeadlessAgent:
                     on_message=on_message,
                     timeout_s=self.timeout_s,
                     thinking_level=thinking_level,
-                    run_id=str(context.get("turn_id") or ""),
+                    run_id=str(context.get("process_run_id") or context.get("turn_id") or ""),
                     run_thread_id=str(context.get("run_thread_id") or thread_key),
                     project_id=str(context.get("project_id") or ""),
                     conversation_id=str(context.get("conversation_id") or ""),
@@ -1953,6 +1958,7 @@ class _CodexRpcClient:
         self._stderr_parts: list[str] = []
         self.thread_id = ""
         self._in_flight_tools = 0
+        self.native_interaction_requested = False
 
     def start(self) -> None:
         self.process = subprocess.Popen(
@@ -2021,9 +2027,14 @@ class _CodexRpcClient:
                 continue
             method = str(item.get("method") or "")
             if "id" in item and method:
-                self._handle_server_request(item)
+                self._handle_server_request(item, on_message=on_message)
                 timeout_budget_s = self._inactivity_timeout_s()
                 deadline = time.monotonic() + timeout_budget_s
+                if self.native_interaction_requested:
+                    reply = self._completed_reply or "".join(
+                        part for part in self._reply_parts if part
+                    )
+                    return reply.strip(), self._usage, False, "native_interaction_requested"
                 continue
             message = self._handle_notification(item)
             timeout_budget_s = self._inactivity_timeout_s()
@@ -2186,11 +2197,56 @@ class _CodexRpcClient:
         message = _extract_codex_turn_error(turn) or status
         raise RuntimeError(f"codex turn {status}: {message}")
 
-    def _handle_server_request(self, item: dict[str, Any]) -> None:
+    def _handle_server_request(
+        self,
+        item: dict[str, Any],
+        *,
+        on_message: MessageCallback | None = None,
+    ) -> None:
         request_id = item.get("id")
         if request_id is None:
             return
         method = str(item.get("method") or "")
+        if method.endswith("item/tool/requestUserInput"):
+            rollout = str(
+                os.environ.get("ZF_KANBAN_WEBCHAT_RUNTIME") or "durable"
+            ).strip().lower()
+            if rollout not in {"0", "false", "off", "legacy"} and on_message is not None:
+                params = item.get("params") if isinstance(item.get("params"), dict) else {}
+                raw_questions = params.get("questions")
+                questions = raw_questions if isinstance(raw_questions, list) else []
+                request = {
+                    "schema_version": "webchat-native-question.v1",
+                    "origin": "codex_request_user_input",
+                    "request_id": str(
+                        params.get("itemId")
+                        or params.get("item_id")
+                        or f"codex-request-{request_id}"
+                    ),
+                    "questions": questions,
+                }
+                if len(questions) == 1 and isinstance(questions[0], dict):
+                    request.update({
+                        key: value for key, value in questions[0].items()
+                        if key in {
+                            "header", "id", "question", "text", "options", "allow_other",
+                        }
+                    })
+                on_message(HeadlessMessage(
+                    type="question",
+                    content=str(request.get("question") or "Input required"),
+                    raw={"native_interaction": request, "provider_request": item},
+                ))
+                self.native_interaction_requested = True
+                self._write({
+                    "jsonrpc": "2.0",
+                    "id": request_id,
+                    "error": {
+                        "code": -32001,
+                        "message": "request captured by durable ZaoFu interaction runtime",
+                    },
+                })
+                return
         if not _is_codex_approval_method(method):
             message = (
                 "Codex request_user_input is unavailable on the durable "
