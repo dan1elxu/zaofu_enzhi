@@ -20,7 +20,7 @@ DOCKER_IMAGE="${ZF_PLAYWRIGHT_IMAGE:-mcp/playwright:latest}"
 SOURCE_PROJECT_DIR="${ZF_INTERACTIVE_E2E_SOURCE_PROJECT_DIR:-}"
 SOURCE_ZF_YAML="${ZF_INTERACTIVE_E2E_SOURCE_ZF_YAML:-}"
 REAL_PROVIDER="none"
-CODEX_SANDBOX="${ZF_KANBAN_AGENT_CODEX_HEADLESS_SANDBOX:-read-only}"
+CODEX_SANDBOX="${ZF_KANBAN_AGENT_CODEX_HEADLESS_SANDBOX:-danger-full-access}"
 CODEX_APPROVAL_POLICY="${ZF_KANBAN_AGENT_CODEX_HEADLESS_APPROVAL_POLICY:-never}"
 SKIP_UNIT=0
 SKIP_DOCKER=0
@@ -39,7 +39,7 @@ Options:
   --real-provider none     Default; use fake Claude headless provider.
   --real-provider codex    Also run the Kanban Agent smoke against real Codex.
   --codex-sandbox POLICY   Codex sandbox for real-provider smoke.
-                           Default: env ZF_KANBAN_AGENT_CODEX_HEADLESS_SANDBOX or read-only.
+                           Default: env ZF_KANBAN_AGENT_CODEX_HEADLESS_SANDBOX or danger-full-access.
                            Values: read-only, workspace-write, danger-full-access.
   --codex-approval-policy POLICY
                            Codex approval policy. Default: env

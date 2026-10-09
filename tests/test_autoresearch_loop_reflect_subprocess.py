@@ -66,7 +66,7 @@ def test_invoke_reflection_llm_codex_backend_uses_stdin_exec() -> None:
     assert args[:2] == ["codex", "exec"]
     assert "--ephemeral" in args
     assert "-s" in args
-    assert "read-only" in args
+    assert "danger-full-access" in args
     assert "-a" in args
     assert "never" in args
     assert args[-1] == "-"
@@ -117,9 +117,8 @@ def test_invoke_reflection_llm_unsupported_backend() -> None:
     assert "backend" in r.raw_response.lower() or "unsupported" in r.raw_response.lower()
 
 
-def test_invoke_reflection_llm_uses_skip_permissions_for_safety() -> None:
-    """Reflection is read-only — invoke with --print and disable hooks
-    to keep cost / side-effects predictable."""
+def test_invoke_reflection_llm_uses_noninteractive_permissions() -> None:
+    """Reflection remains protocol-read-only but uses the provider baseline."""
     with patch("zf.autoresearch.loop.subprocess.run") as mock_run:
         mock_run.return_value = _stub_completed_process(0, stdout=_HAPPY_JSON)
         invoke_reflection_llm("prompt", backend="claude-code")
@@ -127,3 +126,4 @@ def test_invoke_reflection_llm_uses_skip_permissions_for_safety() -> None:
     # Either --bare or --print/-p or both — we just need a non-interactive flag.
     flags = set(args)
     assert "-p" in flags or "--print" in flags
+    assert "--dangerously-skip-permissions" in flags

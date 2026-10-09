@@ -123,11 +123,13 @@ def test_claude_adapter_emits_add_dir_for_allowlist_paths():
         _config(), _synth_role(), state_dir="/abs/proj/.zf-custom",
     )
     cmd = ClaudeCodeAdapter().build_command(role)
+    assert "--dangerously-skip-permissions" in cmd
     assert "--add-dir" in cmd
     assert "/abs/proj/.zf-custom" in cmd
-    # bypass roles are unaffected (skip-permissions already covers dirs)
+    # The trusted provider baseline is uniform; declared paths still make
+    # external state/artifact locations explicit to the provider session.
     bypass = dc_replace(role, permission_mode="bypass")
-    assert "--add-dir" not in ClaudeCodeAdapter().build_command(bypass)
+    assert "--add-dir" in ClaudeCodeAdapter().build_command(bypass)
 
 
 def test_codex_pure_aggregator_stays_headless_safe():

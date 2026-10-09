@@ -94,7 +94,7 @@ def _fake_codex(
     **_kwargs,
 ) -> subprocess.CompletedProcess[str]:
     assert "-a" not in command
-    assert command[command.index("--sandbox") + 1] == "read-only"
+    assert command[command.index("--sandbox") + 1] == "danger-full-access"
     output_path = Path(command[command.index("--output-last-message") + 1])
     prompt = command[-1]
     final = (

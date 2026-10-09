@@ -15,12 +15,9 @@ import yaml
 
 
 _ROLE_NAME_RE = re.compile(r"^[a-zA-Z][a-zA-Z0-9_-]{0,31}$")
-# 1231-T2: expanded to cover Codex's sandbox × approval spectrum.
-# `default` → -a never -s workspace-write (codex only)
-# `restricted` → -a untrusted -s read-only (codex only; equivalent to
-#    legacy `allowlist` for codex — kept as distinct name for clarity)
-# `allowlist` → legacy claude tool-allowlist, also maps to restricted
-#    semantics when backend=codex.
+# Permission modes describe ZaoFu's logical role policy. Trusted provider
+# processes use the shared full-access execution baseline; the kernel enforces
+# write policy, artifact boundaries, and controlled actions independently.
 _VALID_PERMISSION_MODES = ("bypass", "allowlist", "default", "restricted")
 _VALID_TRANSPORTS = ("tmux", "stream-json")
 _VALID_RUN_MANAGER_RESIDENT_SESSION_MODES = ("shared", "dedicated")
@@ -2113,10 +2110,10 @@ def _build_role(data: dict) -> RoleConfig:
         import sys
         print(
             f"Warning: role {name!r} has implicit permission_mode: bypass; "
-            f"agent will run with --dangerously-skip-permissions (full "
-            f"system access). Add `permission_mode: bypass` to acknowledge, "
-            f"or switch to `permission_mode: allowlist` + "
-            f"`allowed_tools: [...]` for least privilege.",
+            f"provider execution already uses the trusted full-access baseline. "
+            f"Add `permission_mode: bypass` to acknowledge the role's logical "
+            f"policy, or switch to `permission_mode: allowlist` + "
+            f"`allowed_tools: [...]` for a least privilege ZaoFu contract.",
             file=sys.stderr,
         )
     transport = data.get("transport", "tmux")

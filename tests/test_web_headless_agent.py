@@ -102,7 +102,7 @@ def _fake_codex_script(tmp_path: Path) -> Path:
             [
                 "import json, os, sys",
                 "expected_thinking = os.environ.get('FAKE_CODEX_THINKING_LEVEL')",
-                "expected_sandbox = os.environ.get('FAKE_CODEX_SANDBOX', 'read-only')",
+                "expected_sandbox = os.environ.get('FAKE_CODEX_SANDBOX', 'danger-full-access')",
                 "expect_resume_security = os.environ.get('FAKE_CODEX_EXPECT_RESUME_SECURITY')",
                 "for line in sys.stdin:",
                 "    if not line.strip():",
@@ -465,7 +465,7 @@ def test_claude_headless_turn_parses_reply_and_persists_thread(
     assert result.usage == {"input_tokens": 3, "output_tokens": 4}
     assert result.permission_snapshot["backend"] == "claude-headless"
     assert result.permission_snapshot["permission_profile"] == "read_only"
-    assert result.permission_snapshot["permission_mode"] == "default"
+    assert result.permission_snapshot["permission_mode"] == "bypassPermissions"
     assert result.permission_drift == {"status": "ok", "items": []}
     sent = json.loads(capture.read_text(encoding="utf-8"))
     assert sent["type"] == "user"
@@ -476,7 +476,7 @@ def test_claude_headless_turn_parses_reply_and_persists_thread(
         project_root=state_dir.parent,
     ).load(scope="project", task_id="TASK-1")
     assert stored["providers"]["claude-headless"]["provider_session_id"] == "claude-session-1"
-    assert stored["providers"]["claude-headless"]["permission_snapshot"]["permission_mode"] == "default"
+    assert stored["providers"]["claude-headless"]["permission_snapshot"]["permission_mode"] == "bypassPermissions"
     assert stored["last_reply"] == "final headless answer"
 
 
@@ -924,7 +924,7 @@ def test_headless_permission_profiles_map_to_provider_security(
     assert "--permission-mode" in claude_args
     assert claude_args[claude_args.index("--permission-mode") + 1] == "bypassPermissions"
 
-    monkeypatch.setenv("FAKE_CODEX_SANDBOX", "workspace-write")
+    monkeypatch.setenv("FAKE_CODEX_SANDBOX", "danger-full-access")
     script = _fake_codex_script(tmp_path)
     codex = CodexHeadlessBackend(command=f"{sys.executable} {script}")
     result = codex.run_turn(
@@ -998,7 +998,7 @@ def test_codex_headless_resume_reapplies_provider_security(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ):
-    monkeypatch.setenv("FAKE_CODEX_SANDBOX", "workspace-write")
+    monkeypatch.setenv("FAKE_CODEX_SANDBOX", "danger-full-access")
     monkeypatch.setenv("FAKE_CODEX_EXPECT_RESUME_SECURITY", "1")
     script = _fake_codex_script(tmp_path)
     codex = CodexHeadlessBackend(command=f"{sys.executable} {script}")
@@ -1020,10 +1020,11 @@ def test_codex_headless_resume_reapplies_provider_security(
     assert result.provider_session_id == "codex-thread-resumed"
 
 
-def test_codex_headless_fails_fast_when_real_codex_sandbox_is_unsupported(
+def test_codex_headless_fails_fast_when_explicit_sandbox_is_unsupported(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ):
+    monkeypatch.setenv("ZF_KANBAN_AGENT_CODEX_HEADLESS_SANDBOX", "workspace-write")
     def fake_which(name: str) -> str | None:
         return {
             "unshare": "/usr/bin/unshare",
@@ -1673,7 +1674,7 @@ def test_workspace_writer_runs_real_headless_executor_and_records_profile(
         if event.type == "provider.permission.snapshot.recorded"
     ]
     assert snapshots[-1].payload["permission_profile"] == "workspace_writer"
-    assert snapshots[-1].payload["snapshot"]["permission_mode"] == "acceptEdits"
+    assert snapshots[-1].payload["snapshot"]["permission_mode"] == "bypassPermissions"
     completed = [
         event for event in events if event.type == "kanban.agent.turn.completed"
     ]

@@ -381,7 +381,7 @@ class SpawnCoordinator(ProviderSessionPreparationMixin):
                     "effective": dict(plan.get("effective") or {}),
                     **dict(plan.get("event_fields") or {}),
                     "reason": str(plan.get("reason") or (
-                        "read-only workflow role; runner permissions are narrowed for this spawn"
+                        "read-only workflow role; ZaoFu semantic write/action policy is applied for this spawn"
                     )),
                 },
             ))

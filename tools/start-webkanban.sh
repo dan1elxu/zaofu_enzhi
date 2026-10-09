@@ -27,8 +27,9 @@ Configuration:
   repo .env: ZF_WORKSPACE_HOME, ZF_WEB_ACTION_TOKEN
   env vars: ZF_WEB_ACTION_TOKEN, ZF_WEB_ACTION_TOKEN_FILE, ZF_WEB_NO_BUILD=1,
   ZF_WEB_NO_RESTART=1, ZF_WEB_WORKSPACE_ONLY=1, ZF_WEB_PROVIDER_TOKEN_ENVS
-  Codex headless env: ZF_KANBAN_AGENT_CODEX_HEADLESS_SANDBOX,
-  ZF_KANBAN_AGENT_CODEX_HEADLESS_APPROVAL_POLICY
+  Provider headless env: ZF_KANBAN_AGENT_CODEX_HEADLESS_SANDBOX,
+  ZF_KANBAN_AGENT_CODEX_HEADLESS_APPROVAL_POLICY,
+  ZF_KANBAN_AGENT_CLAUDE_HEADLESS_PERMISSION_MODE
 
 Notes:
   Workspace env defaults are loaded from <workspace-home>/env when present.
@@ -36,10 +37,10 @@ Notes:
   and from an interactive bash environment snapshot. This supports tokens placed
   after the non-interactive return guard in ~/.bashrc, such as
   OPENCLAW_GATEWAY_TOKEN.
-  For this trusted local WebKanban launcher, Codex headless defaults to
-  sandbox=danger-full-access and approval_policy=never because some Linux hosts
-  do not support Codex workspace-write sandbox namespaces. Override the env vars
-  above to restore read-only/workspace-write sandboxing on a fixed host.
+  For this trusted local WebKanban launcher, provider execution defaults to
+  Codex sandbox=danger-full-access / approval_policy=never and Claude
+  permission_mode=bypassPermissions. ZaoFu role contracts still enforce
+  semantic write-policy and controlled-action gates.
 EOF
 }
 
@@ -54,6 +55,7 @@ token_file="${ZF_WEB_ACTION_TOKEN_FILE:-}"
 provider_token_envs="${ZF_WEB_PROVIDER_TOKEN_ENVS:-}"
 codex_headless_sandbox="${ZF_KANBAN_AGENT_CODEX_HEADLESS_SANDBOX:-}"
 codex_headless_approval_policy="${ZF_KANBAN_AGENT_CODEX_HEADLESS_APPROVAL_POLICY:-}"
+claude_headless_permission_mode="${ZF_KANBAN_AGENT_CLAUDE_HEADLESS_PERMISSION_MODE:-}"
 build=1
 restart=1
 workspace_only="${ZF_WEB_WORKSPACE_ONLY:-0}"
@@ -257,6 +259,7 @@ load_interactive_shell_env \
   ZF_WEB_ACTION_TOKEN \
   ZF_KANBAN_AGENT_CODEX_HEADLESS_SANDBOX \
   ZF_KANBAN_AGENT_CODEX_HEADLESS_APPROVAL_POLICY \
+  ZF_KANBAN_AGENT_CLAUDE_HEADLESS_PERMISSION_MODE \
   "${provider_token_names[@]}"
 if [[ -z "$token" ]]; then
   token="${ZF_WEB_ACTION_TOKEN:-}"
@@ -267,8 +270,12 @@ fi
 if [[ -z "$codex_headless_approval_policy" ]]; then
   codex_headless_approval_policy="$(first_nonempty_env_or_dotenv ZF_KANBAN_AGENT_CODEX_HEADLESS_APPROVAL_POLICY)"
 fi
+if [[ -z "$claude_headless_permission_mode" ]]; then
+  claude_headless_permission_mode="$(first_nonempty_env_or_dotenv ZF_KANBAN_AGENT_CLAUDE_HEADLESS_PERMISSION_MODE)"
+fi
 codex_headless_sandbox="${codex_headless_sandbox:-danger-full-access}"
 codex_headless_approval_policy="${codex_headless_approval_policy:-never}"
+claude_headless_permission_mode="${claude_headless_permission_mode:-bypassPermissions}"
 
 port_in_use() {
   ss -ltn "sport = :${port}" 2>/dev/null | grep -q LISTEN
@@ -285,6 +292,7 @@ print_status() {
   echo "runtime_env_file: $runtime_env_file"
   echo "codex_headless_sandbox: $codex_headless_sandbox"
   echo "codex_headless_approval_policy: $codex_headless_approval_policy"
+  echo "claude_headless_permission_mode: $claude_headless_permission_mode"
   if tmux has-session -t "$session" 2>/dev/null; then
     echo "tmux: running"
   else
@@ -384,6 +392,7 @@ launch_env=(
   ZF_WEB_ACTION_TOKEN="$token"
   ZF_KANBAN_AGENT_CODEX_HEADLESS_SANDBOX="$codex_headless_sandbox"
   ZF_KANBAN_AGENT_CODEX_HEADLESS_APPROVAL_POLICY="$codex_headless_approval_policy"
+  ZF_KANBAN_AGENT_CLAUDE_HEADLESS_PERMISSION_MODE="$claude_headless_permission_mode"
 )
 for name in "${provider_token_names[@]}"; do
   if [[ -n "${!name:-}" ]]; then

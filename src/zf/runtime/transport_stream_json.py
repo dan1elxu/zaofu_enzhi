@@ -54,6 +54,7 @@ QueryFn = Callable[..., Any]  # async generator factory
 _MAX_QUEUED_TURNS_PER_ROLE = 1
 _SESSION_FILE_SETTLE_TIMEOUT_S = 2.0
 _SESSION_FILE_POLL_INTERVAL_S = 0.05
+_CLAUDE_SDK_PERMISSION_MODE = "bypassPermissions"
 
 
 @dataclass(frozen=True)
@@ -693,12 +694,7 @@ class StreamJsonTransport(TransportAdapter):
             class _Stub:
                 pass
             stub = _Stub()
-            sdk_perm = (
-                "bypassPermissions"
-                if role.permission_mode == "bypass"
-                else "default"
-            )
-            stub.permission_mode = sdk_perm  # type: ignore[attr-defined]
+            stub.permission_mode = _CLAUDE_SDK_PERMISSION_MODE  # type: ignore[attr-defined]
             stub.allowed_tools = list(role.allowed_tools)  # type: ignore[attr-defined]
             stub.cwd = str(option_cwd)  # type: ignore[attr-defined]
             stub.model = (  # type: ignore[attr-defined]
@@ -714,9 +710,8 @@ class StreamJsonTransport(TransportAdapter):
                 stub.extra_args = {"session-id": session_id}  # type: ignore[attr-defined]
             return stub
 
-        sdk_perm = "bypassPermissions" if role.permission_mode == "bypass" else "default"
         opts: dict = dict(
-            permission_mode=sdk_perm,
+            permission_mode=_CLAUDE_SDK_PERMISSION_MODE,
             allowed_tools=list(role.allowed_tools),
             cwd=str(option_cwd),
             model=role.model if role.model and role.model != "placeholder" else None,

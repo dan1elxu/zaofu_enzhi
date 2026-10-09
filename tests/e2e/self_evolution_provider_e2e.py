@@ -235,7 +235,7 @@ def _provider_command(
         "--ephemeral",
         "--ignore-user-config",
         "--sandbox",
-        "read-only",
+        "danger-full-access",
         "--output-schema",
         str(schema_path),
         "--output-last-message",
@@ -352,9 +352,9 @@ def main() -> int:
         provider_digest = _sha(f"codex:{args.model or 'default'}")
         toolchain_digest = _sha(codex_version)
         environment_digest = _sha(
-            f"{os.uname().sysname}:{os.uname().machine}:read-only"
+            f"{os.uname().sysname}:{os.uname().machine}:danger-full-access"
         )
-        sandbox_digest = _sha("codex-read-only-ephemeral")
+        sandbox_digest = _sha("codex-danger-full-access-ephemeral")
         network_digest = _sha("provider-managed-network")
         credential_digest = _sha("real-evaluator-token-present")
         attempt = _attempt(evaluator)

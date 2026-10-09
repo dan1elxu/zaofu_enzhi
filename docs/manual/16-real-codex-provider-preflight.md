@@ -36,13 +36,15 @@ unshare: unshare failed: Operation not permitted
 codex exec --dangerously-bypass-approvals-and-sandbox --json "$PROMPT"
 ```
 
-该 bypass 只适合临时 E2E 或受控 smoke,不应成为生产 worker 默认权限。
+ZaoFu 当前把该 bypass 作为可信本地 Codex provider 的默认执行权限；它适用于
+受控开发机、E2E 和已授权项目，不适用于共享主机、非可信项目或 production-like 环境。
 
 ### 2.1 WebKanban 启动模式
 
-Channel 成员的权限 profile 通常映射为 `workspace-write` 或 `read-only` sandbox。
-如果预检显示 `sandbox: unsupported`,Web 会在启动真实 Codex turn 前返回
-`sandbox_unsupported`,避免等待超时。
+Channel 的 `permission_profile` 是 ZaoFu 的语义写入约束，不再选择 provider OS
+sandbox。所有 Codex headless turn 默认使用 `danger-full-access`，所有 Claude
+headless turn 默认使用 `bypassPermissions`；Kernel 的 write-policy、artifact
+路径和 controlled action gate 继续独立执行。
 
 可信本地开发机应使用 canonical launcher：
 
@@ -56,6 +58,7 @@ tools/start-webkanban.sh --host 127.0.0.1 --port 8001
 ```text
 ZF_KANBAN_AGENT_CODEX_HEADLESS_SANDBOX=danger-full-access
 ZF_KANBAN_AGENT_CODEX_HEADLESS_APPROVAL_POLICY=never
+ZF_KANBAN_AGENT_CLAUDE_HEADLESS_PERMISSION_MODE=bypassPermissions
 ```
 
 检查实际启动策略：
@@ -64,22 +67,24 @@ ZF_KANBAN_AGENT_CODEX_HEADLESS_APPROVAL_POLICY=never
 tools/start-webkanban.sh --port 8001 --status
 ```
 
-必须看到 `codex_headless_sandbox: danger-full-access`、`tmux: running` 和
+必须看到 `codex_headless_sandbox: danger-full-access`、
+`claude_headless_permission_mode: bypassPermissions`、`tmux: running` 和
 `api: ok`。`zf doctor provider` 仍可能报告宿主普通 sandbox 不可用；它检查的是
-host capability，不是 launcher 是否已显式 bypass。
+host capability，不是 ZaoFu 是否已显式 bypass。
 
-直接 `uv run zf web ...` 是低层调试入口，只继承 shell 和目标 Project `.env`，
-不会自动采用 launcher 默认值。确实需要直接启动可信本地实例时，先显式配置：
+直接 `uv run zf web ...` 也会使用相同的代码默认值；以下变量仅用于显式记录或
+覆盖 launcher 进程：
 
 ```bash
 export ZF_KANBAN_AGENT_CODEX_HEADLESS_SANDBOX=danger-full-access
 export ZF_KANBAN_AGENT_CODEX_HEADLESS_APPROVAL_POLICY=never
+export ZF_KANBAN_AGENT_CLAUDE_HEADLESS_PERMISSION_MODE=bypassPermissions
 uv run zf web --host 127.0.0.1 --port 8001
 ```
 
-`danger-full-access` 会关闭 Codex headless 的普通 OS sandbox。它只适用于明确受信任
-的本地代码库和网络；共享主机、非可信项目或 production-like 环境应修复
-namespace / bubblewrap，而不是使用 bypass。
+`danger-full-access` 与 `bypassPermissions` 会关闭 provider 原生的常规权限门。
+它们只适用于明确受信任的本地代码库和网络；共享主机、非可信项目或
+production-like 环境不应使用此默认部署模型。
 
 ## 3. Channel 失败判断
 

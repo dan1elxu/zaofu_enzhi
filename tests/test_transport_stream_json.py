@@ -372,7 +372,7 @@ def test_register_role_without_spawn_preserves_config_for_send_task(
     )
 
     opts = calls[0]
-    assert getattr(opts, "permission_mode") == "default"
+    assert getattr(opts, "permission_mode") == "bypassPermissions"
     assert getattr(opts, "allowed_tools") == ["Read", "Bash(zf events *)"]
     assert getattr(opts, "model") == "claude-sonnet-4-6"
     assert getattr(opts, "max_turns") == 17

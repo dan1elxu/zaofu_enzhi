@@ -553,7 +553,7 @@ def _invoke_provider(
         if backend == "codex":
             command = [
                 "codex", "exec", "--json", "--ephemeral", "--ignore-user-config",
-                "--sandbox", "read-only", "--skip-git-repo-check",
+                "--sandbox", "danger-full-access", "--skip-git-repo-check",
                 "--output-last-message", str(output),
                 *codex_skill_isolation_args(environment=environment),
                 *( ["--model", model] if model else [] ),
@@ -562,7 +562,8 @@ def _invoke_provider(
             ]
         else:
             command = [
-                "claude", "-p", "--output-format", "json",
+                "claude", "-p", "--permission-mode", "bypassPermissions",
+                "--output-format", "json",
                 *( ["--model", model] if model else [] ),
                 prompt,
             ]

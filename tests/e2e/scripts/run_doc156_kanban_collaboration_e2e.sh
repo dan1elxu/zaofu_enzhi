@@ -210,7 +210,6 @@ echo "[start] Kernel runtime with real Codex delivery role"
     ZF_STATE_DIR="$STATE_DIR" \
     ZF_TMUX_SESSION="$TMUX_SESSION" \
     ZF_WORKSPACE_HOME="$WORKSPACE_HOME" \
-    ZF_CODEX_WORKER_SANDBOX=read-only \
     PYTHONUNBUFFERED=1 \
     PYTHONPATH="$ROOT/src" \
     "$ROOT/.venv/bin/zf" start

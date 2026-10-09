@@ -337,6 +337,7 @@ def test_autoresearch_optimizer_agent_mock_closes_to_179_candidate(
     )
 
     def fake_codex(command: list[str], **_kwargs) -> subprocess.CompletedProcess[str]:
+        assert command[command.index("--sandbox") + 1] == "danger-full-access"
         prompt = command[-1]
         assert "TRAIN_VISIBLE_SENTINEL" in prompt
         assert "TEST_SECRET_SENTINEL" not in prompt
