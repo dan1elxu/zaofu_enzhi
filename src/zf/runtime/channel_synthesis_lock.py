@@ -6,6 +6,8 @@ import hashlib
 from pathlib import Path
 from typing import Any
 
+from zf.core.events import ZfEvent
+
 
 def channel_synthesis_lock_path(
     state_dir: Path,
@@ -38,7 +40,34 @@ def synthesis_request_in_flight(
             continue
         if str(item.get("thread_id") or "main") != thread_id:
             continue
-        if str(item.get("status") or "requested") in {"blocked", "stale_ignored"}:
-            continue
-        return item
+        if str(item.get("status") or "requested") in {
+            "requested",
+            "repair_requested",
+        }:
+            return item
     return None
+
+
+def prior_synthesis_questions_are_resolved(
+    *,
+    channel: dict[str, Any],
+    prior_synthesis_event: ZfEvent,
+    events: list[ZfEvent],
+) -> bool:
+    """Whether a later synthesis follows Owner closure of the prior draft."""
+    question_ids = {
+        str(event.payload.get("question_id") or "")
+        for event in events
+        if event.type == "channel.question.opened"
+        and event.causation_id == prior_synthesis_event.id
+        and isinstance(event.payload, dict)
+        and str(event.payload.get("question_id") or "")
+    }
+    if not question_ids:
+        return False
+    question_statuses = {
+        str(item.get("question_id") or ""): str(item.get("status") or "")
+        for item in channel.get("open_questions") or []
+        if isinstance(item, dict)
+    }
+    return all(question_statuses.get(question_id) == "resolved" for question_id in question_ids)

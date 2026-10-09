@@ -2356,6 +2356,19 @@ def _apply_contribution(
 
 
 def _apply_synthesis(channel: dict[str, Any], event: ZfEvent, payload: dict[str, Any]) -> None:
+    request_id = _payload_str(payload, "request_id")
+    if request_id:
+        for request in reversed(channel["synthesis_requests"]):
+            if str(request.get("request_id") or "") != request_id:
+                continue
+            request.update(redact_obj({
+                "status": "proposed",
+                "synthesis_event_id": event.id,
+                "artifact_ref": _payload_str(payload, "artifact_ref"),
+                "artifact_digest": _payload_str(payload, "artifact_digest"),
+                "updated_at": event.ts,
+            }))
+            break
     item = {
         "event_id": event.id,
         "thread_id": _payload_str(payload, "thread_id") or "main",

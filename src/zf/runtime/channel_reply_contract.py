@@ -60,6 +60,9 @@ from zf.runtime.channel_synthesis_next_round import (
     emit_synthesis_next_round_proposal,
     validate_synthesis_next_round,
 )
+from zf.runtime.channel_synthesis_lock import (
+    prior_synthesis_questions_are_resolved,
+)
 from zf.runtime.channel_templates import CHANNEL_TEMPLATES
 
 
@@ -765,6 +768,15 @@ def _ignore_superseded_synthesis_reply(
         ):
             prior = event
     if prior is None:
+        return False
+    if prior_synthesis_questions_are_resolved(
+        channel=channel,
+        prior_synthesis_event=prior,
+        events=events,
+    ):
+        # A prior draft may deliberately reopen the discussion with Owner
+        # questions. Once those questions are resolved, the next generated
+        # synthesis is a new revision, not a late competing reply.
         return False
     if any(
         event.type == "channel.synthesis.stale_ignored"

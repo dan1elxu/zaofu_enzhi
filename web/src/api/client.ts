@@ -703,8 +703,12 @@ export interface PendingKanbanProposal {
 export function getKanbanPendingProposals(
   projectId?: string,
 ): Promise<{ items: PendingKanbanProposal[] }> {
+  // Approval entries are a safety boundary. A short GET cache can otherwise
+  // hide a proposal immediately after a Plan answer and leave the operator
+  // with no way to approve or reject it in the current session.
   return requestJson<{ items: PendingKanbanProposal[] }>(
     `${projectPrefix(projectId)}/kanban-agent/pending-proposals`,
+    { bypassCache: true },
   );
 }
 

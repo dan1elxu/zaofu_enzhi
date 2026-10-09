@@ -703,6 +703,30 @@ export function OrchestratorPanel({
     setHeadlessBufferedEvents((current) => mergeBoundedKanbanSessionEvents(current, scopedEvents));
   }, [context.taskId, events, headlessConversationId, headlessProjectId, operatorBackend]);
 
+  async function reconcileHeadlessHistoryAfterTurn(): Promise<void> {
+    // SSE is the primary path. A successful action response is also a
+    // deterministic terminal boundary, so reconcile the durable transcript
+    // here when an event-stream delivery is delayed or dropped. Without this,
+    // a plan card could exist in the ledger but remain invisible until reload.
+    try {
+      const page = await getAgentSessionHistory(headlessProjectId, {
+        ...kanbanAgentHistoryParams({
+          threadId: headlessThreadKey,
+          conversationId: headlessConversationId,
+          backend: operatorBackend,
+          limit: 160,
+        }),
+        requireFresh: true,
+      });
+      setHeadlessHistoryEvents((current) => mergeEventsByIdentity(current, page.items ?? []));
+      setHeadlessHistoryBeforeSeq(page.next_before_seq ?? null);
+      setHeadlessHistoryHasMore(Boolean(page.has_more));
+    } catch {
+      // The successful action is authoritative. Keep the live transcript when
+      // this read-only recovery request is temporarily unavailable.
+    }
+  }
+
   // 任务自动引用(operator 2026-07-11):从 TaskDetail 打开时 context.taskId
   // 已自动派生;这里补"看得见/可解除"——chip + 可关。关掉后消息不再携带
   // task/trace/pdd/fanout 引用。
@@ -957,6 +981,7 @@ export function OrchestratorPanel({
       if (isPlanDiscussion) {
         setHeadlessPlanDiscussion(null);
       }
+      await reconcileHeadlessHistoryAfterTurn();
     } catch (err) {
       setOperatorError(err instanceof Error ? err.message : String(err));
       setHeadlessMessage(message);
@@ -1164,6 +1189,14 @@ export function OrchestratorPanel({
       const result = await Promise.resolve(onAction(item.action, {
         ...item.payload,
         project_id: textValue(item.payload.project_id) || headlessProjectId,
+        conversation_id: textValue(item.payload.conversation_id)
+          || item.conversation_id
+          || headlessConversationId,
+        thread_id: textValue(item.payload.thread_id)
+          || item.thread_key
+          || headlessThreadKey,
+        run_id: textValue(item.payload.run_id) || item.turn_id || undefined,
+        backend: textValue(item.payload.backend) || operatorBackend,
         proposal_event_id: item.proposal_event_id,
         source: textValue(item.payload.source) || "kanban-agent-pending-proposal",
       }));

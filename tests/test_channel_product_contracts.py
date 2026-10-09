@@ -1306,6 +1306,13 @@ def test_channel_prd_handoff_creates_task_then_task_bound_workflow_plan(
         authority,
         workflow_plan=_channel_delivery_workflow_plan(),
     )
+    request.update({
+        "project_id": "project-channel-plan",
+        "conversation_id": "kanban:project-channel-plan",
+        "thread_key": "thread-channel-plan",
+        "turn_id": "turn-channel-plan",
+        "backend": "codex-headless",
+    })
     requested_plan = ZfEvent(
         type=PLAN_REQUESTED_EVENT,
         actor="kanban-agent",
@@ -1332,6 +1339,10 @@ def test_channel_prd_handoff_creates_task_then_task_bound_workflow_plan(
         if event.type == "operator.action.proposed"
         and event.payload["proposal"]["action"] == "create-task"
     )
+    assert create_proposal["payload"].get("conversation_id") == (
+        "kanban:project-channel-plan"
+    )
+    assert create_proposal["payload"].get("thread_id") == "thread-channel-plan"
 
     created = _execute(service, writer, "create-task", {
         **create_proposal["payload"],
@@ -1355,6 +1366,10 @@ def test_channel_prd_handoff_creates_task_then_task_bound_workflow_plan(
     assert workflow_request["subject_type"] == "task_workflow"
     assert workflow_request["task_id"] == created["task_id"]
     assert workflow_request["task_contract_digest"]
+    assert workflow_request["conversation_id"] == "kanban:project-channel-plan"
+    assert workflow_request["thread_key"] == "thread-channel-plan"
+    assert workflow_request["turn_id"] == "turn-channel-plan"
+    assert workflow_request["backend"] == "codex-headless"
     delivery = workflow_request["options"][0]
     assert delivery["submit_action"] == "workflow-start"
     assert delivery["submit_details"]["preflight"] == "ready"

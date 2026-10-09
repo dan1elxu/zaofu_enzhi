@@ -21,6 +21,7 @@ from zf.runtime.channel_sidecar import (
     channel_context_pack_event_payload,
     channel_message_event_payload,
 )
+from zf.runtime.channel_synthesis_lock import synthesis_request_in_flight
 
 
 CHANNEL_ID = "ch-typed"
@@ -1174,6 +1175,127 @@ def test_late_distinct_synthesis_cannot_replace_a_current_prd(
     assert stale.payload["request_id"] == "synth-late"
     assert stale.payload["superseded_by_request_id"] == "synth-current"
     assert stale.payload["source_reply_event_id"] == "evt-synth-late"
+
+
+def test_followup_synthesis_after_prior_owner_questions_is_not_stale(
+    tmp_path: Path,
+) -> None:
+    state_dir, writer = _writer(tmp_path)
+    channel = _channel()
+    channel["discussions"]["main"]["state"] = "phase3_synthesis"
+    request = {
+        "thread_id": "main",
+        "target_member_id": "synthesizer",
+    }
+    emit_structured_reply_events(
+        state_dir=state_dir,
+        writer=writer,
+        channel=channel,
+        request=request,
+        message={"refs": {"synthesis_request_id": "synth-prior"}},
+        reply=json.dumps({
+            "channel_synthesis": {
+                "summary": "First draft is ready.",
+                "open_questions": [],
+            },
+        }),
+        reply_event_id="evt-synth-prior",
+        actor="test",
+        source="test",
+    )
+    prior = next(
+        event for event in writer.event_log.read_all()
+        if event.type == "channel.synthesis.proposed"
+    )
+    writer.emit(
+        "channel.question.opened",
+        actor="test",
+        causation_id=prior.id,
+        correlation_id=CHANNEL_ID,
+        payload={
+            "channel_id": CHANNEL_ID,
+            "thread_id": "main",
+            "question_id": "q-prior-owner",
+            "question": "Freeze the benchmark.",
+            "target_member_id": "owner",
+        },
+    )
+    writer.emit(
+        "channel.question.resolved",
+        actor="owner",
+        correlation_id=CHANNEL_ID,
+        payload={
+            "channel_id": CHANNEL_ID,
+            "thread_id": "main",
+            "question_id": "q-prior-owner",
+            "resolution": "answered",
+            "answer": "Pinned benchmark profile.",
+        },
+    )
+    emit_structured_reply_events(
+        state_dir=state_dir,
+        writer=writer,
+        channel=channel,
+        request=request,
+        message={"refs": {"synthesis_request_id": "synth-followup"}},
+        reply=json.dumps({
+            "channel_synthesis": {
+                "summary": "Follow-up revision includes the Owner answer.",
+                "open_questions": [],
+            },
+        }),
+        reply_event_id="evt-synth-followup",
+        actor="test",
+        source="test",
+    )
+
+    proposals = [
+        event for event in writer.event_log.read_all()
+        if event.type == "channel.synthesis.proposed"
+    ]
+    assert [event.payload["request_id"] for event in proposals] == [
+        "synth-prior", "synth-followup",
+    ]
+    assert not any(
+        event.type == "channel.synthesis.stale_ignored"
+        and event.payload.get("request_id") == "synth-followup"
+        for event in writer.event_log.read_all()
+    )
+
+
+def test_synthesis_projection_marks_proposed_request_not_in_flight(
+    tmp_path: Path,
+) -> None:
+    state_dir, writer = _writer(tmp_path)
+    writer.emit(
+        "channel.synthesis.requested",
+        actor="test",
+        correlation_id=CHANNEL_ID,
+        payload={
+            "channel_id": CHANNEL_ID,
+            "thread_id": "main",
+            "request_id": "synth-finished",
+            "target_member_id": "synthesizer",
+            "status": "requested",
+        },
+    )
+    writer.emit(
+        "channel.synthesis.proposed",
+        actor="synthesizer",
+        correlation_id=CHANNEL_ID,
+        payload={
+            "channel_id": CHANNEL_ID,
+            "thread_id": "main",
+            "request_id": "synth-finished",
+            "artifact_ref": "channel-artifacts/draft.md",
+            "artifact_digest": "digest",
+        },
+    )
+
+    detail = project_channel(state_dir, CHANNEL_ID)
+    assert detail is not None
+    assert detail["synthesis_requests"][-1]["status"] == "proposed"
+    assert synthesis_request_in_flight(detail, "main") is None
 
 
 def test_synthesis_repair_exhaustion_blocks_and_ignores_late_revision(
