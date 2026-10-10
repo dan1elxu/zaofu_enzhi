@@ -9,7 +9,7 @@ for (const [status, label] of [
   ["queued", "排队中"],
   ["running", "评估中"],
   ["retryable_failure", "等待重试"],
-  ["inconclusive", "无法确定（inconclusive）"],
+  ["inconclusive", "无法确定"],
 ]) {
   test(`Channel shows evaluation ${status}`, async ({ page, request }) => {
     const channelId = `ch-eval-${status}`;
@@ -21,15 +21,18 @@ for (const [status, label] of [
     expect(projection.evaluation.stages[0].status).toBe(status);
 
     await page.goto(`/?project=${encodeURIComponent(projectId)}&page=channels&channel=${channelId}`);
-    const evaluation = page.getByTestId("channel-evaluation-status");
+    // Eval owns the live stage progress; the conversation has no summary banner.
+    await expect(page.getByTestId("channel-evaluation-status")).toHaveCount(0);
+    await page.getByTestId("channel-evaluation-button").click();
+    const evaluation = page.getByTestId("channel-evaluation-page");
     await expect(evaluation).toBeVisible();
-    await expect(evaluation.locator("summary")).toContainText(label);
+    await expect(evaluation).toContainText(label);
     if (status === "inconclusive") {
-      await evaluation.locator("summary").click();
       await expect(evaluation).toContainText("尝试 2/2");
       await expect(evaluation).toContainText("provider failed twice");
       await page.reload();
-      await expect(page.getByTestId("channel-evaluation-status").locator("summary")).toContainText(label);
+      await page.getByTestId("channel-evaluation-button").click();
+      await expect(page.getByTestId("channel-evaluation-page")).toContainText(label);
     }
   });
 }

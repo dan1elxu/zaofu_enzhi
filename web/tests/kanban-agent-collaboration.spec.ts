@@ -274,23 +274,21 @@ test("Doc 156 Kanban Agent closes Channel, Research, adoption, and live Workflow
   await expect(page.locator(".status-pill.status-live")).toBeVisible({ timeout: 90_000 });
   const channelPage = page.locator(".channel-page");
   await expect(channelPage).toContainText("Doc 156 live review", { timeout: 30_000 });
-  await expect(channelPage).toContainText(channelId);
   await expect(channelPage).toContainText("DOC156_CHANNEL_SETUP", {
     timeout: 30_000,
   });
 
-  await page.locator(".channel-tabs").getByRole("button", { name: "Details" }).click();
-  const workflowRoles = page.locator(".channel-workspace-panel").filter({
-    hasText: "Workflow Roles",
-  });
-  await expect(workflowRoles).toContainText("6 configured roles");
-  await expect(workflowRoles).toContainText("source_researcher");
-  await expect(workflowRoles).toContainText("synthesizer");
-  await page.locator(".channel-tabs").getByRole("button", { name: "Chat" }).click();
+  await expect(channelPage.getByTestId("channel-flow-nav")).toBeVisible();
+  await expect(channelPage.locator(".channel-flow-node-button")).toHaveCount(5);
+  await page.getByTitle("More", { exact: true }).click();
+  await expect(page.locator(".channel-drawer")).toContainText(channelId);
+  await page.getByTitle("Close drawer").click();
 
   await page.getByTitle("Members").click();
   const memberDrawer = page.locator(".channel-drawer");
   await expect(memberDrawer).toContainText("tech_leader");
+  await expect(memberDrawer).toContainText("dev_reviewer");
+  await expect(memberDrawer).toContainText("qa_analyst");
   const techLeaderMember = memberDrawer.locator(".channel-member-item").filter({
     hasText: "tech_leader",
   }).first();
@@ -364,9 +362,9 @@ test("Doc 156 Kanban Agent closes Channel, Research, adoption, and live Workflow
   await expect(channelPage).toContainText(followupMarker, { timeout: 30_000 });
   await capturePage(page, "05-channel-chat");
 
-  await page.locator(".channel-tabs").getByRole("button", { name: "Details" }).click();
+  await page.getByTitle("More", { exact: true }).click();
   await page
-    .locator(".channel-workspace-controls")
+    .locator(".channel-drawer")
     .getByRole("button", { name: "Synthesize" })
     .click();
   const synthesisEvents = await waitForEvents(request, id, cursor, (events) => events.some((event) => (
@@ -374,6 +372,7 @@ test("Doc 156 Kanban Agent closes Channel, Research, adoption, and live Workflow
     && event.payload?.channel_id === channelId
   )), 90_000);
 
+  await page.getByTitle("Close drawer").click();
   await page.getByRole("button", { name: "Open Kanban Agent" }).click();
   await expect(page.getByRole("dialog", { name: "Kanban Agent" })).toBeVisible();
   const synthesisSummary = synthesisEvents.find((event) => (

@@ -4,7 +4,9 @@
 
 ## 与上游手动 PRD 诊断共存
 
-2026-10-10 合入上游 `111488743` 后，冻结后 Eval 保持下文的唯一自动入口；上游的 `channel-prd-evaluate` 是另一个显式受控动作，发出 `channel.prd_evaluation.requested`，由独立 reactor 生成 `artifacts/output-evaluations/<UUID>/report.json`。它不进入冻结 Eval scheduler，也不写入 `artifacts/benchmark-evaluations/` 的报告。Web 的「冻结后 Eval」与 PRD 全文/专项诊断分别读取各自接口。诊断反馈可参与尚未确认、未关闭的讨论修订，但不能倒灌进既有 frozen packet。
+2026-10-10 合入上游 `111488743` 后，Eval 保持下文的唯一自动入口；上游的 `channel-prd-evaluate` 是另一个显式受控动作，发出 `channel.prd_evaluation.requested`，由独立 reactor 生成 `artifacts/output-evaluations/<UUID>/report.json`。它不进入 Eval scheduler，也不写入 `artifacts/benchmark-evaluations/` 的报告。Web 的「Eval」与 PRD 全文/专项诊断分别读取各自接口。诊断反馈可参与尚未确认、未关闭的讨论修订，但不能倒灌进既有 frozen packet。
+
+Channel 沿用新版 Brief → Discussion → PRD → Tasks → Workflow 五阶段导航，右上角「Eval」按钮打开评测抽屉，集中展示实时进度、评分与报告。原 Chat / Details / Eval 页签及公共评估摘要不再显示；抽屉打开时随 Channel 事件更新，最新有效重评继续自动替换展示。
 
 ## 流程
 
@@ -91,7 +93,7 @@ Channel 只读投影可补齐同一 prompt 版本内缺少身份字段的历史�
 
 - CLI：`zf evaluation-watch`；`--once` 只做发现和持久化入队，不启动临时 provider pool。
 - tmux：`zf start` 创建 evaluation watcher；Judge slot 由 scheduler 按需创建/复用。
-- Web：`channel_projection.py` 折叠三个评估事件，Channel summary/detail/conversation 暴露 `evaluation.stages`。Channel 的 **Eval** 页签展示分类、三个子评测和汇总的状态、尝试次数、阶段及错误；分别显示 PRD 忠实度、讨论有效性、逐 Agent 贡献与「必须 / 可选 / 不需要 / 未确定」，并可展开报告。分数保留原始 0～4 整数；未评分项显示 `—`，不计算团队平均分。
+- Web：`channel_projection.py` 折叠三个评估事件，Channel summary/detail/conversation 暴露 `evaluation.stages`。Channel 右上角的 **Eval** 按钮打开评测抽屉，展示分类、三个子评测和汇总的状态、尝试次数、阶段及错误；分别显示 PRD 忠实度、讨论有效性、逐 Agent 贡献与「必须 / 可选 / 不需要 / 未确定」，并可展开报告。分数保留原始 0～4 整数；未评分项显示 `—`，不计算团队平均分。
 - 三项评测卡片保留缺证据状态；只读 API 从已校验的结果中返回脱敏后的 `missing_evidence`，页面逐项显示「缺少的证据」。没有维度分数时仍显示卡片和缺失说明，部分维度已评分时保留原分数；未记录具体缺失项时明确提示，不推测缺失原因。
 - `GET /api/projects/{project_id}/channels/{channel_id}/evaluation` 是按需读取的只读接口。服务端从该项目的当前 Channel 投影确定冻结和评测身份，校验结果与账本绑定；不接受任意报告路径，也不按文件时间选择结果。响应只含状态、业务摘要和报告正文，详细审计、prompt、原始回复留在运行态 sidecar。缺失或身份不匹配的结果标为不可用。页面随评测事件刷新，切换项目、Channel 或冻结版本时清除旧结果；读取失败可重试，重试不会触发重新评分。
 - 事件注册：`known_types.py` 和 `event_problem_registry.py` 将评估进度与终态标为 projection-only/informational，不唤醒工作流。

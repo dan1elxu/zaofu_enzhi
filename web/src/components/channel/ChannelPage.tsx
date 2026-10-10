@@ -1,7 +1,6 @@
 import { useChannelComposerDraft, useChannelThreadSelection, channelDraftStorageKey, type ComposerAttachment, type ChannelComposerDraft } from "./useChannelConversationState";
 import { ChannelContextFailures } from "./ChannelContextFailures";
 // ChannelPage + exclusive closure, extracted verbatim from App.tsx (P1 split).
-import { ChannelEvaluationStatus } from "./ChannelEvaluationStatus";
 import { ChannelEvaluationPage } from "./ChannelEvaluationPage";
 import { getChannelEvaluation } from "../../api/client";
 import type { ChannelEvaluationDetail } from "../../api/types";
@@ -53,9 +52,7 @@ const ChannelEmojiPicker = lazy(() => import("./ChannelEmojiPicker").then((modul
   default: module.ChannelEmojiPicker,
 })));
 
-type ChannelTab = "chat" | "workspace" | "evaluation";
-
-type ChannelDrawerKey = "members" | "attention" | "context" | "diagnostics" | "reports" | "workflow" | "settings" | "file" | ChannelFlowNode;
+type ChannelDrawerKey = "members" | "attention" | "context" | "diagnostics" | "reports" | "workflow" | "settings" | "file" | "evaluation" | ChannelFlowNode;
 
 type ComposerFormatAction = "bold" | "italic" | "underline" | "strike" | "link" | "ordered-list" | "unordered-list" | "quote" | "inline-code" | "code-block";
 
@@ -513,7 +510,6 @@ export function ChannelPage({
   const [controlsBusy, setControlsBusy] = useState(false);
   const [controlError, setControlError] = useState("");
   const [researchActionBusyId, setResearchActionBusyId] = useState("");
-  const [activeTab, setActiveTab] = useState<ChannelTab>("chat");
   const [evaluation, setEvaluation] = useState<ChannelEvaluationDetail | null>(null);
   const [evaluationLoading, setEvaluationLoading] = useState(false);
   const [evaluationError, setEvaluationError] = useState<string | null>(null);
@@ -588,9 +584,9 @@ export function ChannelPage({
     evaluationRequestGateRef.current.issue();
   }, [evaluationIdentityKey]);
   useEffect(() => {
-    if (activeTab !== "evaluation") return;
+    if (drawer !== "evaluation") return;
     void loadEvaluation();
-  }, [activeTab, evaluationRefreshKey, detail?.seq, loadEvaluation]);
+  }, [drawer, evaluationRefreshKey, detail?.seq, loadEvaluation]);
   const attachmentInputRef = useRef<HTMLInputElement | null>(null);
   const autoOpenedQuestionnaireRef = useRef("");
   const visibleChannels = channels.length
@@ -1079,6 +1075,7 @@ export function ChannelPage({
   ), [channelConversation, ownerQuestionAttachments, decisionReceipts]);
   const [previewFile, setPreviewFile] = useState<PreviewItem | null>(null);
   const drawerTitles: Record<ChannelDrawerKey, string> = {
+    evaluation: "Eval",
     file: "File preview",
     members: "Members",
     attention: "Activity",
@@ -1786,25 +1783,6 @@ export function ChannelPage({
             />
           </label>
         </div>
-        <div className="channel-control-actions">
-          <button
-            className="icon-button primary"
-            data-testid="channel-create-task-from-prd"
-            disabled={!actionReady || controlsBusy || !canonicalPrd.ready}
-            type="button"
-            onClick={() => void runControl(async () => {
-              await onWorkflowRequest(
-                "",
-                workflowDraft.reason.trim()
-                  || "Create a Task bound to the canonical Channel PRD.",
-                controlThreadId,
-              );
-            })}
-          >
-            <Plus size={16} />
-            Plan Task
-          </button>
-        </div>
         <details className="channel-workflow-existing-task">
           <summary>Plan Workflow for a Task (second step)</summary>
           <form
@@ -2494,6 +2472,8 @@ export function ChannelPage({
     );
   }
   function renderDrawerContent(activeDrawer: ChannelDrawerKey) {
+    if (activeDrawer === "evaluation") return <ChannelEvaluationPage
+      evaluation={evaluation} loading={evaluationLoading} error={evaluationError} onRetry={() => void loadEvaluation()} />;
     if (activeDrawer === "file" && previewFile) return <ChannelFilePreview
       key={`${projectId}:${selectedChannelId}:${controlThreadId}:${previewFile.id}:${previewFile.name}`}
       item={previewFile} projectId={projectId || "default"} channelId={selectedChannelId} threadId={controlThreadId}
@@ -2834,45 +2814,20 @@ export function ChannelPage({
                 </div>
               ) : null}
             </div>
-            <span className="muted mono">{selectedChannelId}</span>
-          </div>
-          <div className="channel-tabs" role="tablist" aria-label="Channel view">
-            <button
-              aria-selected={activeTab === "chat"}
-              className={`channel-tab ${activeTab === "chat" ? "active" : ""}`}
-              data-testid="channel-chat-tab"
-              type="button"
-              onClick={() => setActiveTab("chat")}
-            >
-              <MessageSquare size={16} />
-              Chat
-            </button>
-            <button
-              aria-selected={activeTab === "workspace"}
-              className={`channel-tab ${activeTab === "workspace" ? "active" : ""}`}
-              data-testid="channel-details-tab"
-              type="button"
-              onClick={() => {
-                setActiveTab("workspace");
-                void onLoadDiagnostics();
-              }}
-            >
-              <Info size={16} />
-              Details
-            </button>
-            <button
-              aria-selected={activeTab === "evaluation"}
-              className={`channel-tab ${activeTab === "evaluation" ? "active" : ""}`}
-              data-testid="channel-evaluation-tab"
-              type="button"
-              onClick={() => setActiveTab("evaluation")}
-            >
-              <CheckCircle2 size={16} />
-            冻结后 Eval
-            </button>
           </div>
         </div>
         <div className="channel-header-actions">
+          <button
+            aria-pressed={drawer === "evaluation"}
+            className={`channel-tool-button ${drawer === "evaluation" ? "active" : ""}`}
+            data-testid="channel-evaluation-button"
+            title="Eval"
+            type="button"
+            onClick={() => toggleDrawer("evaluation")}
+          >
+            <CheckCircle2 size={16} />
+            Eval
+          </button>
           <button
             aria-pressed={historySearchOpen}
             className={`channel-tool-button ${historySearchOpen ? "active" : ""}`}
@@ -2954,13 +2909,9 @@ export function ChannelPage({
       ) : null}
       <div className={`channel-shell ${drawer ? "has-drawer" : ""} ${decisionQueueItems.length ? "has-decision-queue" : ""}`.trim()}>
         <main className="channel-main">
-          <ChannelEvaluationStatus evaluation={evaluation ? { stages: evaluation.stages.map((stage) => ({ ...stage })) } : detail?.evaluation ?? workspaceDetail?.evaluation} />
           <ChannelAutoStatus rows={detail?.auto_chain ?? workspaceDetail?.auto_chain}
             actionReady={actionReady} onRetry={onRetryAutoStep} />
-          {activeTab === "evaluation" ? (
-            <ChannelEvaluationPage evaluation={evaluation} loading={evaluationLoading} error={evaluationError} onRetry={() => void loadEvaluation()} />
-          ) : activeTab === "chat" ? (
-            <>
+          <>
               {renderHistorySearchPanel()}
               <div
                 ref={channelTimelineRef}
@@ -3246,8 +3197,7 @@ export function ChannelPage({
                   </button>
                 </div>
               </form>
-            </>
-          ) : renderChannelWorkspace()}
+          </>
         </main>
 
         <ChannelDecisionQueue
@@ -3259,7 +3209,7 @@ export function ChannelPage({
         />
 
         {drawer ? (
-          <aside className={`channel-drawer ${drawer === "prd" || drawer === "file" ? "channel-document-drawer" : ""}`}>
+          <aside className={`channel-drawer ${["prd", "file", "evaluation"].includes(drawer) ? "channel-document-drawer" : ""} ${drawer === "evaluation" ? "channel-evaluation-drawer" : ""}`}>
             {drawer !== "prd" && drawer !== "file" ? <div className="channel-drawer-header">
               <div>
                 <h3>{drawerTitles[drawer]}</h3>

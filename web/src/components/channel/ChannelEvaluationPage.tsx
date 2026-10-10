@@ -66,7 +66,7 @@ export function ChannelEvaluationPage({ evaluation, loading, error, onRetry }: {
 function StageNode({ stage }: { stage: ChannelEvaluationStage }) {
   const tone = stageTone(stage.status || stage.verdict);
   const Icon = tone === "complete" ? CheckCircle2 : tone === "warning" ? AlertTriangle : tone === "active" ? Loader2 : CircleDashed;
-  return <div className={`channel-evaluation-stage tone-${tone}`}><Icon size={16} className={tone === "active" ? "spin" : ""} /><strong>{evaluationStageLabel(stage)}</strong><span>{evaluationResultUnavailable(stage) ? "结果文件不可用" : evaluationStatusLabel(stage.status || stage.verdict)}</span>{stage.phase ? <small>阶段：{evaluationPhaseLabel(stage.phase)}</small> : null}{stage.attempt ? <small>尝试 {stage.attempt}/{stage.max_attempts ?? 2}</small> : null}{stage.updated_at ? <small>{new Date(stage.updated_at).toLocaleTimeString()}</small> : null}{stage.error ? <small className="channel-evaluation-error">{stage.error}</small> : null}</div>;
+  return <div className={`channel-evaluation-stage tone-${tone}`}><Icon size={16} className={tone === "active" ? "spin" : ""} /><strong>{evaluationStageLabel(stage)}</strong><span>{evaluationStatusLabel(stage.status || stage.verdict)}</span>{evaluationResultUnavailable(stage) ? <small>结果文件不可用</small> : null}{stage.phase ? <small>阶段：{evaluationPhaseLabel(stage.phase)}</small> : null}{stage.attempt ? <small>尝试 {stage.attempt}/{stage.max_attempts ?? 2}</small> : null}{stage.updated_at ? <small>{new Date(stage.updated_at).toLocaleTimeString()}</small> : null}{stage.error ? <small className="channel-evaluation-error">{stage.error}</small> : null}</div>;
 }
 
 function ScoreCard({ title, stage }: { title: string; stage?: ChannelEvaluationStage }) {

@@ -224,6 +224,7 @@ test("message file Preview loads full Markdown, source and download without Proc
 });
 
 test("all owner questions stay inline and collapsed drafts survive reopening", async ({ page, request }) => {
+  await page.setViewportSize({ width: 1280, height: 600 });
   const detail = fixture();
   detail.open_questions = Array.from({ length: 8 }, (_, i) => ({ ...detail.open_questions[0], question_id: `q${i}`, question: `Decision ${i}` }));
   detail.owner_questionnaires.main = detail.open_questions.map((question) => ({ ...detail.owner_questionnaires.main[0], ...question }));

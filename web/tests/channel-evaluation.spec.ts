@@ -76,10 +76,10 @@ async function openEvaluation(page: Page) {
     { waitUntil: "domcontentloaded" },
   );
   await expect(page.locator(".channel-page")).toBeVisible({ timeout: 30_000 });
-  await page.getByTestId("channel-evaluation-tab").click();
+  await page.getByTestId("channel-evaluation-button").click();
 }
 
-test("Eval tab renders the three score areas and explicit Agent necessity labels", async ({ page }) => {
+test("Eval drawer preserves the five-stage navigation and shows scores without duplicate summaries", async ({ page }) => {
   await mockEvaluation(page, async (route) => route.fulfill({
     contentType: "application/json", body: JSON.stringify(evaluationPayload()),
   }));
@@ -87,6 +87,11 @@ test("Eval tab renders the three score areas and explicit Agent necessity labels
 
   const evalPage = page.getByTestId("channel-evaluation-page");
   await expect(evalPage).toBeVisible();
+  await expect(page.locator(".channel-tabs")).toHaveCount(0);
+  await expect(page.getByTestId("channel-evaluation-status")).toHaveCount(0);
+  await expect(page.locator(".channel-flow-node-button")).toHaveCount(5);
+  await expect(page.getByTestId("channel-evaluation-button")).toHaveText("Eval");
+  await expect(page.getByTestId("channel-evaluation-button")).toHaveAttribute("aria-pressed", "true");
   await expect(evalPage).toContainText("PRD 忠实度");
   await expect(evalPage).toContainText("讨论有效性");
   await expect(evalPage).toContainText("Agent 贡献");
@@ -104,6 +109,10 @@ test("Eval tab renders the three score areas and explicit Agent necessity labels
   // silently become a misleading numeric zero.
   await expect(evalPage.locator(".channel-evaluation-agent").filter({ hasText: "可选 Agent" })).toContainText("—");
   await expect(evalPage.locator(".channel-evaluation-dimensions").filter({ hasText: "表达清晰度" })).toContainText("—");
+  await page.getByRole("button", { name: "Close drawer" }).click();
+  await expect(evalPage).toHaveCount(0);
+  await expect(page.getByTestId("channel-evaluation-button")).toHaveAttribute("aria-pressed", "false");
+  await expect(page.getByTestId("channel-evaluation-status")).toHaveCount(0);
 });
 
 test("Eval error exposes retry and recovers the latest response", async ({ page }) => {
@@ -209,10 +218,10 @@ test("a finished regrade automatically replaces the open report and status", asy
   await expect(evalPage).toContainText("最新重评");
   await expect(evalPage.locator(".channel-evaluation-report")).toContainText("NEW_REGRADE");
   await expect(evalPage).not.toContainText("OLD_REPORT");
-  await expect(page.getByTestId("channel-evaluation-status").locator("summary")).not.toContainText("缺少证据");
+  await expect(evalPage.locator(".channel-evaluation-stage-rail")).not.toContainText("缺少证据");
 });
 
-test("Eval tab keeps narrow layouts within the viewport", async ({ page }) => {
+test("Eval drawer keeps narrow layouts within the viewport", async ({ page }) => {
   await mockEvaluation(page, async (route) => route.fulfill({
     contentType: "application/json", body: JSON.stringify(evaluationPayload()),
   }));
@@ -247,8 +256,8 @@ test("a late older evaluation response cannot overwrite a newer same-channel loa
   });
   await openEvaluation(page);
   await firstRequest;
-  await page.getByTestId("channel-chat-tab").click();
-  await page.getByTestId("channel-evaluation-tab").click();
+  await page.getByRole("button", { name: "Close drawer" }).click();
+  await page.getByTestId("channel-evaluation-button").click();
   const evalPage = page.getByTestId("channel-evaluation-page");
   await expect(evalPage).toContainText("CURRENT_FREEZE");
   const staleResponse = page.waitForResponse((response) => (

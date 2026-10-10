@@ -138,6 +138,10 @@ async function createTaskAndStartFlow(
 ): Promise<string> {
   const channelPage = page.locator(".channel-page");
   const handoffCursor = await eventCursor(request, id);
+  if (!await channelPage.getByTestId("channel-prd-preview").isVisible()) {
+    await channelPage.getByTestId("channel-flow-prd").click();
+  }
+  await channelPage.getByText("Planning options", { exact: true }).click();
   await channelPage.getByTestId("channel-workflow-objective").fill(
     `${flow.marker} create a Task from the owner-confirmed PRD.`,
   );
@@ -224,6 +228,7 @@ async function createTaskAndStartFlow(
     timeout: 45_000,
   });
   await page.getByRole("button", { name: "Minimize Kanban Agent" }).click();
+  await channelPage.getByRole("button", { name: "Close drawer" }).click();
   return taskId;
 }
 
@@ -310,6 +315,7 @@ test("creates a two-round PRD Channel and starts four workflows from its PRD", a
   await capture(page, "04-prd-channel-members");
   await page.getByTitle("Close drawer").click();
 
+  await channelPage.getByTestId("channel-flow-prd").click();
   const consensusControl = page.locator(".channel-consensus-control");
   await expect(consensusControl).toContainText(
     "Canonical PRD awaiting owner decision",
@@ -328,7 +334,6 @@ test("creates a two-round PRD Channel and starts four workflows from its PRD", a
     90_000,
   );
   await capture(page, "05-canonical-prd-confirmed");
-  await channelPage.getByTestId("channel-details-tab").click();
   await expect(
     channelPage.getByTestId("channel-create-task-from-prd"),
   ).toBeEnabled({ timeout: 90_000 });
