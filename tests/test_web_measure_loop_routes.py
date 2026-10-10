@@ -252,7 +252,6 @@ def test_loop_view_cache_invalidates_on_rotation_and_archive_replacement(
     ],
 )
 def test_loop_view_cache_invalidates_on_loop_sidecar_change(
-    client: TestClient,
     state_dir: Path,
     monkeypatch: pytest.MonkeyPatch,
     name: str,
@@ -269,6 +268,8 @@ def test_loop_view_cache_invalidates_on_loop_sidecar_change(
         return real_build(*args, **kwargs)
 
     monkeypatch.setattr(measure_loop_routes, "build_loop_view", build_spy)
+    # The full application starts a background prewarmer that can write sidecars.
+    client = _loop_only_client(state_dir)
     client.get("/api/projects/default/loop-view")
     client.get("/api/projects/default/loop-view")
     projection_path = state_dir / "projections" / name

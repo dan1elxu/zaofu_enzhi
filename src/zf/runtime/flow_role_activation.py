@@ -19,6 +19,9 @@ from zf.runtime.flow_roles import (
     is_multi_flow_config,
     role_configs_for_flow,
 )
+from zf.runtime.flow_role_activation_fence import (
+    live_run_acceptance, require_live_activation_run, reclaim_cancelled_activation_roles,
+)
 from zf.runtime.event_window import read_runtime_events
 from zf.runtime.run_admission import (
     fold_terminal_run_scope as _terminal_run_scope,
@@ -56,6 +59,7 @@ class FlowRoleActivationResult:
     manifest_ref: dict[str, Any] | None = None
     role_instance_ids: tuple[str, ...] = ()
     recovered_instance_ids: tuple[str, ...] = ()
+    spawned_instance_ids: tuple[str, ...] = ()
     deferred_instance_ids: tuple[str, ...] = ()
     reason: str = ""
 
@@ -269,6 +273,7 @@ def activate_flow_roles(
         return FlowRoleActivationResult(status="not_required")
 
     identity = _activation_identity(payload)
+    require_live_activation_run(orchestrator, payload)
     flow_kind = identity["flow_kind"]
     roles = role_configs_for_flow(orchestrator.config, flow_kind)
     if not roles:
@@ -390,9 +395,11 @@ def activate_flow_roles(
         ))
 
     spawned: list[str] = []
+    preexisting = {role.instance_id for role in roles if _is_alive(orchestrator, role.instance_id)}
     deferred: list[str] = []
     try:
         for role in roles:
+            require_live_activation_run(orchestrator, payload)
             if _is_alive(orchestrator, role.instance_id):
                 continue
             resume_required, resume_task_id = _on_demand_resume_obligation(
@@ -417,9 +424,17 @@ def activate_flow_roles(
                     orchestrator,
                     role,
                     activation_id=activation_id,
+                    payload=payload,
                 )
             spawned.append(role.instance_id)
+            require_live_activation_run(orchestrator, payload)
+        require_live_activation_run(orchestrator, payload)
     except Exception as exc:
+        # A spawn may succeed before a readiness wait fails or observes cancellation.
+        attempted = str(getattr(locals().get("role"), "instance_id", "") or "")
+        if attempted and attempted not in spawned and attempted not in preexisting:
+            spawned.append(attempted)
+        reclaim_cancelled_activation_roles(orchestrator, payload, spawned, roles)
         diagnostics = transport_error_diagnostics(exc)
         orchestrator.event_writer.append(ZfEvent(
             type="flow.roles.activation.failed",
@@ -447,54 +462,60 @@ def activate_flow_roles(
             f"Flow {flow_kind!r} role activation failed: {exc}",
         ) from exc
 
-    role_ids = tuple(entry["instance_id"] for entry in role_entries)
-    if applied is None:
-        orchestrator.event_writer.append(ZfEvent(
-            type="flow.roles.activation.applied",
-            actor="zf-cli",
-            payload={
-                **identity,
-                "activation_id": activation_id,
-                "activation_manifest_ref": descriptor,
-                "role_instance_ids": list(role_ids),
-                "spawned_instance_ids": spawned,
-                "deferred_instance_ids": deferred,
-                "reason": manifest["activation_reason"],
-                "source_event_id": source_event_id,
-            },
-            causation_id=source_event_id or None,
-            correlation_id=correlation_id or identity["workflow_run_id"],
-        ))
-        status = "applied"
-    elif spawned:
-        orchestrator.event_writer.append(ZfEvent(
-            type="flow.roles.activation.recovered",
-            actor="zf-cli",
-            payload={
-                **identity,
-                "activation_id": activation_id,
-                "activation_manifest_ref": descriptor,
-                "role_instance_ids": list(role_ids),
-                "recovered_instance_ids": spawned,
-                "deferred_instance_ids": deferred,
-                "reason": "missing runtime role restored from activation truth",
-                "source_event_id": source_event_id,
-            },
-            causation_id=source_event_id or applied.id,
-            correlation_id=correlation_id or identity["workflow_run_id"],
-        ))
-        status = "recovered"
-    else:
-        status = "replay"
+    try:
+        with live_run_acceptance(orchestrator, payload):
+            role_ids = tuple(entry["instance_id"] for entry in role_entries)
+            if applied is None:
+                orchestrator.event_writer.append(ZfEvent(
+                    type="flow.roles.activation.applied",
+                    actor="zf-cli",
+                    payload={
+                        **identity,
+                        "activation_id": activation_id,
+                        "activation_manifest_ref": descriptor,
+                        "role_instance_ids": list(role_ids),
+                        "spawned_instance_ids": spawned,
+                        "deferred_instance_ids": deferred,
+                        "reason": manifest["activation_reason"],
+                        "source_event_id": source_event_id,
+                    },
+                    causation_id=source_event_id or None,
+                    correlation_id=correlation_id or identity["workflow_run_id"],
+                ))
+                status = "applied"
+            elif spawned:
+                orchestrator.event_writer.append(ZfEvent(
+                    type="flow.roles.activation.recovered",
+                    actor="zf-cli",
+                    payload={
+                        **identity,
+                        "activation_id": activation_id,
+                        "activation_manifest_ref": descriptor,
+                        "role_instance_ids": list(role_ids),
+                        "recovered_instance_ids": spawned,
+                        "deferred_instance_ids": deferred,
+                        "reason": "missing runtime role restored from activation truth",
+                        "source_event_id": source_event_id,
+                    },
+                    causation_id=source_event_id or applied.id,
+                    correlation_id=correlation_id or identity["workflow_run_id"],
+                ))
+                status = "recovered"
+            else:
+                status = "replay"
 
-    return FlowRoleActivationResult(
-        status=status,
-        activation_id=activation_id,
-        manifest_ref=descriptor,
-        role_instance_ids=role_ids,
-        recovered_instance_ids=tuple(spawned) if applied is not None else (),
-        deferred_instance_ids=tuple(deferred),
-    )
+            return FlowRoleActivationResult(
+                status=status,
+                activation_id=activation_id,
+                manifest_ref=descriptor,
+                role_instance_ids=role_ids,
+                recovered_instance_ids=tuple(spawned) if applied is not None else (),
+                deferred_instance_ids=tuple(deferred),
+                spawned_instance_ids=tuple(spawned),
+            )
+    except FlowRoleBindingError:
+        reclaim_cancelled_activation_roles(orchestrator, payload, spawned, roles)
+        raise
 
 
 def restore_flow_role_activations(orchestrator: Any) -> list[FlowRoleActivationResult]:
@@ -653,8 +674,6 @@ def _on_demand_resume_obligation(
     orchestrator: Any,
     role: Any,
 ) -> tuple[bool, str]:
-    if not _is_on_demand(role):
-        return False, ""
     targets = {
         str(getattr(role, "instance_id", "") or ""),
         str(getattr(role, "name", "") or ""),
@@ -778,6 +797,7 @@ def _prepare_and_spawn_role(
     role: Any,
     *,
     activation_id: str,
+    payload: Mapping[str, Any],
 ) -> None:
     spawn_cwd = orchestrator._role_spawn_cwd(
         role,
@@ -825,12 +845,15 @@ def _prepare_and_spawn_role(
             ))
 
     orchestrator._get_spawn_coordinator().spawn(role, cwd=spawn_cwd)
+    require_live_activation_run(orchestrator, payload)
     if not orchestrator._wait_role_ready(role):
         raise transport_readiness_error(
             orchestrator.transport,
             role.instance_id,
             backend=role.backend,
         )
+
+    require_live_activation_run(orchestrator, payload)
 
     _write_flow_role_instructions(
         orchestrator,

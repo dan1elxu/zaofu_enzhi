@@ -46,6 +46,12 @@ Division of labor (avoid dual-source drift):
 - Bound browser install commands with `timeout`; never leave
   `playwright install chromium` unbounded.
 - Do not wrap an existing Docker Playwright command in another Docker command.
+- The `mcp/playwright:latest` image has an MCP CLI entrypoint. A browser
+  command MUST either use `--entrypoint bash -lc` (as in the fallback below)
+  or explicitly invoke the image's documented runner; never append `node`,
+  `npm`, or `playwright` directly after the image name. That form is parsed as
+  MCP options (for example `unknown option --test`) and is a runner failure,
+  not product evidence.
 - Do not downgrade a runner/setup failure into product rework.
 
 ## Command Pattern

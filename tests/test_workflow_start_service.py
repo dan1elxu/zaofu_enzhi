@@ -10,6 +10,8 @@ from zf.core.events import EventLog, EventWriter
 from zf.core.task.schema import Task, TaskContract
 from zf.core.task.store import TaskStore
 from zf.runtime.task_workflow_plans import task_workflow_binding_digest
+from zf.runtime.channel_contract_artifacts import persist_channel_prd
+from zf.runtime.workflow_request_acceptance import bind_task_workflow_inputs
 from zf.runtime.workflow_anchor import (
     bind_workflow_request_to_task,
     mark_workflow_managed_task,
@@ -142,6 +144,41 @@ def test_intake_classification_ignores_parent_directory_keywords(
     )
 
     assert result["effective_kind"] == "prd"
+
+
+def test_channel_prd_intake_materializes_project_reader_source(tmp_path: Path) -> None:
+    project_root, state_dir = _project(tmp_path)
+    descriptor = persist_channel_prd(
+        state_dir, channel_id="ch-prd", thread_id="main", revision=1,
+        previous_ref="", previous_digest="",
+        body={"title": "报名", "markdown": "# 报名\n\n最多 20 人。"},
+        readiness_descriptor={}, created_by="test", source_event_id="source-1",
+    )
+    task = Task(id="TASK-PRD", title="实施报名", contract=TaskContract(
+        source_mode="channel_prd", source_ref=descriptor["ref"],
+        acceptance_criteria=[{"id": "AC-01", "description": "最多 20 人"}],
+        evidence_contract={"channel_id": "ch-prd", "thread_id": "main",
+                           "channel_prd_digest": descriptor["sha256"], "prd_revision": 1},
+    ))
+    parameters, binding, contract, _ = bind_task_workflow_inputs(
+        {}, task, task_contract_digest="task-digest")
+    result = build_flow_intake(
+        kind="prd", objective="实施报名", request_id="wfint-channel-prd",
+        output=project_root / "docs" / "intake" / "channel-prd.md",
+        source_ref=parameters["source_ref"], source_refs=parameters["source_refs"],
+        artifact_refs=tuple(parameters["artifact_refs"]),
+        acceptance=tuple(parameters["acceptance"]),
+        constraints=tuple(parameters.get("constraints", [])),
+        scope=tuple(parameters.get("scope", [])),
+        task_input_binding=binding, task_input_contract=contract,
+    )
+    manifest = json.loads(Path(result["workflow_input_manifest_ref"]).read_text())
+    reader_source = Path(manifest["source_ref"])
+    assert reader_source.is_file()
+    assert reader_source.is_relative_to(project_root)
+    assert reader_source.read_text(encoding="utf-8") == "# 报名\n\n最多 20 人。\n"
+    assert manifest["source_refs"]["channel_prd_ref"] == descriptor["ref"]
+    assert manifest["source_refs"]["source_ref"] == str(reader_source)
 
 
 def test_service_rejects_missing_route_and_stale_bindings(

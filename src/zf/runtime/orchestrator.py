@@ -194,6 +194,7 @@ _KERNEL_LIVENESS_EVENTS = frozenset({
     "channel.cross_review.rejected",
     "channel.questions.frozen",
     "channel.consensus.proposed",
+    "channel.prd_evaluation.requested",
     "channel.consensus.signed",
     "channel.consensus.blocked",
     # Auto Channel handoff consumes the taskless consensus completion directly

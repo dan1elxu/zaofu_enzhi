@@ -7,6 +7,15 @@ import { useState } from "react";
 import { AgentSessionTimeline } from "./AgentSessionTimeline";
 import { PlanInteractionForm } from "./AgentInteractionControls";
 import { ComposerSubmitButton } from "./ComposerSubmitButton";
+import { DuringRunComposerActions } from "./DuringRunComposerActions";
+import { WebChatInteractionCards } from "../webchat/WebChatInteractionCards";
+import { WebChatInteractionPanel } from "../webchat/WebChatInteractionPanel";
+import { WebChatPendingControls } from "../webchat/WebChatPendingControls";
+import {
+  emptyInteractionDraft,
+  interactionKey,
+  type WebChatInteractionDraft,
+} from "../webchat/webChatInteractionModel";
 import type {
   AgentConversation,
   AgentSessionPart,
@@ -18,6 +27,12 @@ import type {
   AgentSessionTurn,
 } from "./types";
 import type { ComposerStatus } from "./workState";
+import type {
+  WebChatControlReceipt,
+  WebChatInteraction,
+  WebChatQueueItem,
+  WebChatTurn,
+} from "../../api/types";
 
 let seq = 0;
 function part(kind: AgentSessionPart["kind"], state: AgentSessionStatus, title: string, extra: Partial<AgentSessionPart> = {}): AgentSessionPart {
@@ -154,7 +169,103 @@ const channelConversation: AgentConversation = {
   threads: [{ ...thread, id: "main" }],
 };
 
+const workflowRequestConversation: AgentConversation = {
+  id: "workflow-request", surface: "kanban_agent", activeThreadId: "main",
+  threads: [{ id: "main", title: "main", status: "idle", turns: [{
+    id: "workflow-request-turn", threadId: "main", runs: [], cards: [{
+      id: "workflow-receipt", kind: "approve", title: "Start workflow", status: "completed",
+      proposal: { action: "workflow-start", requestedAction: "workflow-start", payload: {
+        task_id: "TASK-FIXTURE", route_id: "prd:standard",
+      }, reason: "Approved by Owner", valid: true },
+      payload: { resolution: "executed", status: "pending_consumer" },
+    }],
+  }] }],
+};
+
 const COMPOSER_STATES: ComposerStatus[] = ["idle", "submitted", "streaming", "error"];
+
+const webChatInteraction: WebChatInteraction = {
+  interaction_id: "interaction-fixture",
+  turn_id: "turn-fixture",
+  kind: "ask_user",
+  revision: 2,
+  request_digest: "fixture-digest",
+  request: {
+    header: "Clarify delivery",
+    questions: [{
+      id: "route",
+      header: "Delivery route",
+      question: "How should this change be delivered?",
+      options: [
+        { id: "direct", label: "Direct change", description: "Keep the scope narrow." },
+        { id: "workflow", label: "Workflow", description: "Track the work through delivery gates." },
+      ],
+      allow_other: true,
+    }, {
+      id: "evidence",
+      header: "Evidence",
+      question: "Which evidence must be attached?",
+      options: [
+        { id: "tests", label: "Focused tests" },
+        { id: "browser", label: "Browser verification" },
+      ],
+      multi_select: true,
+      allow_other: false,
+    }],
+  },
+  status: "pending",
+  currentness: { turn_revision: 3 },
+  created_at: "2026-10-01T12:00:00Z",
+  updated_at: "2026-10-01T12:00:00Z",
+};
+
+const webChatTurn: WebChatTurn = {
+  schema_version: "webchat-turn.v1",
+  turn_id: "turn-fixture",
+  project_id: "fixture",
+  conversation_id: "fixture",
+  thread_id: "main",
+  backend: "codex-headless",
+  permission_profile: "workspace_writer",
+  state: "running",
+  current_attempt_id: "attempt-fixture",
+  created_at: "2026-10-01T12:00:00Z",
+  updated_at: "2026-10-01T12:00:05Z",
+};
+
+const webChatQueueItem: WebChatQueueItem = {
+  queue_id: "queue-fixture",
+  idempotency_key: "queue-fixture-key",
+  project_id: "fixture",
+  conversation_id: "fixture",
+  thread_id: "main",
+  message: "Keep the public API stable",
+  request: { fallback_from: "steer" },
+  state: "queued",
+  source_turn_id: "turn-fixture",
+  created_at: "2026-10-01T12:00:10Z",
+  updated_at: "2026-10-01T12:00:10Z",
+};
+
+const webChatReceipts: WebChatControlReceipt[] = [{
+  receipt_id: "receipt-steer-fixture",
+  idempotency_key: "steer-fixture-key",
+  operation: "steer",
+  turn_id: "turn-fixture",
+  attempt_id: "attempt-fixture",
+  status: "queued_fallback",
+  fallback: "queue",
+  payload: { queue_id: "queue-fixture" },
+  created_at: "2026-10-01T12:00:10Z",
+}, {
+  receipt_id: "receipt-interrupt-fixture",
+  idempotency_key: "interrupt-fixture-key",
+  operation: "interrupt",
+  turn_id: "turn-fixture",
+  attempt_id: "attempt-fixture",
+  status: "accepted",
+  created_at: "2026-10-01T12:00:12Z",
+}];
 
 function fixturePlan(
   subjectType: "task_create" | "task_workflow",
@@ -291,6 +402,14 @@ function fixtureAdaptiveChannelPlan(): AgentSessionPlanRequest {
 
 export function AgentSessionFixturePage() {
   const [interrupted, setInterrupted] = useState("");
+  const [duringRunMessage, setDuringRunMessage] = useState("");
+  const [duringRunAction, setDuringRunAction] = useState("");
+  const [webChatQueue, setWebChatQueue] = useState<WebChatQueueItem[]>([webChatQueueItem]);
+  const [webChatQueueBusy, setWebChatQueueBusy] = useState("");
+  const [webChatQueueDraft, setWebChatQueueDraft] = useState("");
+  const [webChatInteractionActive, setWebChatInteractionActive] = useState(true);
+  const [webChatInteractionDraft, setWebChatInteractionDraft] = useState<WebChatInteractionDraft>(emptyInteractionDraft());
+  const [webChatInteractionResponse, setWebChatInteractionResponse] = useState<Record<string, unknown> | null>(null);
   const [taskPlanResponse, setTaskPlanResponse] = useState<AgentSessionPlanResponse>();
   const [workflowPlanResponse, setWorkflowPlanResponse] = useState<AgentSessionPlanResponse>();
   const [multiPlanResponse, setMultiPlanResponse] = useState<AgentSessionPlanResponse>();
@@ -318,6 +437,105 @@ export function AgentSessionFixturePage() {
         ))}
       </div>
       {interrupted ? <p data-testid="interrupt-echo" className="muted">{interrupted}</p> : null}
+
+      <h3 style={{ marginTop: 24 }}>During-run composer actions</h3>
+      <div className="headless-composer" data-testid="fx-during-run-composer" style={{ maxWidth: 620 }}>
+        <textarea
+          aria-label="During-run fixture message"
+          className="headless-input"
+          placeholder="Add guidance while the agent is working"
+          value={duringRunMessage}
+          onChange={(event) => setDuringRunMessage(event.target.value)}
+        />
+        <div className="headless-composer-footer">
+          <span style={{ flex: 1 }} />
+          <DuringRunComposerActions
+            canCancel
+            canInterrupt
+            canSteer={false}
+            hasMessage={Boolean(duringRunMessage.trim())}
+            primaryAction="queue"
+            onCancel={() => setDuringRunAction("stop")}
+            onQueue={() => {
+              setDuringRunAction("queue");
+              setDuringRunMessage("");
+            }}
+            onSteer={() => setDuringRunAction("steer")}
+            onSteerSooner={() => {
+              setDuringRunAction("steer-sooner");
+              setDuringRunMessage("");
+            }}
+          />
+        </div>
+      </div>
+      {duringRunAction ? <p className="muted" data-testid="during-run-action-echo">{duringRunAction}</p> : null}
+
+      <h3 style={{ marginTop: 24 }}>Durable queue and control receipts</h3>
+      <div className="headless-composer" data-testid="fx-webchat-pending" style={{ maxWidth: 620 }}>
+        <WebChatPendingControls
+          busyId={webChatQueueBusy}
+          composerHasDraft={Boolean(webChatQueueDraft.trim())}
+          queue={webChatQueue}
+          receipts={webChatReceipts}
+          turns={[webChatTurn]}
+          onCancel={(item) => {
+            setWebChatQueueBusy(item.queue_id);
+            setWebChatQueue((current) => current.map((candidate) => (
+              candidate.queue_id === item.queue_id ? { ...candidate, state: "cancelled" } : candidate
+            )));
+            setWebChatQueueBusy("");
+          }}
+          onRestore={(item) => {
+            setWebChatQueueBusy(item.queue_id);
+            setWebChatQueueDraft(item.message);
+            setWebChatQueue((current) => current.map((candidate) => (
+              candidate.queue_id === item.queue_id ? { ...candidate, state: "cancelled" } : candidate
+            )));
+            setWebChatQueueBusy("");
+          }}
+        />
+        <textarea
+          aria-label="Restored queued message"
+          className="headless-input"
+          placeholder="Queued guidance returns here"
+          value={webChatQueueDraft}
+          onChange={(event) => setWebChatQueueDraft(event.target.value)}
+        />
+      </div>
+
+      <h3 style={{ marginTop: 24 }}>Durable Ask User interaction</h3>
+      <div data-testid="fx-webchat-interaction-thread">
+        <WebChatInteractionCards
+          activeKey={webChatInteractionActive ? interactionKey(webChatInteraction) : ""}
+          drafts={{ [interactionKey(webChatInteraction)]: webChatInteractionDraft }}
+          errors={{}}
+          interactions={webChatInteractionResponse ? [] : [webChatInteraction]}
+          onCompose={() => setWebChatInteractionActive(true)}
+          onDraftChange={(_, draft) => setWebChatInteractionDraft(draft)}
+          onRespond={(_, response) => {
+            setWebChatInteractionResponse(response);
+            setWebChatInteractionActive(false);
+          }}
+        />
+      </div>
+      <div className="headless-composer" data-testid="fx-webchat-interaction" style={{ maxWidth: 620, marginTop: 8 }}>
+        {webChatInteractionActive && !webChatInteractionResponse ? (
+          <WebChatInteractionPanel
+            draft={webChatInteractionDraft}
+            interaction={webChatInteraction}
+            mode="composer"
+            onCollapse={() => setWebChatInteractionActive(false)}
+            onDraftChange={setWebChatInteractionDraft}
+            onRespond={(response) => {
+              setWebChatInteractionResponse(response);
+              setWebChatInteractionActive(false);
+            }}
+          />
+        ) : null}
+      </div>
+      {webChatInteractionResponse ? (
+        <pre data-testid="webchat-interaction-response">{JSON.stringify(webChatInteractionResponse)}</pre>
+      ) : null}
 
       <h3 style={{ marginTop: 24 }}>Plan options - Task creation</h3>
       <div data-testid="fx-task-plan-options">
@@ -367,6 +585,9 @@ export function AgentSessionFixturePage() {
       </div>
 
       <h3 style={{ marginTop: 24 }}>Preparing choices — control JSON hidden</h3>
+      <div data-testid="fx-workflow-request">
+        <AgentSessionTimeline activeThreadId="main" conversation={workflowRequestConversation} compact />
+      </div>
       <div data-testid="fx-kanban-preparing">
         <AgentSessionTimeline
           activeThreadId="main"

@@ -49,6 +49,17 @@ def structured_reply_payload_with_error(
             if key in decoded:
                 return {}, f"{key} must be an object"
     if errors:
+        # The semantic value can be complete while the provider omits only
+        # the outer envelope's final brace. Do not regenerate a long artifact
+        # in that case. No inner object, string, field or value is repaired.
+        for candidate in candidates:
+            for match in re.finditer(r'\{\s*' + re.escape(json.dumps(key)) + r'\s*:\s*', candidate):
+                try:
+                    value, end = decoder.raw_decode(candidate, match.end())
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(value, dict) and not candidate[end:].strip():
+                    return value, ""
         return {}, max(errors, key=lambda item: item[0])[1]
     if saw_object:
         return {}, f"reply JSON must contain an object named {key}"

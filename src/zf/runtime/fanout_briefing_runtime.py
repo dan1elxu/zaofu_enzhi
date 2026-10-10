@@ -920,27 +920,38 @@ class FanoutBriefingMixin:
             event_type=str(child_success_event or ""),
         )
         success_payload_file = ""
-        if is_goal_closure and not semantic_submit:
+        failure_payload_file = ""
+        if not semantic_submit:
+            # Child result payloads frequently contain evidence refs, shell
+            # commands, and multiline findings.  Inline shell JSON is fragile
+            # (quotes/newlines are routinely truncated by providers), so every
+            # structured result is written atomically and submitted by path.
             from zf.runtime.call_result_envelope import write_immutable_json_sidecar
 
-            descriptor = write_immutable_json_sidecar(
-                self.state_dir,
-                success_payload,
-                root=f"attempts/{run_id}/completion-payloads",
-                kind="fanout_child_completion_payload",
-                schema_version="fanout-child-completion-payload.v1",
-                created_by="fanout-briefing-runtime",
-                source_event_id=str(context.trigger_event_id or ""),
-            )
-            success_payload_file = str(
-                self.state_dir.expanduser().resolve() / descriptor["ref"]
-            )
+            def _payload_file(payload: dict, label: str) -> str:
+                descriptor = write_immutable_json_sidecar(
+                    self.state_dir,
+                    payload,
+                    root=f"attempts/{run_id}/completion-payloads/{label}",
+                    kind="fanout_child_completion_payload",
+                    schema_version="fanout-child-completion-payload.v1",
+                    created_by="fanout-briefing-runtime",
+                    source_event_id=str(context.trigger_event_id or ""),
+                )
+                return str(self.state_dir.expanduser().resolve() / descriptor["ref"])
+
+            success_payload_file = _payload_file(success_payload, "success")
+            failure_payload_file = _payload_file(failure_payload, "failure")
         success_command = _emit_command(
             child_success_event,
             success_payload,
             payload_file=success_payload_file,
         )
-        failure_command = _emit_command(child_failure_event, failure_payload)
+        failure_command = _emit_command(
+            child_failure_event,
+            failure_payload,
+            payload_file=failure_payload_file,
+        )
         output_contract_lines: list[str] = []
         if semantic_submit:
             from zf.runtime.stage_execution_card import prepare_profiled_stage_result
@@ -960,6 +971,19 @@ class FanoutBriefingMixin:
             failure_command=failure_command,
             semantic_submit=semantic_submit,
         )
+        result_preview_lines: list[str] = []
+        if not semantic_submit:
+            # Non-semantic readers still benefit from the schema example.  The
+            # actual command uses the immutable sidecar; semantic submitters
+            # use their scratch contract and omit this potentially large block.
+            result_preview_lines = [
+                "The payload file is authoritative; this JSON is only a shape "
+                "preview. Never copy it into an inline shell `--payload` argument.",
+                "```json",
+                json.dumps(success_payload, ensure_ascii=False, indent=2),
+                "```",
+                "",
+            ]
         review_subject_lines = render_review_subject_lines(
             candidate_ref=candidate_eval_ref,
             candidate_head=candidate_eval_head,
@@ -1027,6 +1051,7 @@ class FanoutBriefingMixin:
                 "",
                 "Use `--state-dir`; this role may run from a detached workdir.",
                 "",
+                *result_preview_lines,
                 *command_lines,
                 "Do not emit the aggregate success/failure event directly; the kernel publishes it after the fanout barrier or synth role finishes.",
                 "",

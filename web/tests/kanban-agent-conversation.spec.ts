@@ -175,9 +175,9 @@ test("KBA-02 readonly stream completes without proposal or task mutation", async
 
   await openKanbanAgent(page, id);
   await sendMessage(page, `${marker} explain the current project without changing anything`);
-  await expect(page.getByRole("button", { name: "Interrupt" })).toBeVisible({ timeout: 10_000 });
+  await expect(page.getByRole("button", { name: "Stop generating" })).toBeVisible({ timeout: 10_000 });
   await expect(page.locator(".agent-session")).toContainText(marker, { timeout: 30_000 });
-  await expect(page.getByRole("button", { name: "Interrupt" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Stop generating" })).toBeVisible();
   await expect(page.getByRole("button", { name: "Send message" })).toBeVisible({ timeout: 30_000 });
 
   const events = await waitForEvents(request, id, cursor, (items) => {
@@ -773,13 +773,13 @@ test("KBA-WORKFLOW Create Task leads to Plan, then Approve, then invoke", async 
     event.type === "operator.action.proposed"
     && eventPayloadContains(event, "workflow-start")
   ))).toHaveLength(1);
-  await expect(approve).toContainText("Workflow started", {
+  await expect(approve).toContainText("Workflow start requested", {
     timeout: 30_000,
   });
   await captureAgent(page, "07-task-workflow-started");
 });
 
-test("KBA-05 interrupt cancels only the active run and the next turn recovers", async ({ page, request }) => {
+test("KBA-05 stop cancels only the active run and the next turn recovers", async ({ page, request }) => {
   const id = await projectId(request);
   const cursor = await eventCursor(request, id);
   const holdMarker = `KBA_HOLD_${Date.now().toString(36)}`;
@@ -788,9 +788,9 @@ test("KBA-05 interrupt cancels only the active run and the next turn recovers", 
   await openKanbanAgent(page, id);
   await sendMessage(page, `${holdMarker} hold this run until interrupted`);
   await expect(page.locator(".agent-session")).toContainText(holdMarker, { timeout: 15_000 });
-  const interrupt = page.getByRole("button", { name: "Interrupt" });
-  await expect(interrupt).toBeVisible({ timeout: 15_000 });
-  await interrupt.click();
+  const stop = page.getByRole("button", { name: "Stop generating" });
+  await expect(stop).toBeVisible({ timeout: 15_000 });
+  await stop.click();
 
   await waitForEvents(request, id, cursor, (items) => (
     items.some((event) => event.type === "agent.session.run.cancelled")

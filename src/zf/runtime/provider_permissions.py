@@ -1,8 +1,10 @@
 """Provider permission snapshot helpers.
 
-The snapshot is an observability contract: it records the effective local
-security posture used when a headless provider session starts or resumes.
-It does not grant permissions by itself.
+The snapshot is an observability contract: it records the effective provider
+execution posture used when a headless session starts or resumes. ZaoFu keeps
+role write policies, artifact boundaries, and controlled actions as the
+semantic enforcement layer; trusted local provider processes run without an
+OS sandbox by default.
 """
 
 from __future__ import annotations
@@ -27,6 +29,8 @@ KANBAN_AGENT_PERMISSION_PROFILES = (
     "dangerous_full",
 )
 KANBAN_AGENT_DEFAULT_PERMISSION_PROFILE = "dangerous_full"
+DEFAULT_CODEX_HEADLESS_SANDBOX = "danger-full-access"
+DEFAULT_CLAUDE_HEADLESS_PERMISSION_MODE = "bypassPermissions"
 
 
 def _now() -> str:
@@ -38,26 +42,19 @@ def codex_security_config_for_profile(
     *,
     env: Mapping[str, str] | None = None,
 ) -> dict[str, str]:
-    profile = normalize_permission_profile(permission_profile)
+    # Validate the logical profile even though provider execution is globally
+    # full access. The profile still governs ZaoFu's write-policy and action
+    # gates; it is not an OS-sandbox selector.
+    normalize_permission_profile(permission_profile)
     values = env if env is not None else os.environ
-    defaults = {
-        "read_only": {"approvalPolicy": "never", "sandbox": "read-only"},
-        "operator": {"approvalPolicy": "never", "sandbox": "read-only"},
-        "artifact_writer": {"approvalPolicy": "never", "sandbox": "workspace-write"},
-        "project_writer": {"approvalPolicy": "never", "sandbox": "workspace-write"},
-        "workspace_writer": {"approvalPolicy": "never", "sandbox": "workspace-write"},
-        "isolated_writer": {"approvalPolicy": "never", "sandbox": "workspace-write"},
-        "dangerous_full": {"approvalPolicy": "never", "sandbox": "danger-full-access"},
-    }[profile]
     return {
-        "approvalPolicy": values.get(
-            "ZF_KANBAN_AGENT_CODEX_HEADLESS_APPROVAL_POLICY",
-            defaults["approvalPolicy"],
-        ),
-        "sandbox": values.get(
+        "approvalPolicy": str(values.get(
+            "ZF_KANBAN_AGENT_CODEX_HEADLESS_APPROVAL_POLICY", "never",
+        )).strip() or "never",
+        "sandbox": str(values.get(
             "ZF_KANBAN_AGENT_CODEX_HEADLESS_SANDBOX",
-            defaults["sandbox"],
-        ),
+            DEFAULT_CODEX_HEADLESS_SANDBOX,
+        )).strip() or DEFAULT_CODEX_HEADLESS_SANDBOX,
     }
 
 
@@ -66,19 +63,14 @@ def claude_permission_mode_for_profile(
     *,
     env: Mapping[str, str] | None = None,
 ) -> str:
-    profile = normalize_permission_profile(permission_profile)
+    # See codex_security_config_for_profile: this validates logical policy,
+    # while the provider process uses the trusted-local full-access baseline.
+    normalize_permission_profile(permission_profile)
     values = env if env is not None else os.environ
-    default = "default"
-    if profile == "dangerous_full":
-        default = "bypassPermissions"
-    elif profile in {
-        "artifact_writer",
-        "project_writer",
-        "workspace_writer",
-        "isolated_writer",
-    }:
-        default = "acceptEdits"
-    return values.get("ZF_KANBAN_AGENT_CLAUDE_HEADLESS_PERMISSION_MODE", default)
+    return str(values.get(
+        "ZF_KANBAN_AGENT_CLAUDE_HEADLESS_PERMISSION_MODE",
+        DEFAULT_CLAUDE_HEADLESS_PERMISSION_MODE,
+    )).strip() or DEFAULT_CLAUDE_HEADLESS_PERMISSION_MODE
 
 
 def provider_security_for_backend(
@@ -303,6 +295,8 @@ def emit_provider_permission_snapshot(
 __all__ = [
     "KANBAN_AGENT_DEFAULT_PERMISSION_PROFILE",
     "KANBAN_AGENT_PERMISSION_PROFILES",
+    "DEFAULT_CLAUDE_HEADLESS_PERMISSION_MODE",
+    "DEFAULT_CODEX_HEADLESS_SANDBOX",
     "build_provider_permission_snapshot",
     "claude_permission_mode_for_profile",
     "codex_security_config_for_profile",

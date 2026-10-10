@@ -22,6 +22,7 @@ from zf.runtime.channel_question_graph import (
     question_text_identity,
     validate_question_graph,
 )
+from zf.runtime.channel_cross_review_outcomes import can_retry_rejected_review, cross_review_outcome_error, settle_cross_review_question
 
 
 def apply_cross_review_reply(
@@ -85,7 +86,12 @@ def apply_cross_review_reply(
     status = str(expected.get("status") or "")
     if status == "completed":
         return
-    if status not in {"requested", "pending"}:
+    retrying = status == "rejected" and can_retry_rejected_review(
+        writer.event_log.read_all(), expected, request, channel_id,
+    )
+    if status == "rejected" and not retrying:
+        return  # Preserve the existing rejection until a current bounded repair.
+    if status not in {"requested", "pending"} and not retrying:
         _emit_cross_review_rejected(
             writer=writer,
             channel_id=channel_id,
@@ -112,6 +118,9 @@ def apply_cross_review_reply(
         )
         return
     review_body = {
+        "outcome": review.get("outcome", "resolved"),
+        "owner_question": str(review.get("owner_question") or "").strip(),
+        "recommended_answer": str(review.get("recommended_answer") or "").strip(),
         "summary": str(review.get("summary") or "").strip(),
         "answer": str(review.get("answer") or "").strip(),
         "findings": typed_items(review.get("findings")),
@@ -125,7 +134,7 @@ def apply_cross_review_reply(
         ),
         "freeze": True,
     }
-    validation_error = validate_channel_contract(
+    validation_error = cross_review_outcome_error(review, required=refs.get("cross_review_contract") == "v2") or validate_channel_contract(
         review_body,
         kind="contribution",
     )
@@ -206,6 +215,9 @@ def apply_cross_review_reply(
             "target_member_id": member_id,
             "summary": review_body["summary"],
             "answer": review_body["answer"],
+            "outcome": review_body["outcome"],
+            "owner_question": review_body["owner_question"],
+            "recommended_answer": review_body["recommended_answer"],
             "source_refs": review_body["source_refs"],
             "evidence_refs": review_body["evidence_refs"],
             "artifact_ref": descriptor["ref"],
@@ -257,36 +269,15 @@ def apply_cross_review_reply(
             "source": source,
         },
     )
-    question = _question_by_id(
-        channel,
-        str(refs.get("question_id") or ""),
-    )
-    if (
-        str(question.get("kind") or "") == "fact"
-        and review_body["answer"]
-        and review_body["evidence_refs"]
-    ):
-        writer.emit(
-            "channel.question.resolved",
-            actor=member_id or actor,
-            task_id=str(request.get("task_id") or "") or None,
-            causation_id=completed.id,
-            correlation_id=channel_id,
-            payload={
-                "channel_id": channel_id,
-                "thread_id": thread_id,
-                "question_id": str(question.get("question_id") or ""),
-                "resolution": "evidence",
-                "resolved_by": member_id or actor,
-                "answer": review_body["answer"],
-                "evidence_refs": review_body["evidence_refs"],
-                "source": source,
-            },
-        )
+    settle_cross_review_question(state_dir=state_dir, writer=writer, channel_id=channel_id,
+                                 thread_id=thread_id, request_id=request_id,
+                                 question_id=str(refs.get("question_id") or ""),
+                                 completed_event_id=completed.id, source=source)
 
 
 def apply_consensus_review_reply(
     *,
+    state_dir: Path,
     writer: EventWriter,
     channel: dict[str, Any],
     channel_id: str,
@@ -317,7 +308,26 @@ def apply_consensus_review_reply(
         and str(item.get("member_id") or "") == member_id
         for item in (blocked if isinstance(blocked, list) else [])
     )
-    if already_settled:
+    feedback_id = str(refs.get("evaluation_feedback_id") or "")
+    if feedback_id:
+        from zf.runtime.channel_evaluation_feedback import validate_feedback_reply
+
+        feedback_error = validate_feedback_reply(
+            state_dir=state_dir, writer=writer, refs=refs, review=review,
+            channel_id=channel_id, thread_id=thread_id, member_id=member_id,
+        )
+        if feedback_error:
+            writer.emit("channel.consensus.review.rejected", actor=member_id or actor,
+                        causation_id=reply_event_id, correlation_id=channel_id,
+                        payload={"channel_id": channel_id, "thread_id": thread_id,
+                                 "review_id": review_id, "member_id": member_id,
+                                 "reason": feedback_error, "source": source})
+            return
+        if any(row.type in {"channel.consensus.signed", "channel.consensus.blocked"}
+               and (row.payload or {}).get("review_id") == review_id
+               for row in writer.event_log.read_all()):
+            return
+    if already_settled and not feedback_id:
         return
     verdict = str(review.get("verdict") or "").strip().lower()
     supplied_digest = str(review.get("artifact_digest") or "").strip()
@@ -381,6 +391,11 @@ def apply_consensus_review_reply(
             correlation_id=channel_id,
             payload=common,
         )
+        if feedback_id:
+            from zf.runtime.channel_evaluation_feedback import record_feedback_reply
+
+            record_feedback_reply(state_dir=state_dir, writer=writer, refs=refs,
+                                  review=review, reply_event_id=reply_event_id, member_id=member_id)
         return
     blocker = str(review.get("blocker_question") or "").strip()
     if not blocker:
@@ -394,6 +409,17 @@ def apply_consensus_review_reply(
                 **common,
                 "reason": "blocked_review_requires_blocker_question",
             },
+        )
+        return
+    blocker_kind = str(review.get("blocker_kind") or "owner_decision").strip()
+    if blocker_kind not in {"owner_decision", "revision_request"}:
+        writer.emit(
+            "channel.consensus.review.rejected",
+            actor=member_id or actor,
+            task_id=str(request.get("task_id") or "") or None,
+            causation_id=reply_event_id,
+            correlation_id=channel_id,
+            payload={**common, "reason": "invalid_blocker_kind"},
         )
         return
     blocker_id = str(review.get("blocker_question_id") or "").strip()
@@ -414,9 +440,15 @@ def apply_consensus_review_reply(
             **common,
             "blocker_question_id": blocker_id,
             "blocker_question": blocker,
+            "blocker_kind": blocker_kind,
             "dissent": str(review.get("summary") or blocker).strip(),
         },
     )
+    if feedback_id:
+        from zf.runtime.channel_evaluation_feedback import record_feedback_reply
+
+        record_feedback_reply(state_dir=state_dir, writer=writer, refs=refs,
+                              review=review, reply_event_id=reply_event_id, member_id=member_id)
 
 
 def reply_question_records(

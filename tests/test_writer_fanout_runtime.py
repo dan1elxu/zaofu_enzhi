@@ -70,6 +70,10 @@ from zf.runtime.writer_fanout_retry import fanout_operation_key
 class _RecordingTransport:
     def __init__(self) -> None:
         self.sent: list[tuple[str, Path, str, object]] = []
+        self.terminated: list[str] = []
+
+    def terminate(self, role_name):  # noqa: ANN001
+        self.terminated.append(role_name)
 
     def send_task(self, role_name, briefing_path, prompt, *, context=None):  # noqa: ANN001
         self.sent.append((role_name, briefing_path, prompt, context))
@@ -7893,6 +7897,7 @@ def test_cancelled_run_closes_writer_resources_before_restart_recovery(
         for event in events
     )
     assert orch._last_worker_state["dev-1"] == "idle"  # type: ignore[attr-defined]
+    assert _transport.terminated == ["dev-1"]
 
     rebound_before = sum(
         event.type == "task.dispatch_context.bound"

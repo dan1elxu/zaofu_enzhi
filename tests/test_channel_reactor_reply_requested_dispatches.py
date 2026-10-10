@@ -18,6 +18,7 @@ from tests.channel_dispatch_fixture import channel_dispatches
 from pathlib import Path
 
 import pytest
+from tests.channel_wait import wait_for_channel
 
 from zf.core.config.schema import (
     ProjectConfig,
@@ -154,6 +155,9 @@ def test_raw_reply_requested_dispatches_to_target_backend(
     channel_dispatches()
     assert decision is None
 
+    wait_for_channel(lambda: any(e.type == "channel.agent.reply.completed"
+                                and e.payload.get("request_id") == REQUEST_ID
+                                for e in log.read_all()))
     started = [
         e for e in log.read_all() if e.type == "channel.agent.reply.started"
     ]

@@ -4,6 +4,7 @@ import type {
   ActionResponse,
   AgentSessionHistoryPage,
   AgentSessionRawOutput,
+  AgentProfileCatalog,
   AgentSummary,
   CausationChain,
   ChannelDetail,
@@ -52,6 +53,10 @@ import type {
   WorkflowRequestsPage,
   WorkdirSummary,
   WorkspaceProjectsPage,
+  WebChatArtifact,
+  WebChatChildActivity,
+  WebChatRuntime,
+  WebChatSearchResult,
 } from "./types";
 import { cachedGetJson, clearGetCache } from "./queryClient";
 
@@ -703,8 +708,12 @@ export interface PendingKanbanProposal {
 export function getKanbanPendingProposals(
   projectId?: string,
 ): Promise<{ items: PendingKanbanProposal[] }> {
+  // Approval entries are a safety boundary. A short GET cache can otherwise
+  // hide a proposal immediately after a Plan answer and leave the operator
+  // with no way to approve or reject it in the current session.
   return requestJson<{ items: PendingKanbanProposal[] }>(
     `${projectPrefix(projectId)}/kanban-agent/pending-proposals`,
+    { bypassCache: true },
   );
 }
 
@@ -748,6 +757,229 @@ export function getAgentSessionRawOutput(
   return requestJson<AgentSessionRawOutput>(
     `${projectPrefix(projectId || "default")}/agent-session/raw-output?${search.toString()}`,
   );
+}
+
+async function webChatMutation<T>(
+  projectId: string,
+  path: string,
+  payload?: Record<string, unknown>,
+  method: "POST" | "DELETE" = "POST",
+): Promise<T> {
+  const response = await fetch(`${projectPrefix(projectId)}/webchat${path}`, {
+    method,
+    headers: {
+      Accept: "application/json",
+      "Content-Type": "application/json",
+      ...webActionAuthHeaders(),
+    },
+    body: payload === undefined ? undefined : JSON.stringify(payload),
+  });
+  const data = await response.json() as T & { detail?: string; reason?: string };
+  if (!response.ok) {
+    throw new Error(String(data.detail || data.reason || `WebChat request failed: ${response.status}`));
+  }
+  clearGetCache(`${projectPrefix(projectId)}/webchat`);
+  return data;
+}
+
+export function getWebChatRuntime(
+  projectId: string,
+  params: { conversationId: string; threadId: string; surface?: string },
+): Promise<WebChatRuntime> {
+  const search = new URLSearchParams({
+    conversation_id: params.conversationId,
+    thread_id: params.threadId,
+    surface: params.surface ?? "kanban_agent",
+  });
+  return requestJson<WebChatRuntime>(
+    `${projectPrefix(projectId)}/webchat/runtime?${search.toString()}`,
+    { bypassCache: true },
+  );
+}
+
+export function enqueueWebChatMessage(
+  projectId: string,
+  payload: Record<string, unknown>,
+): Promise<{ ok: boolean; created: boolean; item: WebChatRuntime["queue"][number] }> {
+  return webChatMutation(projectId, "/queue", payload);
+}
+
+export function cancelWebChatQueue(projectId: string, queueId: string): Promise<Record<string, unknown>> {
+  return webChatMutation(projectId, `/queue/${encodeURIComponent(queueId)}`, undefined, "DELETE");
+}
+
+export function controlWebChatTurn(
+  projectId: string,
+  turnId: string,
+  payload: Record<string, unknown>,
+): Promise<Record<string, unknown>> {
+  return webChatMutation(projectId, `/turns/${encodeURIComponent(turnId)}/control`, payload);
+}
+
+export function answerWebChatInteraction(
+  projectId: string,
+  interactionId: string,
+  payload: Record<string, unknown>,
+): Promise<Record<string, unknown>> {
+  return webChatMutation(projectId, `/interactions/${encodeURIComponent(interactionId)}/answer`, payload);
+}
+
+export function searchWebChatMessages(
+  projectId: string,
+  query: string,
+  conversationId: string,
+  threadId = "",
+): Promise<{ items: WebChatSearchResult[] }> {
+  const search = new URLSearchParams({ q: query, conversation_id: conversationId });
+  if (threadId) search.set("thread_id", threadId);
+  return requestJson(`${projectPrefix(projectId)}/webchat/conversations/search?${search.toString()}`, { bypassCache: true });
+}
+
+export function getWebChatMessages(
+  projectId: string,
+  conversationId: string,
+  threadId: string,
+): Promise<{ items: Array<WebChatSearchResult & { content: string }> }> {
+  return requestJson(
+    `${projectPrefix(projectId)}/webchat/conversations/${encodeURIComponent(conversationId)}`
+      + `/threads/${encodeURIComponent(threadId)}/messages?limit=500`,
+    { bypassCache: true },
+  );
+}
+
+export function correctWebChatMessage(
+  projectId: string,
+  messageId: string,
+  content: string,
+): Promise<Record<string, unknown>> {
+  return webChatMutation(projectId, `/messages/${encodeURIComponent(messageId)}/correct`, { content });
+}
+
+export function forkWebChatMessage(
+  projectId: string,
+  messageId: string,
+  title: string,
+): Promise<Record<string, unknown>> {
+  return webChatMutation(projectId, `/messages/${encodeURIComponent(messageId)}/fork`, { title });
+}
+
+export function compactWebChatThread(
+  projectId: string,
+  conversationId: string,
+  threadId: string,
+  summary: string,
+  coveredMessageIds: string[],
+): Promise<Record<string, unknown>> {
+  return webChatMutation(
+    projectId,
+    `/conversations/${encodeURIComponent(conversationId)}/threads/${encodeURIComponent(threadId)}/compact`,
+    { summary, covered_message_ids: coveredMessageIds },
+  );
+}
+
+export function webChatExportUrl(
+  projectId: string,
+  conversationId: string,
+  threadId: string,
+  format: "markdown" | "json" | "txt" = "markdown",
+): string {
+  return `${projectPrefix(projectId)}/webchat/conversations/${encodeURIComponent(conversationId)}`
+    + `/threads/${encodeURIComponent(threadId)}/export?format=${format}`;
+}
+
+export function uploadWebChatArtifact(
+  projectId: string,
+  payload: Record<string, unknown>,
+): Promise<{ ok: boolean; created: boolean; artifact: WebChatArtifact }> {
+  return webChatMutation(projectId, "/artifacts", payload);
+}
+
+export function getWebChatArtifact(
+  projectId: string,
+  versionId: string,
+): Promise<{ artifact: WebChatArtifact; preview: string; preview_truncated: boolean }> {
+  return requestJson(
+    `${projectPrefix(projectId)}/webchat/artifacts/${encodeURIComponent(versionId)}`,
+    { bypassCache: true },
+  );
+}
+
+export function webChatArtifactContentUrl(projectId: string, versionId: string): string {
+  return `${projectPrefix(projectId)}/webchat/artifacts/${encodeURIComponent(versionId)}/content`;
+}
+
+export function compareWebChatArtifacts(
+  projectId: string,
+  leftVersionId: string,
+  rightVersionId: string,
+): Promise<{ diff: string }> {
+  return requestJson(
+    `${projectPrefix(projectId)}/webchat/artifacts/compare/`
+      + `${encodeURIComponent(leftVersionId)}/${encodeURIComponent(rightVersionId)}`,
+    { bypassCache: true },
+  );
+}
+
+export function publishWebChatArtifact(
+  projectId: string,
+  versionId: string,
+  digest: string,
+): Promise<{ ok: boolean; artifact: WebChatArtifact }> {
+  return webChatMutation(projectId, `/artifacts/${encodeURIComponent(versionId)}/publish`, {
+    digest,
+    principal: "kanban-agent",
+  });
+}
+
+export function adoptWebChatArtifact(
+  projectId: string,
+  versionId: string,
+  digest: string,
+  target: Record<string, unknown>,
+): Promise<{ ok: boolean; artifact: WebChatArtifact; controlled: boolean }> {
+  return webChatMutation(projectId, `/artifacts/${encodeURIComponent(versionId)}/adopt`, { digest, target });
+}
+
+export function getWebChatTaskAdoptionTarget(
+  projectId: string,
+  taskId: string,
+): Promise<Record<string, unknown>> {
+  return requestJson(
+    `${projectPrefix(projectId)}/webchat/adoption-targets/tasks/${encodeURIComponent(taskId)}`,
+    { bypassCache: true },
+  );
+}
+
+export function getWebChatChildActivities(
+  projectId: string,
+  parentTurnId = "",
+): Promise<{ items: WebChatChildActivity[] }> {
+  const search = new URLSearchParams();
+  if (parentTurnId) search.set("parent_turn_id", parentTurnId);
+  return requestJson(
+    `${projectPrefix(projectId)}/webchat/child-activities${search.size ? `?${search.toString()}` : ""}`,
+    { bypassCache: true },
+  );
+}
+
+export function getAgentProfileCatalog(projectId: string): Promise<AgentProfileCatalog> {
+  return requestJson(`${projectPrefix(projectId)}/webchat/profiles/catalog`, { bypassCache: true });
+}
+
+export function proposeAgentProfile(
+  projectId: string,
+  profileId: string,
+  payload: Record<string, unknown>,
+): Promise<Record<string, unknown>> {
+  return webChatMutation(projectId, `/profiles/${encodeURIComponent(profileId)}/proposals`, payload);
+}
+
+export function applyAgentProfile(
+  projectId: string,
+  proposalId: string,
+  payload: Record<string, unknown>,
+): Promise<Record<string, unknown>> {
+  return webChatMutation(projectId, `/profiles/proposals/${encodeURIComponent(proposalId)}/apply`, payload);
 }
 
 export function getTraceDetail(

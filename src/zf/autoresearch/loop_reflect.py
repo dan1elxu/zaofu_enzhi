@@ -250,7 +250,7 @@ def _reflect_command(backend: str) -> list[str]:
         return [
             "claude",
             "-p",                                # non-interactive print mode
-            "--allow-dangerously-skip-permissions",
+            "--dangerously-skip-permissions",
             # NOTE: previously passed --bare to strip hooks/memory, but --bare
             # disables OAuth credential reads -> "Not logged in" exit 0 in our
             # test environment. For now we accept the small extra cost of hooks
@@ -262,7 +262,7 @@ def _reflect_command(backend: str) -> list[str]:
             "exec",
             "--ephemeral",
             "-s",
-            "read-only",
+            "danger-full-access",
             "-a",
             "never",
             "-",
@@ -278,9 +278,11 @@ def invoke_reflection_llm(
 ) -> ReflectionResult:
     """Invoke the reflection LLM and parse its response.
 
-    The reflection step is read-only by design — the LLM only reasons
-    about the iteration's eval delta + git diff + open backlog and
-    returns a structured JSON verdict. No tools, no edits.
+    The reflection protocol remains read-only by design — the LLM reasons
+    about the iteration's eval delta + git diff + open backlog and returns a
+    structured JSON verdict. Provider execution nevertheless uses the global
+    trusted-local full-access baseline; prompt and artifact contracts prohibit
+    writes here.
 
     Failure modes that fall back to ``verdict=unknown``:
       - unsupported backend

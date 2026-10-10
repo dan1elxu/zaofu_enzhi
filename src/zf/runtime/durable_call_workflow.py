@@ -11,6 +11,7 @@ from zf.runtime.generic_workflow_fanout import GENERIC_WORKFLOW_HANDOFF_KEYS
 from zf.runtime.workflow_runtime_types import WorkflowRuntimeDecision
 from zf.runtime.workstream_scope_guard import check_workstream_scope
 from zf.runtime.workflow_task_lifecycle import activate_workflow_managed_task
+from zf.runtime.flow_role_activation_fence import live_run_acceptance, reclaim_cancelled_activation_roles
 
 
 _WORKFLOW_IDENTITY_KEYS = tuple(dict.fromkeys((
@@ -203,6 +204,20 @@ class DurableCallWorkflowMixin:
                 source_event=accepted_event.type,
             )
 
+    def _activate_replayed_workflow_task(self, event: ZfEvent, accepted: ZfEvent) -> bool:
+        from zf.runtime.flow_roles import FlowRoleBindingError
+
+        try:
+            with live_run_acceptance(self, accepted.payload or {}):
+                self._activate_workflow_task(accepted)
+        except FlowRoleBindingError as exc:
+            self._emit_workflow_invoke_rejected(
+                event, str(exc), task_id=str(event.task_id or ""),
+                pattern_id=str((event.payload or {}).get("pattern_id") or ""),
+            )
+            return False
+        return True
+
     def _on_workflow_invoke_requested(
         self,
         event: ZfEvent,
@@ -364,7 +379,8 @@ class DurableCallWorkflowMixin:
             None,
         )
         if prior_accept is not None:
-            self._activate_workflow_task(prior_accept)
+            if not self._activate_replayed_workflow_task(event, prior_accept):
+                return WorkflowRuntimeDecision(action="block", task_id=task_id, reason="Run terminal on invoke replay")
         if (
             prior_accept is not None
             and not str(
@@ -461,7 +477,8 @@ class DurableCallWorkflowMixin:
                 or existing_accept is not None
             ):
                 if existing_accept is not None:
-                    self._activate_workflow_task(existing_accept)
+                    if not self._activate_replayed_workflow_task(event, existing_accept):
+                        return WorkflowRuntimeDecision(action="block", task_id=task_id, reason="Run terminal on invoke replay")
                 if invoke_operation.status in {"requested", "reserved"} and existing_accept is not None:
                     from zf.runtime.call_result_runtime import workflow_operation_service
                     from zf.runtime.workflow_operation import load_workflow_operation
@@ -616,13 +633,23 @@ class DurableCallWorkflowMixin:
                 fanout_request.payload[key] = value
         fanout_request.payload["workflow_invoke_admitted"] = True
         accepted_event.payload["fanout_request_event_id"] = fanout_request.id
-        self.event_writer.append(accepted_event)
-        self._activate_workflow_task(accepted_event)
-        self._mark_workflow_request_running(
-            payload,
-            accepted_event=accepted_event,
-        )
-        self.event_writer.append(fanout_request)
+        try:
+            with live_run_acceptance(self, payload):
+                self.event_writer.append(accepted_event)
+                self._activate_workflow_task(accepted_event)
+                self._mark_workflow_request_running(payload, accepted_event=accepted_event)
+                self.event_writer.append(fanout_request)
+        except FlowRoleBindingError as exc:
+            from zf.runtime.flow_roles import role_configs_for_flow
+
+            reclaim_cancelled_activation_roles(
+                self, payload, list(activation.spawned_instance_ids),
+                role_configs_for_flow(self.config, str(payload.get("flow_kind") or "")),
+            )
+            self._emit_workflow_invoke_rejected(
+                event, str(exc), task_id=task_id, pattern_id=pattern_id,
+            )
+            return WorkflowRuntimeDecision(action="block", task_id=task_id, reason=str(exc))
         if str(getattr(stage, "trigger", "") or "") == event.type:
             self._try_start_declared_workflow_fanout(
                 fanout_request,

@@ -80,6 +80,27 @@ export function channelWorkflowHandoffIdempotencyKey(args: {
 export function createChannelActionAdapter(args: ChannelActionAdapterArgs) {
   const channelId = () => args.selectedChannelId || "ch-zaofu";
 
+  async function cancelProviderRun(runId: string) {
+    const run = args.channelDetail?.provider_runs?.find((item) => item.run_id === runId);
+    const threadId = String(run?.provider_thread_id || "");
+    if (!threadId) throw new Error("Provider identity unavailable. Refresh and retry.");
+    const result = await args.submitAction("agent-session-cancel", {
+      run_id: runId, thread_id: threadId, conversation_id: channelId(),
+      channel_id: channelId(), backend: run?.backend || run?.provider,
+    });
+    if (!result.ok) throw new Error(result.reason || "Provider cancellation failed");
+    await args.refreshChannelDetail();
+  }
+
+  async function decideMemberInvitation(proposal: Record<string, unknown>, decision: "approved" | "rejected") {
+    const result = await args.submitAction("channel-invite-member", {
+      channel_id: channelId(), thread_id: proposal.thread_id,
+      proposal_id: proposal.proposal_id, member_id: proposal.member_id, decision,
+    });
+    if (!result.ok) throw new Error(result.reason || "Member invitation failed");
+    await args.refreshChannelDetail();
+  }
+
   async function setDiscussionMode(
     threadId: string,
     mode: string,
@@ -112,6 +133,16 @@ export function createChannelActionAdapter(args: ChannelActionAdapterArgs) {
       "channel.owner_report.request",
       ownerReportPayload(channelId(), threadId),
     );
+  }
+
+  async function evaluatePrd(threadId: string, revision: number, artifactRef: string, artifactDigest: string, role: "full" | "focused", retry: boolean) {
+    const result = await args.submitAction("channel-prd-evaluate", {
+      channel_id: channelId(), thread_id: threadId, prd_revision: revision,
+      artifact_ref: artifactRef, artifact_digest: artifactDigest, role,
+      retry,
+      source: "web-channel-prd-preview",
+    });
+    if (!result.ok) throw new Error(result.reason || "PRD evaluation request failed");
   }
 
   async function clearHistory(threadId: string) {
@@ -151,7 +182,7 @@ export function createChannelActionAdapter(args: ChannelActionAdapterArgs) {
       resolved_by: "owner:operator",
       source: "web-channel-question",
     });
-    if (!result.ok) return;
+    if (!result.ok) throw new Error(result.reason || "Decision was not accepted; please retry.");
     try {
       await args.refreshChannelDetail();
     } catch {
@@ -174,12 +205,10 @@ export function createChannelActionAdapter(args: ChannelActionAdapterArgs) {
     artifactRef: string,
     artifactDigest: string,
     blocker = "",
+    acceptReadinessRisk = false,
   ) {
     const consensus = args.channelDetail?.consensus?.[threadId] ?? {};
     const prdRevision = Number(consensus.prd_revision ?? 0);
-    const readinessVerdict = String(
-      consensus.readiness_verdict ?? "unassessed",
-    );
     await args.submitAction(
       decision === "confirm"
         ? "channel-consensus-confirm"
@@ -190,10 +219,7 @@ export function createChannelActionAdapter(args: ChannelActionAdapterArgs) {
         artifact_ref: artifactRef,
         artifact_digest: artifactDigest,
         prd_revision: prdRevision,
-        accept_readiness_risk: (
-          readinessVerdict === "needs_owner"
-          || readinessVerdict === "needs_multi_lens"
-        ) || undefined,
+        accept_readiness_risk: decision === "confirm" && acceptReadinessRisk || undefined,
         member_id: "owner:operator",
         blocker_question: blocker || undefined,
         source: "web-channel-consensus",
@@ -213,7 +239,7 @@ export function createChannelActionAdapter(args: ChannelActionAdapterArgs) {
       taskId,
       threadId,
     });
-    if (!planning) return;
+    if (!planning) throw new Error("The current PRD is not ready for planning. Refresh and review it first.");
     const snapshotProjectId = args.snapshot?.project?.project_id || "";
     const projectId = kanbanAgentProjectId(
       args.activeProjectId,
@@ -270,7 +296,7 @@ export function createChannelActionAdapter(args: ChannelActionAdapterArgs) {
       idempotency_key: idempotencyKey,
       source: "web-channel-workflow-plan",
     });
-    if (!result.ok) return;
+    if (!result.ok) throw new Error(String(result.reason || "Planning request failed. Please retry."));
     try {
       await args.refreshChannelDetail();
     } catch {
@@ -287,10 +313,13 @@ export function createChannelActionAdapter(args: ChannelActionAdapterArgs) {
   }
 
   return {
+    cancelProviderRun,
     adoptResearchResult,
     clearHistory,
     decideConsensus,
+    decideMemberInvitation,
     generateOwnerReport,
+    evaluatePrd,
     requestSynthesis,
     resolveQuestion,
     retryAutoStep,

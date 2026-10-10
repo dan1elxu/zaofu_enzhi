@@ -227,7 +227,9 @@ _OVERSIZED_FILE_CAPS = {
     # joins _KERNEL_LIVENESS_EVENTS so task-less channel events reach the
     # builtin side-effect handlers under L2-active configs — a set-membership
     # line plus a comment; the handler logic lives in channel_moderator.py.
-    "src/zf/runtime/orchestrator.py": 4945,
+    # Merge candidate 0.0.8: +1 taskless PRD diagnostic liveness route; the
+    # handler remains a central registration call site and is not a sibling.
+    "src/zf/runtime/orchestrator.py": 4946,
     # +14 (2026-06-20): PRD-product-stage branch in the fanout-child briefing
     # builder (emits prd_ref/artifact_refs/evidence_refs). It is one more
     # sibling branch of the same _write_*_fanout_briefing method that already
@@ -378,7 +380,9 @@ _OVERSIZED_FILE_CAPS = {
     # +17 (2026-07-15): execute() emits kanban.agent.proposal.resolved after any
     # successful proposal action so its Triage card clears — an inline guard on
     # the central dispatch's own result, not a new action, so it stays here.
-    "src/zf/runtime/control_actions.py": 577,
+    # Merge candidate 0.0.8: +2 central action dispatch registration lines;
+    # domain implementation lives in the Channel evaluation sibling.
+    "src/zf/runtime/control_actions.py": 579,
     "src/zf/runtime/orchestrator_lifecycle.py": 2750,
     # Frontend freeze (2026-06-12): the two web monoliths had no size
     # gate at all (doc 44 "web 没人 review"); after the server.py split

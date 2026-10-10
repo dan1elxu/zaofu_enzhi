@@ -54,6 +54,7 @@ QueryFn = Callable[..., Any]  # async generator factory
 _MAX_QUEUED_TURNS_PER_ROLE = 1
 _SESSION_FILE_SETTLE_TIMEOUT_S = 2.0
 _SESSION_FILE_POLL_INTERVAL_S = 0.05
+_CLAUDE_SDK_PERMISSION_MODE = "bypassPermissions"
 
 
 @dataclass(frozen=True)
@@ -182,6 +183,8 @@ class StreamJsonTransport(TransportAdapter):
         self._dispatch_lock = threading.RLock()
         self._dispatch_queues: dict[str, deque[_QueuedDispatch]] = {}
         self._dispatch_threads: dict[str, threading.Thread] = {}
+        from zf.runtime.stream_json_cancellation import StreamJsonTurnCancellation
+        self._turn_cancellation = StreamJsonTurnCancellation()
         self._closing = False
 
     # -- TransportAdapter interface --
@@ -201,6 +204,7 @@ class StreamJsonTransport(TransportAdapter):
         *,
         cwd: Path | None = None,
     ) -> None:
+        self._turn_cancellation.reset(role.instance_id)
         # Stream-json has no long-lived process, but SpawnCoordinator's argv
         # carries role-scoped capability credentials. Preserve that leading
         # ``env KEY=VALUE ...`` block for the SDK subprocess.
@@ -414,16 +418,18 @@ class StreamJsonTransport(TransportAdapter):
         def _drain_once(sid: str, resume: bool):
             with SessionLock(self.lock_dir, sid):
                 return asyncio.run(
-                    self._drain(
+                    self._turn_cancellation.drain(role_name, lambda: self._drain(
                         prompt=prompt, session_id=sid,
                         role=role, is_resume=resume,
                         cwd=role_cwd,
                         env=role_env,
-                    )
+                    ))
                 )
 
         try:
             messages, status = _drain_once(session_id, is_resume)
+        except asyncio.CancelledError:
+            return
         except Exception as exc:
             # P0-1 (2026-06-19 e2e): a role re-dispatched within a run (e.g. a
             # synthRole invoked a second time after its fanout children) reuses
@@ -437,6 +443,8 @@ class StreamJsonTransport(TransportAdapter):
                 purge_stale_claude_session_lock(session_id)
                 try:
                     messages, status = _drain_once(session_id, False)
+                except asyncio.CancelledError:
+                    return
                 except Exception:
                     self._last_query_ok[role_name] = False
                     self._record_provider_operation(
@@ -693,12 +701,7 @@ class StreamJsonTransport(TransportAdapter):
             class _Stub:
                 pass
             stub = _Stub()
-            sdk_perm = (
-                "bypassPermissions"
-                if role.permission_mode == "bypass"
-                else "default"
-            )
-            stub.permission_mode = sdk_perm  # type: ignore[attr-defined]
+            stub.permission_mode = _CLAUDE_SDK_PERMISSION_MODE  # type: ignore[attr-defined]
             stub.allowed_tools = list(role.allowed_tools)  # type: ignore[attr-defined]
             stub.cwd = str(option_cwd)  # type: ignore[attr-defined]
             stub.model = (  # type: ignore[attr-defined]
@@ -714,9 +717,8 @@ class StreamJsonTransport(TransportAdapter):
                 stub.extra_args = {"session-id": session_id}  # type: ignore[attr-defined]
             return stub
 
-        sdk_perm = "bypassPermissions" if role.permission_mode == "bypass" else "default"
         opts: dict = dict(
-            permission_mode=sdk_perm,
+            permission_mode=_CLAUDE_SDK_PERMISSION_MODE,
             allowed_tools=list(role.allowed_tools),
             cwd=str(option_cwd),
             model=role.model if role.model and role.model != "placeholder" else None,
@@ -886,6 +888,10 @@ class StreamJsonTransport(TransportAdapter):
     def terminate(self, role_name: str) -> None:
         with self._dispatch_lock:
             self._dispatch_queues.pop(role_name, None)
+            thread = self._dispatch_threads.get(role_name)
+        self._turn_cancellation.cancel_and_join(role_name, thread)
+        with self._dispatch_lock:
+            self._dispatch_queues.pop(role_name, None)
             self._messages.pop(role_name, None)
             self._roles.pop(role_name, None)
             self._cwd_by_role.pop(role_name, None)
@@ -897,7 +903,11 @@ class StreamJsonTransport(TransportAdapter):
     def shutdown(self, *, exclude_roles: set[str] | None = None) -> None:
         with self._dispatch_lock:
             self._closing = True
+            roles = set(self._roles) | set(self._dispatch_threads)
             self._dispatch_queues.clear()
+        for role_name in roles - (exclude_roles or set()):
+            self.terminate(role_name)
+        with self._dispatch_lock:
             self._messages.clear()
             self._roles.clear()
             self._cwd_by_role.clear()

@@ -14,12 +14,12 @@ from zf.runtime.kanban_plan_requests import (
     PLAN_REQUEST_SCHEMA_VERSION,
     PLAN_RESPONSE_SCHEMA_VERSION,
     normalize_plan_request_revision,
-    plan_requirement_digest,
     plan_request_digest,
     plan_request_gate,
     plan_response_gate,
 )
 from zf.web.plan_extraction import extract_plan_request
+from zf.web.plan_requirement_sources import requirement_source_messages
 from zf.web.projections.common import _action_failed
 
 
@@ -457,16 +457,13 @@ def prepare_headless_plan_draft(
     effective_task_contract_digest = task_contract_digest or str(
         (task_binding_digests or {}).get(task_id or "") or ""
     )
-    requirement_rows = _plan_requirement_rows(
+    source_messages = requirement_source_messages(
         event_list,
         originating_message_event_id=originating_message_event_id,
         project_id=project_id,
         conversation_id=conversation_id,
         thread_key=thread_key or fallback_thread_id,
     )
-    originating_message_event_ids = [
-        event_id for event_id, _message in requirement_rows
-    ]
     plan_request = extract_plan_request(
         answer,
         plan_context={
@@ -482,17 +479,7 @@ def prepare_headless_plan_draft(
             "backend": backend,
             "provider_session_id": provider_session_id,
             "originating_message_event_id": originating_message_event_id,
-            "originating_message_event_ids": (
-                originating_message_event_ids
-            ),
-            "requirement_digest": (
-                plan_requirement_digest(requirement_rows)
-                if requirement_rows
-                else ""
-            ),
-            "user_semantic_context": "\n\n".join(
-                message for _event_id, message in requirement_rows
-            ),
+            "requirement_source_messages": source_messages,
             "workflow_parameters": workflow_context or {},
             "canonical_channel_prds": canonical_channel_prds or {},
         },
@@ -679,76 +666,6 @@ def _origin_plan_discussion(
     )
     discussion = request.get("plan_discussion")
     return discussion if isinstance(discussion, dict) else {}
-
-
-_REQUIREMENT_BOUNDARY_EVENTS = frozenset({
-    "channel.created",
-    "task.created",
-    "workflow.invoke.requested",
-})
-
-
-def _plan_requirement_rows(
-    events: list[ZfEvent],
-    *,
-    originating_message_event_id: str,
-    project_id: str,
-    conversation_id: str,
-    thread_key: str,
-) -> list[tuple[str, str]]:
-    origin_index = next(
-        (
-            index
-            for index, event in enumerate(events)
-            if event.id == originating_message_event_id
-            and event.type == "user.message"
-        ),
-        -1,
-    )
-    if origin_index < 0:
-        return []
-    rows: list[tuple[str, str]] = []
-    for event in reversed(events[:origin_index + 1]):
-        if event.type in _REQUIREMENT_BOUNDARY_EVENTS and rows:
-            break
-        if event.type != "user.message" or not isinstance(
-            event.payload, dict
-        ):
-            continue
-        payload = event.payload
-        if not _same_requirement_scope(
-            payload,
-            project_id=project_id,
-            conversation_id=conversation_id,
-            thread_key=thread_key,
-        ):
-            continue
-        message = str(
-            payload.get("message") or payload.get("text") or ""
-        ).strip()
-        if message:
-            rows.append((event.id, message))
-        if len(rows) >= 6:
-            break
-    return list(reversed(rows))
-
-
-def _same_requirement_scope(
-    payload: dict[str, Any],
-    *,
-    project_id: str,
-    conversation_id: str,
-    thread_key: str,
-) -> bool:
-    for key, expected in (
-        ("project_id", project_id),
-        ("conversation_id", conversation_id),
-        ("thread_key", thread_key),
-    ):
-        actual = str(payload.get(key) or "")
-        if expected and actual and actual != expected:
-            return False
-    return True
 
 
 __all__ = [

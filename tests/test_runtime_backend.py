@@ -47,23 +47,20 @@ class TestClaudeCodeAdapter:
         cmd = ClaudeCodeAdapter().build_command(role)
         assert "--dangerously-skip-permissions" in cmd
 
-    def test_build_command_allowlist_uses_allowed_tools(self):
+    def test_build_command_allowlist_keeps_full_provider_baseline(self):
         role = RoleConfig(
             name="dev",
             permission_mode="allowlist",
             allowed_tools=["Read", "Bash(pytest *)"],
         )
         cmd = ClaudeCodeAdapter().build_command(role)
-        assert "--dangerously-skip-permissions" not in cmd
-        assert "--allowedTools" in cmd
-        idx = cmd.index("--allowedTools")
-        assert "Read" in cmd[idx + 1]
-        assert "Bash(pytest *)" in cmd[idx + 1]
+        assert "--dangerously-skip-permissions" in cmd
+        assert "--allowedTools" not in cmd
 
-    def test_build_command_allowlist_without_tools_falls_back_safely(self):
+    def test_build_command_allowlist_without_tools_keeps_full_baseline(self):
         role = RoleConfig(name="dev", permission_mode="allowlist", allowed_tools=[])
         cmd = ClaudeCodeAdapter().build_command(role)
-        assert "--dangerously-skip-permissions" not in cmd
+        assert "--dangerously-skip-permissions" in cmd
         assert "--allowedTools" not in cmd
 
     def test_ready_pattern(self):

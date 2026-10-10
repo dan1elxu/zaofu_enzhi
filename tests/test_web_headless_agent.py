@@ -102,7 +102,7 @@ def _fake_codex_script(tmp_path: Path) -> Path:
             [
                 "import json, os, sys",
                 "expected_thinking = os.environ.get('FAKE_CODEX_THINKING_LEVEL')",
-                "expected_sandbox = os.environ.get('FAKE_CODEX_SANDBOX', 'read-only')",
+                "expected_sandbox = os.environ.get('FAKE_CODEX_SANDBOX', 'danger-full-access')",
                 "expect_resume_security = os.environ.get('FAKE_CODEX_EXPECT_RESUME_SECURITY')",
                 "for line in sys.stdin:",
                 "    if not line.strip():",
@@ -183,6 +183,9 @@ def test_system_prompt_requires_exact_artifact_lineage_for_create_task(
     assert "runner/config, and evidence-producer paths" in prompt
     assert "omit Playwright/evidence paths" in prompt
     assert "target_root" in prompt
+    assert "needed lenses" in prompt
+    assert "Profile registration" in prompt
+    assert "continue the original thread" in prompt
 
 
 def test_chat_plan_payload_rejects_discussion_and_response_together() -> None:
@@ -254,6 +257,11 @@ def test_chat_orchestrator_injects_canonical_channel_prd_context(
     assert '"canonical_channel_prds"' in prompt
     assert '"artifact_ref": "channel-artifacts/ch-prd/prd.md"' in prompt
     assert '"artifact_digest": "sha256:canonical"' in prompt
+    messages = [event for event in EventLog(state_dir / "events.jsonl").read_all()
+                if event.type == "user.message"]
+    assert messages
+    assert '"requirement_source_messages"' in prompt
+    assert messages[-1].id in prompt
 
 
 def test_chat_orchestrator_binds_agent_selected_channel_prd_plan(
@@ -400,7 +408,8 @@ def _fake_codex_user_input_request_script(tmp_path: Path) -> Path:
     script.write_text(
         "\n".join(
             [
-                "import json, sys",
+                "import json, os, sys",
+                "expected_code = int(os.environ.get('FAKE_CODEX_USER_INPUT_ERROR_CODE', '-32001'))",
                 "for line in sys.stdin:",
                 "    if not line.strip():",
                 "        continue",
@@ -409,10 +418,11 @@ def _fake_codex_user_input_request_script(tmp_path: Path) -> Path:
                 "    req_id = msg.get('id')",
                 "    if req_id == 99 and not method:",
                 "        error = msg.get('error', {})",
-                "        assert error.get('code') == -32601, msg",
-                "        assert 'plan_request' in error.get('message', ''), msg",
-                "        print(json.dumps({'jsonrpc':'2.0','method':'item/agentMessage/delta','params':{'delta':'input rejected safely'}}), flush=True)",
-                "        print(json.dumps({'jsonrpc':'2.0','method':'turn/completed','params':{'turn':{'status':'completed'}}}), flush=True)",
+                "        assert error.get('code') == expected_code, msg",
+                "        if expected_code == -32601:",
+                "            assert 'plan_request' in error.get('message', ''), msg",
+                "            print(json.dumps({'jsonrpc':'2.0','method':'item/agentMessage/delta','params':{'delta':'input rejected safely'}}), flush=True)",
+                "            print(json.dumps({'jsonrpc':'2.0','method':'turn/completed','params':{'turn':{'status':'completed'}}}), flush=True)",
                 "    elif req_id and method == 'initialize':",
                 "        print(json.dumps({'jsonrpc':'2.0','id':req_id,'result':{'serverInfo':{'name':'fake-codex'}}}), flush=True)",
                 "    elif method == 'initialized':",
@@ -465,7 +475,7 @@ def test_claude_headless_turn_parses_reply_and_persists_thread(
     assert result.usage == {"input_tokens": 3, "output_tokens": 4}
     assert result.permission_snapshot["backend"] == "claude-headless"
     assert result.permission_snapshot["permission_profile"] == "read_only"
-    assert result.permission_snapshot["permission_mode"] == "default"
+    assert result.permission_snapshot["permission_mode"] == "bypassPermissions"
     assert result.permission_drift == {"status": "ok", "items": []}
     sent = json.loads(capture.read_text(encoding="utf-8"))
     assert sent["type"] == "user"
@@ -476,7 +486,7 @@ def test_claude_headless_turn_parses_reply_and_persists_thread(
         project_root=state_dir.parent,
     ).load(scope="project", task_id="TASK-1")
     assert stored["providers"]["claude-headless"]["provider_session_id"] == "claude-session-1"
-    assert stored["providers"]["claude-headless"]["permission_snapshot"]["permission_mode"] == "default"
+    assert stored["providers"]["claude-headless"]["permission_snapshot"]["permission_mode"] == "bypassPermissions"
     assert stored["last_reply"] == "final headless answer"
 
 
@@ -924,7 +934,7 @@ def test_headless_permission_profiles_map_to_provider_security(
     assert "--permission-mode" in claude_args
     assert claude_args[claude_args.index("--permission-mode") + 1] == "bypassPermissions"
 
-    monkeypatch.setenv("FAKE_CODEX_SANDBOX", "workspace-write")
+    monkeypatch.setenv("FAKE_CODEX_SANDBOX", "danger-full-access")
     script = _fake_codex_script(tmp_path)
     codex = CodexHeadlessBackend(command=f"{sys.executable} {script}")
     result = codex.run_turn(
@@ -998,7 +1008,7 @@ def test_codex_headless_resume_reapplies_provider_security(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ):
-    monkeypatch.setenv("FAKE_CODEX_SANDBOX", "workspace-write")
+    monkeypatch.setenv("FAKE_CODEX_SANDBOX", "danger-full-access")
     monkeypatch.setenv("FAKE_CODEX_EXPECT_RESUME_SECURITY", "1")
     script = _fake_codex_script(tmp_path)
     codex = CodexHeadlessBackend(command=f"{sys.executable} {script}")
@@ -1023,6 +1033,7 @@ def test_codex_headless_resume_reapplies_provider_security(
 def test_codex_headless_sandbox_preflight_warns_when_bwrap_probe_fails(
     monkeypatch: pytest.MonkeyPatch,
 ):
+    monkeypatch.setenv("ZF_KANBAN_AGENT_CODEX_HEADLESS_SANDBOX", "workspace-write")
     def fake_which(name: str) -> str | None:
         return {
             "bwrap": "/usr/bin/bwrap",
@@ -1147,9 +1158,45 @@ def test_codex_headless_v2_file_change_uses_accept_decline_decision(
     assert result.ok is True
 
 
-def test_codex_headless_rejects_native_user_input_with_protocol_error(
+def test_codex_headless_captures_native_user_input_as_pending_interaction(
     tmp_path: Path,
 ) -> None:
+    script = _fake_codex_user_input_request_script(tmp_path)
+    codex = CodexHeadlessBackend(command=f"{sys.executable} {script}")
+    messages = []
+
+    result = codex.run_turn(
+        prompt="ask for the route",
+        cwd=tmp_path,
+        system_prompt="system",
+        thread_id="zf-thread",
+        provider_session_id="",
+        on_session_id=lambda _: None,
+        on_message=messages.append,
+        timeout_s=5,
+        permission_profile="read_only",
+    )
+
+    assert result.ok is True
+    assert result.status == "waiting_input"
+    assert result.reply == ""
+    assert len(messages) == 1
+    assert messages[0].type == "question"
+    assert messages[0].raw["native_interaction"]["questions"] == [
+        {
+            "id": "route",
+            "question": "Which route?",
+            "options": [{"label": "A"}, {"label": "B"}],
+        }
+    ]
+
+
+def test_codex_headless_legacy_rollout_rejects_native_user_input(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("ZF_KANBAN_WEBCHAT_RUNTIME", "legacy")
+    monkeypatch.setenv("FAKE_CODEX_USER_INPUT_ERROR_CODE", "-32601")
     script = _fake_codex_user_input_request_script(tmp_path)
     codex = CodexHeadlessBackend(command=f"{sys.executable} {script}")
 
@@ -1166,6 +1213,7 @@ def test_codex_headless_rejects_native_user_input_with_protocol_error(
     )
 
     assert result.ok is True
+    assert result.status == "completed"
     assert result.reply == "input rejected safely"
 
 
@@ -1379,6 +1427,9 @@ def test_chat_orchestrator_can_use_claude_headless_backend(
     assert turn_completed.payload["timing"]["provider_duration_ms"] >= 0
     assert turn_completed.payload["timing"]["time_to_first_output_ms"] >= 0
     assert turn_completed.payload["timing"]["plan_projection_duration_ms"] >= 0
+    assert turn_completed.payload["outcome"] == "completed"
+    assert turn_completed.payload["failure_class"] == "none"
+    assert turn_completed.payload["retryable"] is False
 
 
 def test_chat_orchestrator_failed_turn_carries_timing(
@@ -1413,6 +1464,9 @@ def test_chat_orchestrator_failed_turn_carries_timing(
     assert failed.payload["timing"]["provider_duration_ms"] >= 0
     assert failed.payload["timing"]["time_to_first_output_ms"] is None
     assert failed.payload["timing"]["plan_projection_duration_ms"] is None
+    assert failed.payload["outcome"] == "failed"
+    assert failed.payload["failure_class"] == "provider_error"
+    assert failed.payload["retryable"] is True
 
 
 def _bus_rows(state_dir: Path, type_: str = ""):
@@ -1682,7 +1736,7 @@ def test_workspace_writer_runs_real_headless_executor_and_records_profile(
         if event.type == "provider.permission.snapshot.recorded"
     ]
     assert snapshots[-1].payload["permission_profile"] == "workspace_writer"
-    assert snapshots[-1].payload["snapshot"]["permission_mode"] == "acceptEdits"
+    assert snapshots[-1].payload["snapshot"]["permission_mode"] == "bypassPermissions"
     completed = [
         event for event in events if event.type == "kanban.agent.turn.completed"
     ]
@@ -2227,7 +2281,8 @@ def test_chat_orchestrator_rejects_combined_plan_and_approve_output(
         },
     )
 
-    assert response.status_code == 200
+    assert response.status_code == 422
+    assert response.json()["status"] == "invalid_interaction_contract"
     reply = response.json()["reply"]
     assert "action_proposal" not in reply
     assert reply["plan_request"]["valid"] is False

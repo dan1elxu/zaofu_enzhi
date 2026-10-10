@@ -174,6 +174,7 @@ def project_channel_conversation(
         "scope": detail.get("scope") or {},
         "members": detail.get("members") or [],
         "member_count": detail.get("member_count") or 0,
+        "member_invitation_proposals": detail.get("member_invitation_proposals") or [],
         "threads": detail.get("threads") or [],
         "read_state": detail.get("read_state") or [],
         "unread_count": detail.get("unread_count") or 0,
@@ -217,6 +218,12 @@ def project_channel_conversation(
         "discussions": detail.get("discussions") or {},
         "discussion_attention": detail.get("discussion_attention") or {},
         "open_questions": detail.get("open_questions") or [],
+        "cross_reviews": [
+            {key: item.get(key) for key in (
+                "request_id", "thread_id", "question_id", "target_member_id", "status", "outcome", "reason", "updated_at",
+            )}
+            for item in detail.get("cross_reviews") or [] if isinstance(item, dict)
+        ],
         "question_frontiers": detail.get("question_frontiers") or {},
         "owner_questionnaires": detail.get("owner_questionnaires") or {},
         "question_graph_digests": detail.get("question_graph_digests") or {},

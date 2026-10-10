@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from zf.runtime.channel_member_proposals import pending_member_proposals
+
 from zf.core.state.locks import locked_path
 from zf.core.events import ZfEvent
 from zf.runtime.channel_contracts import normalize_product_discussion_mode
@@ -182,6 +184,10 @@ class ChannelConsensusActionsMixin:
         thread_id: str,
     ) -> dict:
         channel = project_channel(self.state_dir, channel_id) or {}
+        if pending_member_proposals(channel, thread_id):
+            return self._failed(requested=requested, action=action, requested_action=requested_action,
+                                task_id=requested.task_id, reason="member invitation approval is pending",
+                                status_code=409, status="member_invitation_pending")
         consensus = (
             channel.get("consensus", {}).get(thread_id)
             if isinstance(channel.get("consensus"), dict)

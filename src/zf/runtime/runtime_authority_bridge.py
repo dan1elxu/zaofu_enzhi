@@ -298,7 +298,8 @@ class RuntimeAuthorityMixin:
             None,
         )
         if existing_accept is not None:
-            self._activate_workflow_task(existing_accept)
+            if not self._activate_replayed_workflow_task(event, existing_accept):
+                return WorkflowRuntimeDecision(action="block", task_id=task_id, reason="Run terminal on invoke replay")
             return WorkflowRuntimeDecision(
                 action="observe",
                 task_id=task_id,
@@ -329,22 +330,32 @@ class RuntimeAuthorityMixin:
             value = payload.get(key)
             if value not in (None, ""):
                 accepted.payload[key] = value
-        accepted = self.event_writer.append(accepted)
-        self._activate_workflow_task(accepted)
-        self._mark_workflow_request_running(payload, accepted_event=accepted)
+        from zf.runtime.flow_role_activation_fence import live_run_acceptance
+        from zf.runtime.flow_roles import FlowRoleBindingError
 
-        entry_payload = dict(raw_entry_payload)
-        entry_payload["workflow_run_id"] = run_id
-        entry_payload.setdefault("source_event_id", event.id)
-        entry_payload.setdefault("source", "workflow-invoke-light")
-        self.event_writer.append(ZfEvent(
-            type=entry_trigger,
-            actor=str(payload.get("requested_by") or event.actor or "zf-cli"),
-            task_id=task_id,
-            payload=entry_payload,
-            causation_id=accepted.id,
-            correlation_id=event.correlation_id,
-        ))
+        try:
+            with live_run_acceptance(self, payload):
+                accepted = self.event_writer.append(accepted)
+                self._activate_workflow_task(accepted)
+                self._mark_workflow_request_running(payload, accepted_event=accepted)
+
+                entry_payload = dict(raw_entry_payload)
+                entry_payload["workflow_run_id"] = run_id
+                entry_payload.setdefault("source_event_id", event.id)
+                entry_payload.setdefault("source", "workflow-invoke-light")
+                self.event_writer.append(ZfEvent(
+                    type=entry_trigger,
+                    actor=str(payload.get("requested_by") or event.actor or "zf-cli"),
+                    task_id=task_id,
+                    payload=entry_payload,
+                    causation_id=accepted.id,
+                    correlation_id=event.correlation_id,
+                ))
+        except FlowRoleBindingError as exc:
+            self._emit_workflow_invoke_rejected(
+                event, str(exc), task_id=task_id, pattern_id=entry_trigger,
+            )
+            return WorkflowRuntimeDecision(action="block", task_id=task_id, reason=str(exc))
         return WorkflowRuntimeDecision(
             action="workflow_invoke",
             task_id=task_id,

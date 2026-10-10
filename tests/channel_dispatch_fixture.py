@@ -12,7 +12,8 @@ def channel_dispatches(monkeypatch):
 
     def tracked(**kwargs):
         thread = dispatch(**kwargs)
-        threads.append(thread)
+        if thread is not None:
+            threads.append(thread)
         return thread
 
     for module in (channel_message_ingress, control_actions_channel_msg, orchestrator_reactor):

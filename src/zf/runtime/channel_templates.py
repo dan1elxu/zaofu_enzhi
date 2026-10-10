@@ -593,6 +593,27 @@ def materialize_channel_template(
         or writer_role
         or ""
     )
+    # A materialized Channel Group is never allowed to lose its two control
+    # anchors.  The Leader is the semantic moderator and the default responder
+    # is the deterministic target for an unmentioned requirement.  Keep these
+    # checks here, at the template boundary, so both Plan previews and the
+    # create-and-start action see the same fail-closed contract.
+    active_member_ids = {
+        str(member.get("member_id") or "")
+        for member in enabled_members
+    }
+    if not leader_member_id or leader_member_id not in active_member_ids:
+        return None, "channel template must materialize an active Leader"
+    if not discussion["default_responder_id"]:
+        return None, "channel template must materialize a default responder"
+    if discussion["default_responder_id"] not in active_member_ids:
+        return None, "channel template default responder must be an active member"
+    leader = next(
+        member for member in enabled_members
+        if str(member.get("member_id") or "") == leader_member_id
+    )
+    if "propose_workflow" not in set(leader.get("permissions") or []):
+        return None, "channel template Leader must have propose_workflow permission"
     discussion["max_rounds"] = max_rounds
     discussion["max_rounds_explicit"] = max_rounds_explicit
     discussion["max_parallel_replies"] = max_parallel_replies
@@ -610,6 +631,7 @@ def materialize_channel_template(
         "writer_role": writer_role,
         "writer_scope": list(writer_scope),
         "leader_member_id": leader_member_id,
+        "default_responder_id": discussion["default_responder_id"],
     })
     return result, ""
 

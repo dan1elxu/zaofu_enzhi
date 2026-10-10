@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from zf.runtime.channel_contracts import CHANNEL_PERMISSION_PROFILES
+from zf.runtime.channel_provider_preflight import normalize_channel_dispatch_policy
 from zf.runtime.research_templates import RESEARCH_TEMPLATES_BY_ID
 
 
@@ -52,6 +53,10 @@ def validate_collaboration_action_payload(
             for key in ("message", "objective", "text")
         ):
             return "message or objective is required"
+        try:
+            normalize_channel_dispatch_policy(payload.get("dispatch_policy"))
+        except ValueError as exc:
+            return str(exc)
     if action == "channel-discussion-start":
         if not str(payload.get("channel_id") or "").strip():
             return "channel_id is required"
@@ -60,6 +65,10 @@ def validate_collaboration_action_payload(
             for key in ("message", "objective", "text")
         ):
             return "message or objective is required"
+        try:
+            normalize_channel_dispatch_policy(payload.get("dispatch_policy"))
+        except ValueError as exc:
+            return str(exc)
     if action == "research-start":
         if not str(payload.get("task_id") or "").strip():
             return "task_id is required"

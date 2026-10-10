@@ -57,6 +57,25 @@ function discussionNeedsConvergence(
   ));
 }
 
+function consensusNeedsConvergence(detail: ChannelDetail): boolean {
+  return Object.values(detail.consensus ?? {}).some((value) => {
+    if (!value || typeof value !== "object") return false;
+    const consensus = value as Record<string, unknown>;
+    if (!text(consensus.artifact_ref) || text(consensus.reached_event_id)) return false;
+    if (text(consensus.status) === "blocked") return false;
+
+    const requiredSigners = Array.isArray(consensus.required_signers)
+      ? consensus.required_signers.map((member) => text(member)).filter(Boolean)
+      : [];
+    if (!requiredSigners.length) return false;
+
+    const signed = consensus.signed && typeof consensus.signed === "object"
+      ? consensus.signed as Record<string, unknown>
+      : {};
+    return requiredSigners.some((member) => !text(signed[member]));
+  });
+}
+
 /**
  * SSE is the normal Channel update transport. During a provider-backed
  * discussion, this bounded predicate enables a short fresh-read fallback so a
@@ -80,6 +99,11 @@ export function channelNeedsLiveConvergence(detail: ChannelDetail | null): boole
   if (hasActiveRecord(detail.provider_runs)) return true;
   if (attentionNeedsConvergence(detail)) return true;
   if (discussionNeedsConvergence(detail.discussion)) return true;
+  // A synthesis can finish before the required reviewers sign its canonical
+  // PRD. Those signoffs are separate provider turns and are not always
+  // represented in the compact reply-run rows, so retain the bounded fresh
+  // read until the consensus record is actionable for the owner.
+  if (consensusNeedsConvergence(detail)) return true;
   return Object.values(detail.discussions ?? {}).some((discussion) => (
     discussionNeedsConvergence(discussion)
   ));

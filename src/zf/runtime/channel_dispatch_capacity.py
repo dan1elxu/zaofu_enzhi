@@ -48,7 +48,18 @@ def dispatch_candidate_waves(
             for item in candidates
             if str(item.get("request_id") or "") not in attempted
         ]
-        batch = remaining[:min(max_dispatch, channel_dispatch_capacity(current))]
+        capacity = min(max_dispatch, channel_dispatch_capacity(current))
+        busy = {str(row.get("target_member_id") or "") for row in current.get("reply_requests", [])
+                if row.get("status") in RUNNING_REPLY_STATUSES}
+        batch = []
+        for item in remaining:
+            if len(batch) >= capacity:
+                break
+            member = str(item.get("target_member_id") or item.get("request_id") or "")
+            if member in busy:
+                continue
+            batch.append(item)
+            busy.add(member)
         if not batch:
             break
         attempted.update(str(item.get("request_id") or "") for item in batch)

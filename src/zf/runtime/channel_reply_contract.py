@@ -60,7 +60,12 @@ from zf.runtime.channel_synthesis_next_round import (
     emit_synthesis_next_round_proposal,
     validate_synthesis_next_round,
 )
+from zf.runtime.channel_synthesis_currentness import (
+    ignore_superseded_synthesis_reply as _ignore_superseded_synthesis_reply,
+)
 from zf.runtime.channel_templates import CHANNEL_TEMPLATES
+from zf.runtime.channel_member_proposals import prepare_member_proposals, emit_member_proposals
+from zf.runtime.channel_run_owner import reply_generation_is_current
 
 
 def emit_structured_reply_events(
@@ -78,6 +83,11 @@ def emit_structured_reply_events(
     channel_id = str(
         channel.get("channel_id") or request.get("channel_id") or ""
     )
+    # Transport completion from an older retry cannot publish semantic state.
+    if not reply_generation_is_current(
+        writer.event_log.read_all(), channel_id=channel_id, request=request,
+    ):
+        return
     thread_id = str(request.get("thread_id") or "main")
     member_id = str(request.get("target_member_id") or "")
     refs = (
@@ -123,6 +133,7 @@ def emit_structured_reply_events(
         return
     if consensus_review_id:
         apply_consensus_review_reply(
+            state_dir=state_dir,
             writer=writer,
             channel=channel,
             channel_id=channel_id,
@@ -182,7 +193,7 @@ def emit_structured_reply_events(
             channel_id=channel_id,
             thread_id=thread_id,
             member_id=member_id,
-            request=request,
+            request={**request, "prd_document_contract": refs.get("prd_document_contract")},
             reply=reply,
             reply_event_id=reply_event_id,
             synthesis_request_id=synthesis_request_id,
@@ -312,10 +323,20 @@ def _emit_synthesis_locked(
             synthesis_repair_revision=synthesis_repair_revision,
         )
         return
-    validation_error = validate_channel_contract(
+    from zf.runtime.channel_prd_composition import expand_prd_composition, expand_prd_source_attestation
+    synthesis, validation_error = expand_prd_source_attestation(
+        synthesis, channel=channel, request=request, state_dir=state_dir,
+    )
+    if not validation_error:
+        synthesis, validation_error = expand_prd_composition(
+            synthesis, channel=channel, request=request, state_dir=state_dir,
+        )
+    validation_error = validation_error or validate_channel_contract(
         synthesis,
         kind="synthesis",
     )
+    if not validation_error and request.get("prd_document_contract") == "full.v1" and "prd_markdown" not in synthesis:
+        validation_error = "prd_markdown is required by the full PRD document contract"
     classification = synthesis.get("classification")
     if isinstance(classification, dict):
         classified_template = str(
@@ -727,91 +748,6 @@ def _emit_synthesis_locked(
         )
 
 
-def _ignore_superseded_synthesis_reply(
-    *,
-    writer: EventWriter,
-    channel: dict[str, Any],
-    channel_id: str,
-    thread_id: str,
-    synthesis_request_id: str,
-    reply_event_id: str,
-    task_id: str,
-    source: str,
-) -> bool:
-    """Record and ignore a late distinct synthesis for the current PRD."""
-    discussions = channel.get("discussions")
-    session = discussions.get(thread_id, {}) if isinstance(discussions, dict) else {}
-    if (
-        str(session.get("state") or "") == "phase2_relay"
-        and str(session.get("phase_reason") or "")
-        in {"synthesis_questions_opened", "consensus_blocked"}
-    ):
-        return False
-    started_event_id = str(session.get("started_event_id") or "")
-    started = not started_event_id
-    prior = None
-    events = writer.event_log.read_all()
-    for event in events:
-        if event.id == started_event_id:
-            started = True
-            continue
-        if not started or event.type not in {
-            "channel.synthesis.requested", "channel.synthesis.proposed",
-        }:
-            continue
-        payload = event.payload if isinstance(event.payload, dict) else {}
-        if (
-            str(payload.get("channel_id") or "") != channel_id
-            or str(payload.get("thread_id") or "main") != thread_id
-        ):
-            continue
-        request_id = str(payload.get("request_id") or "")
-        if event.type == "channel.synthesis.requested":
-            if request_id == synthesis_request_id:
-                # A controlled new generation may revise earlier proposals,
-                # even though its reply arrives after re-entering phase3.
-                prior = None
-        elif request_id != synthesis_request_id:
-            prior = event
-    if prior is None:
-        return False
-    if any(
-        event.type == "channel.synthesis.stale_ignored"
-        and isinstance(event.payload, dict)
-        and str(event.payload.get("source_reply_event_id") or "")
-        == reply_event_id
-        for event in events
-    ):
-        return True
-    prior_payload = prior.payload if isinstance(prior.payload, dict) else {}
-    writer.emit(
-        "channel.synthesis.stale_ignored",
-        actor="zf-kernel",
-        task_id=task_id or None,
-        causation_id=reply_event_id,
-        correlation_id=channel_id,
-        payload={
-            "schema_version": "channel.synthesis.stale.v1",
-            "channel_id": channel_id,
-            "thread_id": thread_id,
-            "request_id": synthesis_request_id,
-            "superseded_by_request_id": str(
-                prior_payload.get("request_id") or ""
-            ),
-            "canonical_artifact_ref": str(
-                prior_payload.get("artifact_ref") or ""
-            ),
-            "canonical_artifact_digest": str(
-                prior_payload.get("artifact_digest") or ""
-            ),
-            "source_reply_event_id": reply_event_id,
-            "reason": "prior_synthesis_proposed",
-            "source": source,
-        },
-    )
-    return True
-
-
 def _emit_contribution(
     *,
     state_dir: Path,
@@ -826,6 +762,10 @@ def _emit_contribution(
     actor: str,
     source: str,
 ) -> None:
+    from zf.runtime.channel_contribution_currentness import ignore_stale_contribution
+    if ignore_stale_contribution(writer, channel_id=channel_id, thread_id=thread_id,
+                                 request=request, reply_event_id=reply_event_id):
+        return
     contribution = _structured_reply_payload(
         reply,
         "channel_contribution",
@@ -848,6 +788,8 @@ def _emit_contribution(
         contribution,
         kind="contribution",
     )
+    proposals, proposal_error = prepare_member_proposals(channel, request, contribution, state_dir=state_dir)
+    validation_error = validation_error or proposal_error
     if validation_error:
         reject_contribution_contract(
             writer=writer,
@@ -951,6 +893,8 @@ def _emit_contribution(
             "source": source,
         },
     )
+    emit_member_proposals(writer, channel=channel, request=request, proposals=proposals,
+                          descriptor=descriptor, reply_event_id=reply_event_id)
     for index, question_record in enumerate(question_records, 1):
         writer.emit(
             "channel.question.opened",

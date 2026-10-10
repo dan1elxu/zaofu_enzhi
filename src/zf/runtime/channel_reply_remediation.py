@@ -13,12 +13,16 @@ makes redispatch safe: late events from a superseded generation are dropped.
 from __future__ import annotations
 
 import hashlib
+import math
+import re
 from datetime import datetime, timezone
 from typing import Any, Callable, Iterable
 
 from zf.core.events import EventWriter, ZfEvent
 from zf.core.state.locks import locked_path
 from zf.runtime.channel_dispatch_claim import channel_reply_claim_path
+from zf.runtime.channel_reply_queue import current_review_reply_bindings
+from zf.runtime.channel_cross_review_outcomes import rejected_review_reply
 
 CHANNEL_REPLY_STUCK_AFTER_SECONDS = 900
 CHANNEL_REPLY_MAX_GENERATION = 3
@@ -55,6 +59,16 @@ _NON_RETRYABLE_REASON_MARKERS = (
     "unshare",
 )
 
+_FAILURE_CATEGORIES = {
+    "failed": "failed",
+    "cancelled": "cancelled",
+    "timeout": "timeout",
+    "rate_limited": "rate_limit",
+    "dispatch_exception": "dispatch",
+    "contract_invalid": "contract",
+    "incomplete": "provider",
+}
+
 
 def classify_channel_reply_failure(
     *,
@@ -76,6 +90,14 @@ def classify_channel_reply_failure(
             or normalized_status in _NON_RETRYABLE_FAILURE_STATUSES
             or any(marker in reason_lower for marker in _NON_RETRYABLE_REASON_MARKERS)
         )
+    category = _FAILURE_CATEGORIES.get(normalized_status, "provider")
+    if superseded:
+        category = "superseded"
+        is_retryable = False
+    elif normalized_status == "cancelled":
+        # Operator cancellation is an intentional terminal decision, not a
+        # transient provider failure that the watchdog may resurrect.
+        is_retryable = False
     failure_class = (
         "channel_reply_superseded"
         if superseded
@@ -88,6 +110,7 @@ def classify_channel_reply_failure(
         "failure_class": failure_class,
         "retryable": is_retryable,
         "terminal_disposition": "superseded" if superseded else "failed",
+        "failure_category": category,
     }
 
 
@@ -187,6 +210,15 @@ def fold_channel_reply_states(events: Iterable[ZfEvent]) -> dict[tuple[str, str]
         incoming = _positive_int(payload.get("run_generation"), default=current)
         if event.type != _REQUESTED and "run_generation" in payload and incoming < current:
             continue
+        if event.type == _REQUESTED and incoming > current:
+            item.update({
+                "failure_status": "",
+                "failure_class": "",
+                "failure_category": "",
+                "terminal_disposition": "",
+                "retryable": True,
+                "provider_timeout_seconds": 0,
+            })
         failure = (
             classify_channel_reply_failure(
                 status=payload.get("failure_status") or payload.get("status"),
@@ -196,6 +228,8 @@ def fold_channel_reply_states(events: Iterable[ZfEvent]) -> dict[tuple[str, str]
             if status == "failed"
             else {}
         )
+        if event.type == "channel.agent.reply.started":
+            item["provider_timeout_seconds"] = payload.get("provider_timeout_seconds", 0)
         item.update({
             "thread_id": str(payload.get("thread_id") or item["thread_id"] or "main"),
             "message_id": str(payload.get("message_id") or item["message_id"]),
@@ -230,21 +264,45 @@ def channel_reply_remediation_candidates(
         exhausted_marked[key] = max(exhausted_marked.get(key, 0), generation)
 
     out: list[dict[str, Any]] = []
+    recoverable = current_review_reply_bindings(events)
+    rejected = current_review_reply_bindings(events, status="rejected")
     for key, item in fold_channel_reply_states(events).items():
         status = str(item.get("status") or "")
         age = _age_seconds(str(item.get("updated_at") or ""), now)
         if age is not None and age > max_age_seconds:
             continue
+        rejection = rejected.get(key)
+        if status == "completed" and rejection is not None:
+            previous = rejected_review_reply(events, rejection)
+            if (previous.get("request_id") == key[1]
+                    and rejection.causation_id == item.get("last_event_id")):
+                status = "failed"
+                item = {**item, "status": status, "retryable": True, "queue_recovery": True,
+                        "reason": str(rejection.payload.get("reason") or ""),
+                        "failure_status": "contract_invalid",
+                        "failure_class": "channel_cross_review_contract_invalid"}
         if status == "failed":
             if str(item.get("terminal_disposition") or "") == "superseded":
-                continue
+                if key not in recoverable or item.get("reason") != "superseded by latest queued mention":
+                    continue
+                item = {**item, "retryable": True, "queue_recovery": True}
+
             stuck = True
         elif status in {"running", "pending"}:
-            stuck = age is not None and age > stuck_after_seconds
+            limit = stuck_after_seconds
+            budget = item.get("provider_timeout_seconds")
+            if (status == "running" and isinstance(budget, (int, float))
+                    and not isinstance(budget, bool) and math.isfinite(budget) and budget > 0):
+                limit = max(limit, budget + 60)  # Provider termination/receipt grace.
+            stuck = age is not None and age > limit
         else:
             stuck = False
         if not stuck:
             continue
+        if str(item.get("failure_status") or "") == "rate_limited":
+            retry_after = _retry_after_seconds(str(item.get("reason") or ""))
+            if retry_after is not None and (age is None or age < retry_after):
+                continue
         generation = _positive_int(item.get("run_generation"), default=1)
         if not bool(item.get("retryable", True)):
             if exhausted_marked.get(key, 0) >= generation:
@@ -301,7 +359,7 @@ def remediate_channel_replies(
             exhausted.append(request_id)
             continue
         redispatched.append(request_id)
-        if dispatch is not None:
+        if dispatch is not None and not candidate.get("queue_recovery"):
             try:
                 dispatch(channel_id, request_id)
             except Exception:
@@ -317,6 +375,21 @@ def _record_reply_remediation(writer: EventWriter, candidate: dict[str, Any]) ->
     request_id = str(candidate["request_id"])
     generation = _positive_int(candidate.get("run_generation"), default=1)
     if candidate["kind"] == "exhaust":
+        # Close an abandoned request before marking retry exhaustion so it
+        # cannot stay live in the projection or cold-resume queue forever.
+        if str(candidate.get("status") or "") in {"pending", "running"}:
+            emit_channel_reply_failed(
+                writer=writer,
+                request=candidate,
+                request_id=request_id,
+                started_event_id=str(candidate.get("last_event_id") or ""),
+                actor="orchestrator-remediation",
+                source="runtime:timeout",
+                channel_id=channel_id,
+                reason=f"channel reply timed out after bounded retries (generation {generation})",
+                provider_session_id=str(candidate.get("provider_session_id") or ""),
+                failure_status="timeout",
+            )
         writer.emit(
             CHANNEL_REPLY_EXHAUSTED_EVENT,
             actor="orchestrator-remediation",
@@ -489,6 +562,13 @@ def _age_seconds(ts: str, now: datetime) -> float | None:
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=timezone.utc)
     return (now - parsed).total_seconds()
+
+
+def _retry_after_seconds(reason: str) -> int | None:
+    match = re.search(r"retry\s+after\s+(\d+)\s*s?", reason.lower())
+    if not match:
+        return None
+    return max(int(match.group(1)), 0)
 
 
 def _positive_int(value: object, *, default: int) -> int:

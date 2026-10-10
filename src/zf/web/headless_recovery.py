@@ -10,6 +10,8 @@ from zf.core.events import EventWriter
 from zf.core.events.factory import event_log_from_project
 from zf.core.state.atomic_io import atomic_write_text
 from zf.web.projections.request_util import reconcile_pending_idempotency_keys
+from zf.web.agent_turn_store import AgentTurnStore, TURN_TERMINAL_STATES
+from zf.web.webchat_runtime import durable_webchat_enabled
 
 
 def reconcile_kanban_startup(
@@ -18,8 +20,33 @@ def reconcile_kanban_startup(
     config: ZfConfig | None,
 ) -> dict[str, int]:
     writer = EventWriter(event_log_from_project(state_dir, config=config))
+    turn_store = AgentTurnStore(state_dir) if durable_webchat_enabled() else None
+    durable_active = {
+        str(item["turn_id"])
+        for item in turn_store.list_turns(limit=500)
+        if str(item.get("state") or "") not in TURN_TERMINAL_STATES
+    } if turn_store is not None else set()
+    durable_recovered = turn_store.reconcile_expired() if turn_store is not None else []
+    if turn_store is not None:
+        turn_store.reconcile_queue_claims()
+    for item in durable_recovered:
+        writer.emit(
+            "agent.session.turn.recovery_queued",
+            actor="web",
+            payload={
+                "turn_id": str(item.get("turn_id") or ""),
+                "lost_attempt_id": str(item.get("attempt_id") or ""),
+                "reason": "lost_owner_lease_expired",
+            },
+        )
+    legacy = reconcile_interrupted_headless_turns(
+        state_dir,
+        writer,
+        durable_active_turn_ids=durable_active,
+    )
     return {
-        **reconcile_interrupted_headless_turns(state_dir, writer),
+        **legacy,
+        "turns": int(legacy["turns"]) + len(durable_recovered),
         "idempotency_keys": reconcile_pending_idempotency_keys(state_dir),
     }
 
@@ -27,8 +54,11 @@ def reconcile_kanban_startup(
 def reconcile_interrupted_headless_turns(
     state_dir: Path,
     writer: EventWriter,
+    *,
+    durable_active_turn_ids: set[str] | None = None,
 ) -> dict[str, int]:
     """Fail turns that were running before this Web process started."""
+    durable_active_turn_ids = durable_active_turn_ids or set()
     events = writer.event_log.read_all()
     terminal_turn_ids = {
         str((event.payload or {}).get("turn_id") or "")
@@ -50,7 +80,7 @@ def reconcile_interrupted_headless_turns(
 
     recovered = 0
     for turn_id, started in starts.items():
-        if turn_id in terminal_turn_ids:
+        if turn_id in terminal_turn_ids or turn_id in durable_active_turn_ids:
             continue
         payload = started.payload if isinstance(started.payload, dict) else {}
         failed = writer.emit(

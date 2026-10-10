@@ -24,34 +24,37 @@ test("Channel decisions and Inbox links close through their source surfaces", as
     `/?project=${encodeURIComponent(projectId)}&page=channels`
       + "&channel=ch-running-decisions",
   );
-  const running = page.getByTestId("channel-discussion-attention");
-  await expect(running).toContainText("1 agent responding");
-  await expect(running).toContainText("1 decision pending");
-  await expect(running).toContainText("blocks synthesis");
+  const running = page.getByTestId("channel-flow-next");
+  await expect(page.getByTestId("channel-discussion-attention")).toHaveCount(0);
+  await expect(page.getByTestId("channel-header-members")).toBeVisible();
+  await expect(page.getByTestId("channel-participant-rail")).toHaveCount(0);
+  await expect(running).toContainText("Review");
   await expect(page.getByTestId("channel-owner-question-shelf")).toHaveCount(0);
-  await running.getByRole("button", { name: "Review 1" }).click();
-  await expect(page.getByTestId("channel-owner-question-shelf")).toBeVisible();
+  await running.click();
+  await expect(page.locator(".channel-drawer")).toHaveCount(0);
+  await expect(page.locator('[data-testid="channel-inline-question"], [data-testid="channel-unassigned-question-tray"]')).toBeVisible();
   await page.getByRole("button", { name: "Close question" }).click();
 
   await page.goto(
     `/?project=${encodeURIComponent(projectId)}&page=channels`
       + "&channel=ch-waiting-decisions",
   );
-  const waiting = page.getByTestId("channel-discussion-attention");
-  const shelf = page.getByTestId("channel-owner-question-shelf");
-  await expect(waiting).toContainText("Waiting for you");
-  await expect(waiting).toContainText("1 decision blocks synthesis");
-  await expect(shelf).toBeVisible();
+  const question = page.locator(
+    '[data-testid="channel-inline-question"], [data-testid="channel-unassigned-question-tray"]',
+  ).first();
+  await expect(page.getByTestId("channel-discussion-attention")).toHaveCount(0);
+  await expect(page.locator(".channel-owner-question-shelf")).toHaveCount(0);
+  await expect(question).toBeVisible();
 
   await page.setViewportSize({ width: 390, height: 844 });
-  await expect(shelf).toBeVisible();
-  const shelfBounds = await shelf.boundingBox();
-  expect(shelfBounds).not.toBeNull();
-  expect((shelfBounds?.x ?? 0) + (shelfBounds?.width ?? 0)).toBeLessThanOrEqual(390);
-  await shelf.getByLabel("Developers").check();
-  await shelf.getByTestId("ask-user-submit").click();
-  await expect(shelf).toHaveCount(0);
-  await expect(waiting).not.toContainText("Waiting for you");
+  await expect(question).toBeVisible();
+  const questionBounds = await question.boundingBox();
+  expect(questionBounds).not.toBeNull();
+  expect((questionBounds?.x ?? 0) + (questionBounds?.width ?? 0)).toBeLessThanOrEqual(390);
+  await question.getByLabel("Developers").check();
+  await question.getByTestId("ask-user-submit").click();
+  await expect(page.locator('[data-testid="channel-inline-question"], [data-testid="channel-unassigned-question-tray"]')).toHaveCount(0);
+  await expect(page.getByTestId("channel-discussion-attention")).toHaveCount(0);
 
   await expect.poll(async () => {
     const response = await request.get(
@@ -72,9 +75,7 @@ test("Channel decisions and Inbox links close through their source surfaces", as
   await channelDecision.getByRole("link", { name: "Open channel" }).click();
   await expect(page).toHaveURL(/page=channels/);
   await expect(page).toHaveURL(/channel=ch-running-decisions/);
-  await expect(page.getByTestId("channel-discussion-attention")).toContainText(
-    "1 agent responding",
-  );
+  await expect(page.getByTestId("channel-flow-next")).toBeVisible();
 
   await page.goto(`/?project=${encodeURIComponent(projectId)}&page=inbox`);
   const kanbanDecision = page.locator(".operator-inbox-row").filter({

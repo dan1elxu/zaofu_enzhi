@@ -13,7 +13,7 @@ export function previewItemsFromRefs(refs?: Record<string, unknown>): PreviewIte
   if (!refs) return [];
   const items: PreviewItem[] = [];
   for (const { kind, item } of refGroups(refs)) {
-    const name = refString(item, "name") || refString(item, "filename") || refString(item, "path");
+    const name = refString(item, "name") || refString(item, "filename") || refString(item, "path") || refString(item, "ref");
     const id = (
       refString(item, "attachment_id")
       || refString(item, "artifact_id")

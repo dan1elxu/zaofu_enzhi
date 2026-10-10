@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import replace
 import os
 from pathlib import Path
+from time import monotonic
 from typing import Any
 
 from zf.core.config.schema import ZfConfig
@@ -20,8 +21,13 @@ from zf.runtime.channel_dispatch_capacity import (
     channel_dispatch_lock,
     dispatch_candidate_waves,
 )
+from zf.runtime.channel_dispatch_failure import (
+    emit_superseded_queued_reply as _emit_superseded_queued_reply,
+    fail_pending_channel_replies_after_dispatch_failure,
+)
 from zf.runtime.channel_openclaw import dispatch_openclaw_channel_reply
 from zf.runtime.channel_projection import project_channel
+from zf.runtime.channel_reply_queue import reply_coalescing_key
 from zf.runtime.channel_reply_contract import emit_structured_reply_events
 from zf.runtime.channel_provider_completion import (
     build_fake_channel_reply,
@@ -45,10 +51,12 @@ from zf.runtime.channel_provider_profile import (
 )
 from zf.runtime.channel_run_owner import (
     active_reply_for_target,
+    channel_provider_thread_key as _channel_provider_thread_key,
     provider_run_fields_for_request,
 )
 from zf.runtime.channel_reply_completion import (
     complete_deterministic_reply as _complete_deterministic_reply,
+    close_superseded_reply,
     origin_external_refs as _origin_external_refs,
 )
 from zf.runtime.channel_sidecar import (
@@ -85,12 +93,7 @@ DEFAULT_CHANNEL_PROVIDER_HEADLESS_TIMEOUT_S = 30 * 60.0
 # the complete bounded evidence set, so resuming a member's open-ended
 # discussion session only replays stale tool history and can exhaust provider
 # context before the phase can publish its durable artifact.
-_PHASE_SESSION_REF_KEYS = (
-    "question_dedup_request_id",
-    "synthesis_request_id",
-    "cross_review_request_id",
-    "consensus_review_id",
-)
+
 
 
 @with_channel_reply_dispatch_claim
@@ -154,6 +157,9 @@ def dispatch_reply_request(
                     "reason": "target_busy",
                     "active_request_id": str(active_reply.get("request_id") or ""),
                 }])
+        backend = str(member.get("backend") or request.get("backend") or "").strip().lower()
+        if backend in HEADLESS_BACKENDS and not (_worker_session(member) or request.get("worker_session_id")) and deterministic_reply is None:
+            request = {**request, "provider_timeout_seconds": _channel_provider_headless_timeout_s()}
         run_fields = provider_run_fields_for_request(channel_id, request)
         started = writer.emit(
             "channel.agent.reply.started",
@@ -172,6 +178,7 @@ def dispatch_reply_request(
                 "provider_binding_id": str(member.get("provider_binding_id") or ""),
                 "remote_agent_id": str(member.get("remote_agent_id") or ""),
                 "worker_session_id": _worker_session(member) or str(request.get("worker_session_id") or ""),
+                "provider_timeout_seconds": request.get("provider_timeout_seconds", 0),
                 **run_fields,
                 "source": source,
             },
@@ -252,7 +259,7 @@ def dispatch_reply_request(
             "source": source,
             "text": response,
             "mentions": [],
-            "refs": {"request_id": request_id, "run_id": run_fields["run_id"],
+            "refs": {"request_id": request_id, **run_fields,
                      **_origin_external_refs(message)},
         }, created_by=f"channel-adapter:{source}", source_event_id=started.id)
         message_event = writer.emit(
@@ -349,23 +356,12 @@ def dispatch_reply_request(
     reason = "provider binding is missing"
     if backend in REMOTE_BACKENDS:
         reason = f"{backend} provider binding is missing"
-    writer.emit(
-        "channel.agent.reply.failed",
-        actor=actor,
-        task_id=str(request.get("task_id") or "") or None,
-        causation_id=started.id,
-        correlation_id=channel_id,
-        payload={
-            "channel_id": channel_id,
-            "thread_id": str(request.get("thread_id") or "main"),
-            "request_id": request_id,
-            "message_id": str(request.get("message_id") or ""),
-            "target_member_id": str(request.get("target_member_id") or ""),
-            "context_pack_id": str(request.get("context_pack_id") or ""),
-            "reason": reason,
-            **run_fields,
-            "source": source,
-        },
+    emit_channel_reply_failed(
+        writer=writer, request=request, request_id=request_id,
+        started_event_id=started.id, actor=actor, source=source,
+        channel_id=channel_id, reason=reason,
+        provider_session_id=str(request.get("provider_session_id") or ""),
+        failure_status="provider_binding_missing",
     )
     return ChannelDispatchResult(dispatched=[request_id], failed=[request_id])
 
@@ -396,10 +392,10 @@ def dispatch_pending_replies(
     ]
     superseded_request_ids: list[str] = []
     if allow_queued:
-        latest_by_target: dict[str, dict[str, Any]] = {}
+        latest_by_target: dict[tuple[str, ...], dict[str, Any]] = {}
         superseded: list[dict[str, Any]] = []
         for item in candidates:
-            target = str(item.get("target_member_id") or "")
+            target = reply_coalescing_key(channel, item)
             previous = latest_by_target.get(target)
             if previous is not None:
                 superseded.append(previous)
@@ -418,9 +414,10 @@ def dispatch_pending_replies(
     completed: list[str] = []
     failed: list[str] = [request_id for request_id in superseded_request_ids if request_id]
     skipped: list[dict[str, str]] = []
+    results: list[ChannelDispatchResult] = []
 
     def _dispatch_one(item: dict[str, Any]) -> ChannelDispatchResult:
-        return dispatch_reply_request(
+        result = dispatch_reply_request(
             state_dir=state_dir,
             writer=writer,
             channel_id=channel_id,
@@ -435,51 +432,34 @@ def dispatch_pending_replies(
             deterministic_reply=deterministic_reply,
             deterministic_reason=deterministic_reason,
         )
+        results.append(result)
+        return result
 
-    results = dispatch_candidate_waves(
-        candidates,
-        channel_id=channel_id,
-        channel_loader=lambda: project_channel(Path(state_dir), channel_id) or {},
-        dispatch_one=_dispatch_one,
-        max_dispatch=max_dispatch,
-    )
+    try:
+        dispatch_candidate_waves(
+            candidates,
+            channel_id=channel_id,
+            channel_loader=lambda: project_channel(Path(state_dir), channel_id) or {},
+            dispatch_one=_dispatch_one,
+            max_dispatch=max_dispatch,
+        )
+    except Exception as exc:
+        failed_ids = fail_pending_channel_replies_after_dispatch_failure(
+            state_dir=Path(state_dir),
+            writer=writer,
+            channel_id=channel_id,
+            actor=actor,
+            source=source,
+            reason=f"dispatch crashed: {exc}",
+            candidates=candidates,
+        )
+        failed.extend(failed_ids)
     for result in results:
         dispatched.extend(result.dispatched)
         completed.extend(result.completed)
         failed.extend(result.failed)
         skipped.extend(result.skipped)
     return ChannelDispatchResult(dispatched=dispatched, completed=completed, failed=failed, skipped=skipped)
-
-
-def _emit_superseded_queued_reply(
-    *,
-    writer: EventWriter,
-    channel_id: str,
-    request: dict[str, Any],
-    actor: str,
-    source: str,
-) -> None:
-    request_id = str(request.get("request_id") or "")
-    if not request_id:
-        return
-    writer.emit(
-        "channel.agent.reply.failed",
-        actor=actor,
-        task_id=str(request.get("task_id") or "") or None,
-        causation_id=str(request.get("event_id") or "") or None,
-        correlation_id=channel_id,
-        payload={
-            "channel_id": channel_id,
-            "thread_id": str(request.get("thread_id") or "main"),
-            "request_id": request_id,
-            "message_id": str(request.get("message_id") or ""),
-            "target_member_id": str(request.get("target_member_id") or ""),
-            "context_pack_id": str(request.get("context_pack_id") or ""),
-            "reason": "superseded by latest queued mention",
-            **provider_run_fields_for_request(channel_id, request),
-            "source": source,
-        },
-    )
 
 
 def _reply_by_id(channel: dict[str, Any], request_id: str) -> dict[str, Any]:
@@ -570,6 +550,13 @@ def _dispatch_headless_reply(
         )
         return ChannelDispatchResult(dispatched=[request_id], failed=[request_id])
 
+    if close_superseded_reply(
+        writer=writer, request=request, request_id=request_id, channel_id=channel_id,
+        started_event_id=started_event_id, actor=actor, source=source,
+        provider_session_id=str(getattr(result, "provider_session_id", "") or ""),
+    ):
+        return ChannelDispatchResult(dispatched=[request_id], skipped=[request_id])
+
     if not bool(getattr(result, "ok", False)):
         reason = str(getattr(result, "error", "") or getattr(result, "status", "") or "headless provider failed")
         emit_channel_reply_failed(
@@ -604,7 +591,7 @@ def _dispatch_headless_reply(
         "mentions": [],
         "refs": {
             "request_id": request_id,
-            "run_id": run_fields["run_id"],
+            **run_fields,
             "provider_session_id": provider_session_id,
             "usage": usage,
             "continuation_count": int(
@@ -707,7 +694,8 @@ def _run_headless_reply(
     )
     thread = store.load(scope="project", task_id="", thread_key=thread_key)
     thread_id = str(thread["thread_id"])
-    timeout_s = _channel_provider_headless_timeout_s()
+    timeout_s = float(request.get("provider_timeout_seconds") or _channel_provider_headless_timeout_s())
+    deadline = monotonic() + timeout_s
     run_fields = provider_run_fields_for_request(channel_id, request)
     runtime_snapshot_ref = str(
         request.get("runtime_snapshot_ref")
@@ -822,6 +810,13 @@ def _run_headless_reply(
         system_prompt = _build_channel_system_prompt(member, channel=channel)
 
         def run_provider_turn(turn_prompt: str, session_id: str) -> Any:
+            remaining = deadline - monotonic()
+            if remaining <= 0:
+                return HeadlessTurnResult(
+                    ok=False, status="timeout", backend=backend, thread_id=thread_id,
+                    provider_session_id=session_id, reply="", messages=[], usage={},
+                    resumed=bool(session_id), error="channel provider execution budget exhausted",
+                )
             return adapter.run_turn(
                 prompt=turn_prompt,
                 cwd=project_root,
@@ -830,11 +825,12 @@ def _run_headless_reply(
                 provider_session_id=session_id,
                 on_session_id=pin,
                 on_message=visible_stream.emit,
-                timeout_s=timeout_s,
+                timeout_s=remaining,
+                execution_deadline=deadline,
                 thinking_level=str(member.get("thinking_level") or ""),
-                run_id=request_id,
-                run_thread_id=thread_key,
-                project_id=str(channel.get("channel_id") or channel_id),
+                run_id=str(run_fields["run_id"]),
+                run_thread_id=thread_id,
+                project_id=str(channel.get("project_id") or channel_id),
                 conversation_id=channel_id,
                 permission_profile=permission_profile,
             )
@@ -895,29 +891,6 @@ def _run_headless_reply(
         return result
 
 
-def _channel_provider_thread_key(
-    *,
-    channel_id: str,
-    request: dict[str, Any],
-    message: dict[str, Any],
-) -> str:
-    """Return the durable provider-thread key for one Channel reply.
-
-    Conversational contributions retain a member-scoped provider session.  A
-    typed deliberation phase is different: it receives an authoritative,
-    complete context pack and must be isolated from prior agent tool history.
-    Repairs preserve continuity by retaining the original phase request id.
-    """
-    thread_id = str(request.get("thread_id") or "main")
-    member_id = str(request.get("target_member_id") or "")
-    base = f"channel:{channel_id}:{thread_id}:{member_id}"
-    refs = message.get("refs") if isinstance(message.get("refs"), dict) else {}
-    for ref_key in _PHASE_SESSION_REF_KEYS:
-        phase_id = str(refs.get(ref_key) or "").strip()
-        if phase_id:
-            return f"{base}:phase:{ref_key}:{phase_id}"
-    return base
-
 
 def _channel_provider_headless_timeout_s() -> float:
     raw = os.environ.get("ZF_CHANNEL_PROVIDER_HEADLESS_TIMEOUT_S")
@@ -929,7 +902,7 @@ def _channel_provider_headless_timeout_s() -> float:
         timeout_s = float(raw)
     except (TypeError, ValueError):
         return DEFAULT_CHANNEL_PROVIDER_HEADLESS_TIMEOUT_S
-    return timeout_s if timeout_s > 0 else DEFAULT_CHANNEL_PROVIDER_HEADLESS_TIMEOUT_S
+    return timeout_s if 0 < timeout_s < float("inf") else DEFAULT_CHANNEL_PROVIDER_HEADLESS_TIMEOUT_S
 
 
 def _build_channel_system_prompt(
@@ -963,7 +936,8 @@ def _build_channel_system_prompt(
     )
     prompt = (
         f"You are {member_id}, a {provider} agent participating in a ZaoFu Agent Channel. "
-        f"Your channel role is {role}. Reply as a channel teammate. Keep the answer concise, "
+        f"Your channel role is {role}. Reply as a channel teammate. Keep the chat summary concise; "
+        "produce all artifact content required by the current response contract in full. Stay "
         "grounded in the provided channel context, and do not mutate runtime state directly. "
         "Do not include step-by-step progress narration such as 'I will check' or "
         "'I will write' in the final reply; ZaoFu renders runtime activity separately. "

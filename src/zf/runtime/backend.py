@@ -9,7 +9,6 @@ to ``codex exec resume`` for subsequent invocations.
 
 from __future__ import annotations
 
-import os
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 
@@ -186,13 +185,10 @@ class BackendAdapter(ABC):
 class ClaudeCodeAdapter(BackendAdapter):
     """Adapter for the Claude Code CLI.
 
-    permission_mode=bypass: --dangerously-skip-permissions (full autonomy).
-    permission_mode=allowlist + non-empty allowed_tools: --allowedTools "<list>"
-        (Claude Code restricts tool use to the listed patterns).
-    permission_mode=allowlist + empty allowed_tools: neither flag — Claude Code
-        falls back to interactive permission prompts, which in headless mode
-        means tools are blocked. Caller is expected to either populate
-        allowed_tools or use permission_mode=bypass.
+    Trusted ZaoFu provider processes always use
+    ``--dangerously-skip-permissions``. ``permission_mode`` remains a logical
+    role contract used by ZaoFu's deterministic write-policy, artifact, and
+    controlled-action gates; it no longer selects a provider sandbox.
 
     G-RESUME-1: on first spawn with a known session_id, pass
     ``--session-id <uuid>`` so Claude writes to a deterministic file
@@ -210,18 +206,13 @@ class ClaudeCodeAdapter(BackendAdapter):
         prompt: str | None = None,
     ) -> list[str]:
         validate_provider_session_config(role, capabilities=self.capabilities)
-        cmd = ["claude"]
-        if role.permission_mode == "bypass":
-            cmd.append("--dangerously-skip-permissions")
-        elif role.permission_mode == "allowlist" and role.allowed_tools:
-            cmd.extend(["--allowedTools", " ".join(role.allowed_tools)])
-            # R24: an allowlisted role still hits Claude's directory-trust
-            # prompt on any read outside its worktree cwd (briefings/
-            # instructions live in the state dir) — a headless pane then
-            # hangs. Grant the declared paths up front, mirroring the
-            # codex branch below.
-            for path in role.constraints.allowed_paths:
-                cmd.extend(["--add-dir", path])
+        cmd = ["claude", "--dangerously-skip-permissions"]
+        # ``--add-dir`` keeps declared state/artifact directories visible to
+        # the provider session. It is context routing rather than a sandbox
+        # restriction, so it remains useful with the trusted full-access
+        # baseline.
+        for path in role.constraints.allowed_paths:
+            cmd.extend(["--add-dir", path])
         if role.model and role.model != "placeholder":
             cmd.extend(["--model", role.model])
         if session_id:
@@ -321,44 +312,10 @@ class CodexAdapter(BackendAdapter):
         # telemetry hooks still fire (no stall, no lost briefings).
         cmd = ["codex", "--enable", "hooks", "--dangerously-bypass-hook-trust"]
 
-        # 1231-T2: Codex permission is a sandbox × approval 2-tuple,
-        # not a tool allowlist. Map zaofu's permission_mode to Codex flags:
-        #   bypass            → --dangerously-bypass-approvals-and-sandbox
-        #   default / ""      → -a never -s workspace-write
-        #   restricted /      → -a untrusted + sandbox choice:
-        #   allowlist            · no allowed_paths → -s read-only
-        #                        · has allowed_paths → -s workspace-write
-        #                          + --add-dir <p> for each extra path
-        #   <anything else>   → -a never -s workspace-write (safe fallback)
-        #
-        # B-1203-01 (2026-04-21 mixed-e2e smoke): combining
-        # `-s read-only` with `--add-dir` makes codex abort on spawn
-        # ("Ignoring --add-dir because the effective sandbox mode is
-        # read-only"). The role can't decide at build-time which files
-        # it will edit, so when allowed_paths is declared we upgrade
-        # sandbox to workspace-write — this gives cwd-write *and* the
-        # declared --add-dir entries, which is the closest Codex can
-        # express to "writable only within these paths".
-        pm = role.permission_mode or "default"
-        sandbox_override = os.environ.get("ZF_CODEX_WORKER_SANDBOX", "").strip()
-        if pm == "bypass":
-            cmd.append("--dangerously-bypass-approvals-and-sandbox")
-        elif pm in ("restricted", "allowlist"):
-            if sandbox_override == "danger-full-access":
-                cmd.extend(["-a", "never", "-s", "danger-full-access"])
-            elif role.constraints.allowed_paths:
-                cmd.extend(["-a", "untrusted"])
-                cmd.extend(["-s", "workspace-write"])
-                for path in role.constraints.allowed_paths:
-                    cmd.extend(["--add-dir", path])
-            else:
-                cmd.extend(["-a", "untrusted"])
-                cmd.extend(["-s", "read-only"])
-        else:
-            # Codex CLI 0.130 removed the legacy --full-auto alias.
-            # Keep the bounded workspace-write behavior without prompting
-            # a headless tmux worker for approvals it cannot answer.
-            cmd.extend(["-a", "never", "-s", "workspace-write"])
+        # Provider sandboxing is intentionally uniform across all ZaoFu
+        # workers. Logical role constraints are still enforced by the kernel,
+        # not delegated to Codex's host-dependent bwrap/unshare sandbox.
+        cmd.append("--dangerously-bypass-approvals-and-sandbox")
 
         if role.model and role.model != "placeholder":
             cmd.extend(["--model", role.model])

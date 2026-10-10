@@ -78,7 +78,7 @@ def react_channel_synthesis_requested(
                 "source": "runtime",
                 "text": f"@{target_member_id} {prompt}",
                 "mentions": [target_member_id],
-                "refs": {"synthesis_request_id": request_id},
+                "refs": {"synthesis_request_id": request_id, "prd_document_contract": "full.v1"},
             },
             created_by="channel-synthesis:runtime",
             source_event_id=event.id,
@@ -141,6 +141,7 @@ def react_channel_synthesis_repair_requested(
                 "refs": {
                     "synthesis_request_id": synthesis_request_id,
                     "synthesis_repair_id": repair_id,
+                    "prd_document_contract": "full.v1",
                     "synthesis_repair_revision": revision,
                     "synthesis_invalid_reply": invalid_reply_ref,
                     "synthesis_contract_error": contract_error,
@@ -356,6 +357,7 @@ def react_channel_cross_review_requested(
                 "mentions": [target_member_id],
                 "refs": {
                     "cross_review_request_id": request_id,
+                    "cross_review_contract": "v2",
                     "question_id": str(payload.get("question_id") or ""),
                     "dedup_request_id": str(
                         payload.get("dedup_request_id") or ""

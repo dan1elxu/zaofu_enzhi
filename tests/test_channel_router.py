@@ -1200,9 +1200,21 @@ def test_channel_synthesis_phase_does_not_resume_member_discussion_session(
 
     assert len(backend.calls) == 1
     assert backend.calls[0]["provider_session_id"] == ""
-    assert backend.calls[0]["run_thread_id"].endswith(
-        ":phase:synthesis_request_id:synth-phase-1"
+    phase_thread = store.load(
+        scope="project",
+        task_id="",
+        thread_key=(
+            "channel:ch-phase-session:main:synthesizer"
+            ":phase:synthesis_request_id:synth-phase-1"
+        ),
     )
+    assert phase_thread["thread_id"] != discussion_thread["thread_id"]
+    assert backend.calls[0]["run_thread_id"] == phase_thread["thread_id"]
+    started = next(
+        event for event in writer.event_log.read_all()
+        if event.type == "agent.session.run.started"
+    )
+    assert started.payload["thread_id"] == backend.calls[0]["run_thread_id"]
 
 
 def test_channel_incomplete_provider_turn_auto_continues_same_session(

@@ -2,6 +2,10 @@
 
 本实现把 Kanban/Channel 的冻结快照送入一个持久化、有界并发的 Judge 队列。评估事件是只读投影事件，不改变任务、Channel 或 PRD 的权威状态。
 
+## 与上游手动 PRD 诊断共存
+
+2026-10-10 合入上游 `111488743` 后，冻结后 Eval 保持下文的唯一自动入口；上游的 `channel-prd-evaluate` 是另一个显式受控动作，发出 `channel.prd_evaluation.requested`，由独立 reactor 生成 `artifacts/output-evaluations/<UUID>/report.json`。它不进入冻结 Eval scheduler，也不写入 `artifacts/benchmark-evaluations/` 的报告。Web 的「冻结后 Eval」与 PRD 全文/专项诊断分别读取各自接口。诊断反馈可参与尚未确认、未关闭的讨论修订，但不能倒灌进既有 frozen packet。
+
 ## 流程
 
 1. `evaluation_watch` 读取 `events.jsonl`，只以统一的 `channel.prd.frozen` 为评测入口；`channel.consensus.reached` 是冻结前的内部讨论事件，不单独触发评测。observer 在冻结引用的 source occurrence 处投影，校验 matching synthesis 且无开放问题/待修订。`multi_lens` 要求必需成员完整签署，`conversation` / `clarification` 要求 owner 已确认。结果 receipt 不会单独启动 Judge，readiness 不决定是否评测。

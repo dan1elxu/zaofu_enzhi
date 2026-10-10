@@ -286,6 +286,67 @@ def test_workflow_invoke_accepts_declared_pattern_and_emits_fanout_intent(
     assert activation_calls[0]["source_event_id"]
 
 
+
+def test_cancel_after_role_activation_prevents_invoke_acceptance(tmp_path, monkeypatch):
+    from zf.runtime import flow_role_activation
+
+    state, log, transport, orch = _state(tmp_path)
+    real_activate = flow_role_activation.activate_flow_roles
+
+    def cancel_after_activation(host, **kwargs):
+        activation = real_activate(host, **kwargs)
+        host.event_writer.append(ZfEvent(
+            type="run.cancelled", payload={"run_id": "wf-cancel"},
+            correlation_id="wf-cancel"))
+        return activation
+
+    monkeypatch.setattr(flow_role_activation, "activate_flow_roles", cancel_after_activation)
+    orch.run_once(events=[ZfEvent(
+        type="workflow.invoke.requested", actor="web", task_id="TASK-1",
+        payload={"task_id": "TASK-1", "pattern_id": "review-wave",
+                 "dispatch_id": "disp-1", "workflow_run_id": "wf-cancel"})])
+    assert not any(row.type in {"workflow.invoke.accepted", "task.fanout.requested"}
+                   for row in log.read_all())
+    assert any(row.type == "workflow.invoke.rejected" and "terminal" in str(row.payload)
+               for row in log.read_all())
+    assert TaskStore(state / "kanban.json").get("TASK-1").status != "in_progress"
+    assert not transport.sent
+
+
+def test_light_invoke_cancelled_after_admission_cannot_publish_entry(tmp_path, monkeypatch):
+    from zf.runtime import run_admission
+
+    cfg = _config()
+    cfg.workflow.flow_metadata = {"topology": "light", "light_entry_trigger": "light.ready"}
+    state, log, transport, orch = _state(tmp_path, config=cfg)
+    real_admit = run_admission.admit_workflow_invoke
+
+    def cancel_after_admission(host, event):
+        admitted = real_admit(host, event)
+        host.event_writer.append(ZfEvent(type="run.cancelled",
+            payload={"run_id": "wf-light-cancel"}, correlation_id="wf-light-cancel"))
+        return admitted
+
+    monkeypatch.setattr(run_admission, "admit_workflow_invoke", cancel_after_admission)
+    payload = {"workflow_run_id": "wf-light-cancel", "light_entry_payload": {}}
+    event = ZfEvent(type="workflow.invoke.requested", task_id="TASK-1", payload=payload)
+    result = orch._admit_light_workflow_invoke(
+        event, payload=payload, task_id="TASK-1", pattern_id="light", entry_trigger="light.ready")
+    assert result.action == "block"
+    assert not any(row.type in {"workflow.invoke.accepted", "light.ready"} for row in log.read_all())
+    assert TaskStore(state / "kanban.json").get("TASK-1").status != "in_progress"
+
+
+def test_cancelled_invoke_replay_cannot_reactivate_task(tmp_path):
+    state, log, transport, orch = _state(tmp_path)
+    accepted = ZfEvent(type="workflow.invoke.accepted", task_id="TASK-1",
+                      payload={"workflow_run_id": "wf-replay-cancel", "task_id": "TASK-1"})
+    orch.event_writer.append(accepted)
+    orch.event_writer.append(ZfEvent(type="run.cancelled", payload={"run_id": "wf-replay-cancel"}))
+    request = ZfEvent(type="workflow.invoke.requested", task_id="TASK-1", payload=accepted.payload)
+    assert not orch._activate_replayed_workflow_task(request, accepted)
+    assert TaskStore(state / "kanban.json").get("TASK-1").status != "in_progress"
+
 def test_workflow_invoke_rejects_declared_writer_entry_before_side_effects(
     tmp_path: Path,
 ) -> None:

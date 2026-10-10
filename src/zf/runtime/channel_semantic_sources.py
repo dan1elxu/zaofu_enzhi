@@ -7,7 +7,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from zf.core.events import EventWriter
+from zf.core.events import EventLog, EventWriter
 from zf.runtime.channel_digest_key import digest_key
 from zf.runtime.channel_sidecar import hydrate_channel_message_text
 from zf.runtime.sidecar_refs import SidecarRefError, hydrate_sidecar_ref
@@ -69,7 +69,7 @@ def build_semantic_source_bundle(
     state_dir: Path | None,
     max_source_chars: int = DEFAULT_MAX_SEMANTIC_SOURCE_CHARS,
 ) -> dict[str, Any]:
-    """Build a fail-closed source bundle for cross-review and synthesis.
+    """Build a fail-closed source bundle for deliberation and PRD review.
 
     Ordinary conversation deliberately returns ``required=False`` and keeps the
     existing excerpt-only context path. Deliberation turns carry every relevant
@@ -105,26 +105,6 @@ def build_semantic_source_bundle(
     }
     if not required:
         return empty
-
-    if stage == "consensus_review":
-        try:
-            document = _artifact_document(
-                state_dir, trigger.get("refs") or {}, kind="consensus_artifact",
-            )
-        except SidecarRefError as exc:
-            return {**empty, "complete": False, "reason": f"consensus_artifact:{exc.code}"}
-        source_chars = len(document["content"])
-        error = (
-            f"semantic_source_budget_exceeded:{source_chars}>{max_source_chars}"
-            if source_chars > max_source_chars else ""
-        )
-        manifest = [{key: value for key, value in document.items() if key != "content"}]
-        return {
-            **empty, "complete": not error, "reason": error,
-            "manifest": manifest, "manifest_digest": _stable_digest(manifest),
-            "required_message_digests": [document["message_body_digest"]],
-            "documents": [document] if not error else [], "source_chars": source_chars,
-        }
 
     thread_messages = [
         item
@@ -193,6 +173,10 @@ def build_semantic_source_bundle(
             reply_requests=reply_requests,
             messages_by_id=messages_by_id,
         )
+        # Review current source decisions against the bound PRD. Prior agent
+        # drafts and failed reviews are history, not evidence about this revision.
+        if stage == "consensus_review" and kind not in {"requirement", "owner_input"}:
+            continue
         if checkpoint_start is not None and kind != "requirement" and (
             position <= checkpoint_start or kind == "synthesis_attempt"
         ):
@@ -243,21 +227,97 @@ def build_semantic_source_bundle(
         manifest.append(entry)
         documents.append({**entry, "content": text})
 
+    if state_dir is not None:
+        membership_kinds = {
+            "channel.member.invitation.proposed": "member_invitation_proposal",
+            "channel.member.invitation.decided": "member_invitation_decision",
+            "channel.member.invited": "member_admission",
+        }
+        for event in EventLog(Path(state_dir) / "events.jsonl").read_all():
+            if (event.type not in membership_kinds
+                or event.correlation_id != channel.get("channel_id")
+                or (event.payload or {}).get("channel_id") != channel.get("channel_id")
+                or str((event.payload or {}).get("thread_id") or "main") != thread_id
+                or (trigger.get("ts") and event.ts > str(trigger["ts"]))):
+                continue
+            body = {"event_id": event.id, "type": event.type, "actor": event.actor,
+                    "ts": event.ts, "causation_id": event.causation_id,
+                    "correlation_id": event.correlation_id, "payload": event.payload}
+            entry = {"kind": membership_kinds[event.type], "artifact_ref": f"event:{event.id}",
+                     "artifact_digest": _stable_digest(body)}
+            manifest.append(entry)
+            documents.append({**entry, "content": body})
+            source_chars += len(json.dumps(body, ensure_ascii=False))
+
+    if stage == "consensus_review":
+        refs = trigger.get("refs") or {}
+        try:
+            if state_dir is None:
+                raise SidecarRefError("ref_missing", "consensus review requires state_dir")
+            artifact_ref = str(refs.get("artifact_ref") or "")
+            artifact_digest = str(refs.get("artifact_digest") or "")
+            if not artifact_digest:
+                raise SidecarRefError("hash_missing", "consensus review requires exact digest")
+            artifact = hydrate_sidecar_ref(
+                Path(state_dir), {"ref": artifact_ref, "sha256": artifact_digest},
+            )
+            artifacts = [("channel_prd", artifact)]
+            if isinstance(artifact.payload, dict) and artifact.payload.get("schema_version") == "channel-prd.v1":
+                body = artifact.payload
+                if body.get("channel_id") != channel.get("channel_id") or body.get("thread_id") != thread_id:
+                    raise SidecarRefError("scope_mismatch", "PRD belongs to another channel/thread")
+                if not body.get("readiness_digest"):
+                    raise SidecarRefError("hash_missing", "canonical PRD requires readiness digest")
+                readiness = hydrate_sidecar_ref(Path(state_dir), {
+                    "ref": body.get("readiness_ref"), "sha256": body["readiness_digest"],
+                })
+                if not isinstance(readiness.payload, dict) or any(
+                    readiness.payload.get(key) != body.get(key)
+                    for key in ("channel_id", "thread_id", "revision")
+                ):
+                    raise SidecarRefError("scope_mismatch", "readiness must bind the exact PRD revision")
+                artifacts.append(("channel_prd_readiness", readiness))
+            if refs.get("evaluation_feedback_id"):
+                from zf.runtime.channel_evaluation_feedback import evaluation_feedback_documents
+
+                report, evaluation_manifest = evaluation_feedback_documents(Path(state_dir), refs)
+                artifacts.extend((("evaluation_report", report),
+                                  ("evaluation_input_manifest", evaluation_manifest)))
+            for kind, hydrated in artifacts:
+                entry = {"kind": kind, "artifact_ref": hydrated.ref,
+                         "artifact_digest": hydrated.sha256, "byte_count": hydrated.byte_count}
+                manifest.append(entry)
+                documents.append({**entry, "content": hydrated.payload})
+                source_chars += len(json.dumps(hydrated.payload, ensure_ascii=False))
+        except (SidecarRefError, OSError, ValueError) as exc:
+            errors.append(f"consensus_review:{getattr(exc, 'code', 'ref_unreadable')}")
+
     if source_chars > max_source_chars:
         errors.append(
             "semantic_source_budget_exceeded:"
             f"{source_chars}>{max_source_chars}"
         )
     manifest_digest = _stable_digest(manifest)
+    required_digests = [
+        str(item["message_body_digest"])
+        for item in manifest
+        if item.get("message_body_digest")
+    ]
+    if stage == "consensus_review":
+        required_digests.extend(
+            str(item["artifact_digest"])
+            for item in manifest
+            if item.get("kind") == "channel_prd"
+            and item.get("artifact_digest")
+        )
+    required_digests = list(dict.fromkeys(required_digests))
     return {
         **empty,
         "complete": not errors,
         "reason": ";".join(errors),
         "manifest": manifest,
         "manifest_digest": manifest_digest,
-        "required_message_digests": [
-            str(item["message_body_digest"]) for item in manifest
-        ],
+        "required_message_digests": required_digests,
         "documents": documents if not errors else [],
         "source_chars": source_chars,
     }

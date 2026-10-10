@@ -25,6 +25,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from zf.runtime.channel_discussion_contribution import ledger_converged as _ledger_converged
 from zf.core.events import EventWriter
 from zf.core.state.locks import locked_path
 from zf.runtime.channel_projection import project_channel, project_channels
@@ -36,6 +37,7 @@ from zf.runtime.channel_contracts import (
 )
 from zf.runtime.channel_consensus_identity import consensus_artifact_error, consensus_reached_payload
 from zf.runtime.channel_prd_freeze import emit_prd_frozen
+from zf.runtime.channel_synthesis_currentness import current_synthesis_consensus as _thread_consensus
 from zf.runtime.channel_discussion_contribution import valid_phase1_members
 from zf.runtime.channel_synthesis_lock import (
     channel_synthesis_lock_path,
@@ -49,10 +51,15 @@ from zf.runtime.channel_question_dedup import (
 from zf.runtime.channel_question_dedup_retry import (
     repair_rejected_question_dedup,
 )
+from zf.runtime.channel_review_rework import (
+    automatic_revision_request_count,
+    open_unseen_consensus_blockers,
+)
 
 RELAY_MODES = {"mention_relay", "fanout_then_synthesis"}
 DEFAULT_MAX_RELAY_DEPTH = 4
 DISCUSSION_STATES = {"idle", "phase1_blind", "phase2_relay", "phase3_synthesis"}
+MAX_AUTOMATIC_REVISION_REQUESTS = 3
 AGENT_MEMBER_TYPES = {"provider_agent", "persona_agent", "persona"}
 QUESTION_RESOLUTIONS = {
     "answered",
@@ -328,7 +335,8 @@ def start_discussion(
     product_mode: str = "",
 ) -> list[str]:
     """Emit discussion.started + phase1 transition; returns the blind roster."""
-    roster = discussion_roster(channel)
+    previous = discussion_state(channel, thread_id)
+    roster = list(previous.get("participants") or discussion_roster(channel))
     synthesizer = discussion_synthesizer(channel, roster)
     discussion_id = "discussion-" + hashlib.sha1(
         f"{channel_id}:{thread_id}:{trigger_message_id}".encode("utf-8")
@@ -355,6 +363,8 @@ def start_discussion(
             ),
             "trigger": trigger,
             "roster": roster,
+            "participants": roster,
+            "review_roster": list(previous.get("review_roster") or roster),
             "synthesizer": synthesizer,
             "requirement_message_id": trigger_message_id,
             "source": source,
@@ -404,7 +414,15 @@ def advance_discussion(
     state = str(session.get("state") or "idle")
     emitted: list[str] = []
     if state == "idle":
-        return emitted
+        try:
+            events = writer.event_log.read_all()
+        except Exception:
+            return emitted
+        if not _approved_unsettled_revision(channel, session, thread_id, events=events):
+            return emitted
+        # A reviewed revision can land after the discussion closed. Reuse the
+        # same artifact validation and durable freeze recovery as phase 3.
+        state = "phase3_synthesis"
 
     overdue = _phase_overdue(channel, session, now=now)
 
@@ -479,7 +497,7 @@ def advance_discussion(
         )
         if dedup_repair:
             return dedup_repair
-        late_blockers = _open_unseen_consensus_blockers(
+        late_blockers = open_unseen_consensus_blockers(
             writer,
             channel,
             _thread_consensus(channel, thread_id),
@@ -487,6 +505,7 @@ def advance_discussion(
             source=source,
             channel_id=channel_id,
             thread_id=thread_id,
+            synthesizer=str(session.get("synthesizer") or ""),
         )
         if late_blockers:
             return late_blockers
@@ -513,6 +532,25 @@ def advance_discussion(
                 ))
             return emitted
         if _ledger_converged(channel, session, thread_id):
+            if (
+                str(session.get("phase_reason") or "") == "consensus_blocked"
+                and (blocked := (_thread_consensus(channel, thread_id).get("blocked") or []))
+                and all(
+                    str(item.get("blocker_kind") or "owner_decision")
+                    == "revision_request" for item in blocked
+                )
+                and automatic_revision_request_count(
+                    channel,
+                    thread_id=thread_id,
+                    started_at=str(session.get("started_at") or ""),
+                ) >= MAX_AUTOMATIC_REVISION_REQUESTS
+            ):
+                emitted.extend(_close_stalled(
+                    writer, actor=actor, source=source,
+                    channel_id=channel_id, thread_id=thread_id,
+                    phase="automatic_revision_limit",
+                ))
+                return emitted
             emitted.extend(request_synthesis_and_phase3(
                 writer, state_dir, channel, session,
                 actor=actor, source=source,
@@ -536,7 +574,7 @@ def advance_discussion(
             ))
             return emitted
         blocked = consensus.get("blocked") or []
-        emitted.extend(_open_unseen_consensus_blockers(
+        emitted.extend(open_unseen_consensus_blockers(
             writer,
             channel,
             consensus,
@@ -544,6 +582,7 @@ def advance_discussion(
             source=source,
             channel_id=channel_id,
             thread_id=thread_id,
+            synthesizer=str(session.get("synthesizer") or ""),
         ))
         if blocked and not consensus.get("reopened"):
             writer.emit(
@@ -690,6 +729,8 @@ def advance_discussion(
                             return emitted
                     except Exception:
                         return emitted
+            if str(session.get("state") or "idle") == "idle":
+                return emitted
             writer.emit(
                 "channel.discussion.closed",
                 actor=actor,
@@ -761,6 +802,8 @@ def request_synthesis_and_phase3(
                     "channel_id": channel_id,
                     "thread_id": thread_id,
                     "request_id": request_id,
+                    "discussion_revision": int(current_session.get("revision") or 1),
+                    "discussion_context_digest": str(current_session.get("context_digest") or ""),
                     "target_member_id": synthesizer,
                     "status": "requested",
                     "reason": reason,
@@ -801,46 +844,22 @@ def _phase1_complete(channel: dict[str, Any], session: dict[str, Any], thread_id
     )
 
 
-def _ledger_converged(channel: dict[str, Any], session: dict[str, Any], thread_id: str) -> bool:
-    """All roster members froze their questions and every question is resolved."""
-    roster = {str(m) for m in session.get("roster") or []}
-    if not roster:
-        return False
-    frozen = channel.get("questions_frozen") or {}
-    frozen_members = set((frozen.get(thread_id) or {}).keys()) if isinstance(frozen, dict) else set()
-    if not roster <= frozen_members:
-        return False
-    for question in channel.get("open_questions") or []:
-        if not isinstance(question, dict):
-            continue
-        if str(question.get("thread_id") or "main") != thread_id:
-            continue
-        if str(question.get("status") or "") == "open":
-            return False
-    cross_reviews = channel.get("cross_reviews") or []
-    candidates = (
-        list(cross_reviews.values())
-        if isinstance(cross_reviews, dict)
-        else list(cross_reviews)
-    )
-    if any(
-        isinstance(item, dict)
-        and str(item.get("thread_id") or "main") == thread_id
-        and str(item.get("status") or "") != "completed"
-        for item in candidates
-    ):
-        return False
-    # Zero questions with everyone frozen is legitimate convergence: nothing
-    # was unclear. The freeze set is the gate, not the question count.
-    return True
-
-
-def _thread_consensus(channel: dict[str, Any], thread_id: str) -> dict[str, Any]:
-    consensus = channel.get("consensus")
-    if isinstance(consensus, dict):
-        item = consensus.get(thread_id)
-        if isinstance(item, dict):
-            return item
+def _approved_unsettled_revision(
+    channel: dict[str, Any], session: dict[str, Any], thread_id: str,
+    *, events: list[Any],
+) -> dict[str, Any]:
+    consensus = _thread_consensus(channel, thread_id)
+    if (session.get("last_outcome") == "consensus"
+            and not consensus.get("blocked")
+            and not _thread_has_open_questions(channel, thread_id)
+            and _consensus_reached(channel, session, thread_id, consensus)):
+        reached_event_id = str(consensus.get("reached_event_id") or "")
+        if reached_event_id and _canonical_freeze_exists(
+            events, source_event_id=reached_event_id,
+            channel_id=str(channel.get("channel_id") or ""), thread_id=thread_id,
+        ):
+            return {}
+        return consensus
     return {}
 
 
@@ -861,39 +880,6 @@ def _canonical_freeze_exists(
         and str(event.payload.get("thread_id") or "") == thread_id
         for event in events
     )
-
-
-def _open_unseen_consensus_blockers(
-    writer: EventWriter,
-    channel: dict[str, Any],
-    consensus: dict[str, Any],
-    *,
-    actor: str,
-    source: str,
-    channel_id: str,
-    thread_id: str,
-) -> list[str]:
-    emitted: list[str] = []
-    for item in consensus.get("blocked") or []:
-        question_id = str(item.get("blocker_question_id") or "")
-        if not question_id or _question_exists(channel, question_id):
-            continue
-        writer.emit(
-            "channel.question.opened",
-            actor=actor,
-            correlation_id=channel_id,
-            payload={
-                "channel_id": channel_id,
-                "thread_id": thread_id,
-                "question_id": question_id,
-                "question": str(item.get("blocker_question") or ""),
-                "category": "blocker",
-                "asked_by": str(item.get("member_id") or ""),
-                "source": source,
-            },
-        )
-        emitted.append("channel.question.opened")
-    return emitted
 
 
 def _consensus_reached(
@@ -926,13 +912,6 @@ def _consensus_reached(
         # readiness is retained for the separate workflow execution gate.
         return True
     return bool(consensus.get("human_confirmed"))
-
-
-def _question_exists(channel: dict[str, Any], question_id: str) -> bool:
-    for question in channel.get("open_questions") or []:
-        if isinstance(question, dict) and str(question.get("question_id") or "") == question_id:
-            return True
-    return False
 
 
 def _question_dedup_already_requested(
@@ -1154,6 +1133,7 @@ def sweep_discussion_deadlines(
     on inbound events otherwise)."""
     ticked = 0
     listing = project_channels(Path(state_dir))
+    events = writer.event_log.read_all()
     for item in listing.get("channels") or listing.get("items") or []:
         if not isinstance(item, dict):
             continue
@@ -1164,7 +1144,8 @@ def sweep_discussion_deadlines(
         for thread_id, session in sessions.items():
             if not isinstance(session, dict):
                 continue
-            if str(session.get("state") or "idle") == "idle":
+            if (str(session.get("state") or "idle") == "idle"
+                    and not _approved_unsettled_revision(item, session, str(thread_id), events=events)):
                 continue
             advance_discussion(
                 Path(state_dir),

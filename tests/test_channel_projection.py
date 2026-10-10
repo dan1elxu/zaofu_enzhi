@@ -126,7 +126,9 @@ def test_channel_projection_derives_discussion_attention_and_actions(tmp_path: P
     assert detail is not None
     running = detail["discussion_attention"]["main"]
     assert running["state"] == "running"
-    assert running["active_agent_count"] == 1
+    assert running["execution_state"] == "queued"
+    assert running["active_agent_count"] == 0
+    assert running["queued_reply_count"] == 1
     assert running["participant_count"] == 2
     assert running["can_drain_replies"] is True
     assert listing["discussion_attention"] == detail["discussion_attention"]
@@ -144,13 +146,10 @@ def test_channel_projection_derives_discussion_attention_and_actions(tmp_path: P
     assert concurrent_attention is not None
     concurrent = concurrent_attention["discussion_attention"]["main"]
     assert concurrent["state"] == "needs_input"
-    assert concurrent["active_agent_count"] == 1
-    assert concurrent["active_agents"] == [{
-        "member_id": "pm-1",
-        "request_id": "reply-1",
-        "status": "pending",
-        "started_at": concurrent["oldest_active_started_at"],
-    }]
+    assert concurrent["execution_state"] == "queued"
+    assert concurrent["active_agent_count"] == 0
+    assert concurrent["active_agents"] == []
+    assert concurrent["oldest_active_started_at"] == ""
 
     append(
         "channel.agent.reply.completed",
@@ -621,6 +620,30 @@ def test_channel_projection_ignores_late_stale_run_generation(tmp_path: Path) ->
     assert reply["run_generation"] == 2
     assert reply["stale_events"][0]["run_generation"] == 1
     assert detail["provider_runs"][0]["status"] == "running"
+
+
+def test_channel_projection_clears_failure_metadata_on_redispatch_generation(tmp_path: Path) -> None:
+    state_dir = tmp_path / ".zf"
+    state_dir.mkdir()
+    log = EventLog(state_dir / "events.jsonl")
+    base = {
+        "channel_id": "ch-zaofu", "thread_id": "main", "request_id": "reply-1",
+        "message_id": "msg-1", "target_member_id": "codex-1",
+    }
+    log.append(ZfEvent(type="channel.agent.reply.requested", actor="router",
+                       payload={**base, "run_generation": 1}, correlation_id="ch-zaofu"))
+    log.append(ZfEvent(type="channel.agent.reply.failed", actor="router",
+                       payload={**base, "run_generation": 1, "failure_status": "timeout",
+                                "failure_category": "timeout", "retryable": True},
+                       correlation_id="ch-zaofu"))
+    log.append(ZfEvent(type="channel.agent.reply.requested", actor="router",
+                       payload={**base, "run_generation": 2}, correlation_id="ch-zaofu"))
+    detail = project_channel(state_dir, "ch-zaofu")
+    assert detail is not None
+    reply = detail["reply_requests"][0]
+    assert reply["status"] == "pending"
+    assert reply["failure_category"] == ""
+    assert reply["retryable"] is True
 
 
 def test_channel_projection_records_typing_presence_and_capabilities(tmp_path: Path) -> None:

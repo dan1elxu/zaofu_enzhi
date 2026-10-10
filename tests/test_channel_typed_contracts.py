@@ -21,6 +21,7 @@ from zf.runtime.channel_sidecar import (
     channel_context_pack_event_payload,
     channel_message_event_payload,
 )
+from zf.runtime.channel_synthesis_lock import synthesis_request_in_flight
 
 
 CHANNEL_ID = "ch-typed"
@@ -209,6 +210,8 @@ def test_contribution_prompt_states_exact_question_enums() -> None:
     assert "never operator or owner:operator" in prompt
     assert "MUST target exactly one real member_id" in prompt
     assert "finding, risk, or explicit assumption/gate" in prompt
+    assert "it does not mean the question list is empty" in prompt
+    assert "questions and freeze=true together" in prompt
 
 
 def test_adaptive_next_round_preserves_lineage_as_a_contribution_turn(
@@ -323,6 +326,18 @@ def test_provider_prompt_bounds_typed_phase_to_its_context_pack() -> None:
     assert "context_pack is the complete authoritative evidence set" in prompt
     assert "Do not inspect the project filesystem" in prompt
     assert "Do not call tools." in prompt
+
+
+def test_question_dedup_prompt_binds_question_update_id_field() -> None:
+    prompt = channel_reply_response_contract(
+        _channel(),
+        {"thread_id": "main", "target_member_id": "synthesizer"},
+        {"refs": {"question_dedup_request_id": "dedup-1"}},
+    )
+
+    assert "question_updates is present" in prompt
+    assert "use question_id (not canonical_question_id)" in prompt
+    assert "merged or resolved items" in prompt
 
 
 def test_all_typed_reply_prompts_separate_markdown_from_machine_contract() -> None:
@@ -1181,6 +1196,127 @@ def test_late_distinct_synthesis_cannot_replace_a_current_prd(
     assert stale.payload["source_reply_event_id"] == "evt-synth-late"
 
 
+def test_followup_synthesis_after_prior_owner_questions_is_not_stale(
+    tmp_path: Path,
+) -> None:
+    state_dir, writer = _writer(tmp_path)
+    channel = _channel()
+    channel["discussions"]["main"]["state"] = "phase3_synthesis"
+    request = {
+        "thread_id": "main",
+        "target_member_id": "synthesizer",
+    }
+    emit_structured_reply_events(
+        state_dir=state_dir,
+        writer=writer,
+        channel=channel,
+        request=request,
+        message={"refs": {"synthesis_request_id": "synth-prior"}},
+        reply=json.dumps({
+            "channel_synthesis": {
+                "summary": "First draft is ready.",
+                "open_questions": [],
+            },
+        }),
+        reply_event_id="evt-synth-prior",
+        actor="test",
+        source="test",
+    )
+    prior = next(
+        event for event in writer.event_log.read_all()
+        if event.type == "channel.synthesis.proposed"
+    )
+    writer.emit(
+        "channel.question.opened",
+        actor="test",
+        causation_id=prior.id,
+        correlation_id=CHANNEL_ID,
+        payload={
+            "channel_id": CHANNEL_ID,
+            "thread_id": "main",
+            "question_id": "q-prior-owner",
+            "question": "Freeze the benchmark.",
+            "target_member_id": "owner",
+        },
+    )
+    writer.emit(
+        "channel.question.resolved",
+        actor="owner",
+        correlation_id=CHANNEL_ID,
+        payload={
+            "channel_id": CHANNEL_ID,
+            "thread_id": "main",
+            "question_id": "q-prior-owner",
+            "resolution": "answered",
+            "answer": "Pinned benchmark profile.",
+        },
+    )
+    emit_structured_reply_events(
+        state_dir=state_dir,
+        writer=writer,
+        channel=channel,
+        request=request,
+        message={"refs": {"synthesis_request_id": "synth-followup"}},
+        reply=json.dumps({
+            "channel_synthesis": {
+                "summary": "Follow-up revision includes the Owner answer.",
+                "open_questions": [],
+            },
+        }),
+        reply_event_id="evt-synth-followup",
+        actor="test",
+        source="test",
+    )
+
+    proposals = [
+        event for event in writer.event_log.read_all()
+        if event.type == "channel.synthesis.proposed"
+    ]
+    assert [event.payload["request_id"] for event in proposals] == [
+        "synth-prior", "synth-followup",
+    ]
+    assert not any(
+        event.type == "channel.synthesis.stale_ignored"
+        and event.payload.get("request_id") == "synth-followup"
+        for event in writer.event_log.read_all()
+    )
+
+
+def test_synthesis_projection_marks_proposed_request_not_in_flight(
+    tmp_path: Path,
+) -> None:
+    state_dir, writer = _writer(tmp_path)
+    writer.emit(
+        "channel.synthesis.requested",
+        actor="test",
+        correlation_id=CHANNEL_ID,
+        payload={
+            "channel_id": CHANNEL_ID,
+            "thread_id": "main",
+            "request_id": "synth-finished",
+            "target_member_id": "synthesizer",
+            "status": "requested",
+        },
+    )
+    writer.emit(
+        "channel.synthesis.proposed",
+        actor="synthesizer",
+        correlation_id=CHANNEL_ID,
+        payload={
+            "channel_id": CHANNEL_ID,
+            "thread_id": "main",
+            "request_id": "synth-finished",
+            "artifact_ref": "channel-artifacts/draft.md",
+            "artifact_digest": "digest",
+        },
+    )
+
+    detail = project_channel(state_dir, CHANNEL_ID)
+    assert detail is not None
+    assert detail["synthesis_requests"][-1]["status"] == "proposed"
+    assert synthesis_request_in_flight(detail, "main") is None
+
+
 def test_synthesis_repair_exhaustion_blocks_and_ignores_late_revision(
     tmp_path: Path,
 ) -> None:
@@ -1588,6 +1724,7 @@ def test_consensus_review_is_digest_bound_and_preserves_blocker(
                 "verdict": "blocked",
                 "summary": "The failure mode is missing.",
                 "artifact_digest": "digest-1",
+                "blocker_kind": "revision_request",
                 "blocker_question": (
                     "What happens when the upstream provider times out?"
                 ),
@@ -1605,6 +1742,7 @@ def test_consensus_review_is_digest_bound_and_preserves_blocker(
     )
     assert blocked.payload["member_id"] == "critic"
     assert blocked.payload["artifact_digest"] == "digest-1"
+    assert blocked.payload["blocker_kind"] == "revision_request"
     assert blocked.payload["dissent"] == "The failure mode is missing."
 
     emit_structured_reply_events(

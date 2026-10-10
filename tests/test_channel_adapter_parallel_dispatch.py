@@ -11,6 +11,7 @@ from zf.core.events import EventWriter
 from zf.core.events.log import EventLog
 from zf.runtime import channel_adapter
 from zf.runtime.channel_adapter import dispatch_pending_replies
+from zf.runtime.channel_message_ingress import dispatch_channel_replies_background
 from zf.runtime.channel_dispatch_claim import (
     ChannelDispatchResult,
     with_channel_reply_dispatch_claim,
@@ -96,6 +97,104 @@ def test_pending_replies_dispatch_concurrently(tmp_path: Path, monkeypatch) -> N
     assert sorted(result.dispatched) == ["req-0", "req-1", "req-2"]
     assert peak >= 2, "dispatches must overlap, not run one turn at a time"
     assert elapsed < 0.5, f"3 x 0.2s dispatches took {elapsed:.2f}s — still serial"
+
+
+def test_dispatch_crash_closes_pending_requests_and_surfaces_failure(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    state_dir, writer = _seed(tmp_path)
+
+    def crash(*args, **kwargs):
+        raise RuntimeError("cannot schedule new futures after interpreter shutdown")
+
+    monkeypatch.setattr(channel_adapter, "dispatch_candidate_waves", crash)
+    result = dispatch_pending_replies(
+        state_dir=state_dir,
+        writer=writer,
+        channel_id=CH,
+        actor="web",
+        source="web",
+    )
+
+    assert sorted(result.failed) == ["req-0", "req-1", "req-2"]
+    events = EventLog(state_dir / "events.jsonl").read_all()
+    failed = [
+        event for event in events
+        if event.type == "channel.agent.reply.failed"
+    ]
+    assert sorted(event.payload["request_id"] for event in failed) == [
+        "req-0", "req-1", "req-2",
+    ]
+    assert all(event.payload["failure_status"] == "dispatch_exception" for event in failed)
+    dispatch_failed = [
+        event for event in events
+        if event.type == "channel.agent.reply.dispatch_failed"
+    ]
+    assert dispatch_failed[-1].payload["request_ids"] == [
+        "req-0", "req-1", "req-2",
+    ]
+    projected = channel_adapter.project_channel(state_dir, CH)
+    assert projected is not None
+    assert {row["status"] for row in projected["reply_requests"]} == {"failed"}
+
+
+def test_dispatch_crash_does_not_close_new_or_started_requests(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    state_dir, writer = _seed(tmp_path, members=1)
+    # This request is not in the dispatch snapshot. It must remain available
+    # for the next drain even when the current wave crashes.
+    def crash(*args, **kwargs):
+        writer.emit(
+            "channel.agent.reply.requested", actor="web", correlation_id=CH,
+            payload={"channel_id": CH, "thread_id": "main", "request_id": "req-new",
+                     "message_id": "m-1", "target_member_id": "m-0", "status": "pending"},
+        )
+        raise RuntimeError("executor stopped")
+
+    monkeypatch.setattr(channel_adapter, "dispatch_candidate_waves", crash)
+    result = dispatch_pending_replies(
+        state_dir=state_dir, writer=writer, channel_id=CH,
+        actor="web", source="web")
+    assert "req-0" in result.failed
+    projected = channel_adapter.project_channel(state_dir, CH)
+    rows = {row["request_id"]: row for row in projected["reply_requests"]}
+    assert rows["req-new"]["status"] == "pending"
+
+
+def test_background_thread_start_failure_closes_snapshot_candidates(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    state_dir, _writer = _seed(tmp_path, members=1)
+
+    class StartFailureThread:
+        def __init__(self, **kwargs):
+            pass
+
+        def start(self):
+            raise RuntimeError("cannot schedule new futures after interpreter shutdown")
+
+    monkeypatch.setattr(
+        "zf.runtime.channel_message_ingress.threading.Thread",
+        StartFailureThread,
+    )
+    dispatch_channel_replies_background(
+        state_dir=state_dir,
+        channel_id=CH,
+        actor="test",
+        source="test",
+        project_root=tmp_path,
+        config=None,
+        openclaw_client=None,
+        max_dispatch=2,
+    )
+    events = EventLog(state_dir / "events.jsonl").read_all()
+    failed = [event for event in events if event.type == "channel.agent.reply.failed"]
+    assert [event.payload["request_id"] for event in failed] == ["req-0"]
+    assert failed[0].payload["failure_status"] == "dispatch_exception"
 
 
 def test_single_candidate_stays_inline(tmp_path: Path, monkeypatch) -> None:

@@ -44,7 +44,7 @@ def test_channel_invite_materializes_skill_ref_from_skill_source(tmp_path: Path)
     skill_dir.mkdir(parents=True)
     (skill_dir / "SKILL.md").write_text("# participant protocol\n", encoding="utf-8")
 
-    service, _log, project_root = _service(
+    service, log, project_root = _service(
         tmp_path,
         skill_sources=[SkillSourceConfig(name="agent-skills", path=str(skills_repo))],
     )
@@ -55,6 +55,9 @@ def test_channel_invite_materializes_skill_ref_from_skill_source(tmp_path: Path)
         "provider": "codex",
         "channel_role": "product_pm",
         "skill_refs": ["zf-channel-discussion-participant"],
+        "role_selection_reason": "The requirement needs a product owner view.",
+        "requirement_ref": "channels/ch-1/messages/msg-1",
+        "requirement_digest": "sha256:requirement-1",
     })
 
     assert result.get("ok"), result
@@ -72,6 +75,16 @@ def test_channel_invite_materializes_skill_ref_from_skill_source(tmp_path: Path)
         / "skills"
         / "zf-channel-discussion-participant"
     ).exists()
+    invited = next(
+        event for event in log.read_all()
+        if event.type == "channel.member.invited"
+        and event.payload.get("member_id") == "pm-1"
+    )
+    assert invited.payload["role_selection_reason"] == (
+        "The requirement needs a product owner view."
+    )
+    assert invited.payload["requirement_ref"] == "channels/ch-1/messages/msg-1"
+    assert invited.payload["requirement_digest"] == "sha256:requirement-1"
     manifest = (
         project_root / ".zf" / "runtime-skills" / "manifest.json"
     ).read_text(encoding="utf-8")

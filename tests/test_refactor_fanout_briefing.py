@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import json
+import shlex
 from pathlib import Path
+
+import pytest
 
 from zf.core.config.schema import (
     FanoutAggregateConfig,
@@ -42,7 +45,11 @@ def _orchestrator(tmp_path: Path, config: ZfConfig) -> tuple[Orchestrator, _Reco
     return Orchestrator(state_dir, config, transport), transport  # type: ignore[arg-type]
 
 
-def test_refactor_review_briefing_treats_high_findings_as_plan_input(tmp_path: Path):
+@pytest.mark.parametrize("cli_command", ["zf", "uv --project /fixture run zf"])
+def test_refactor_review_briefing_treats_high_findings_as_plan_input(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cli_command: str,
+):
+    monkeypatch.setenv("ZF_CLI_CMD", cli_command)
     config = ZfConfig(
         project=ProjectConfig(name="test"),
         roles=[RoleConfig(name="review-a", backend="mock", role_kind="reader")],
@@ -80,7 +87,24 @@ def test_refactor_review_briefing_treats_high_findings_as_plan_input(tmp_path: P
     assert "Do not emit the aggregate success/failure event directly" in briefing
     assert "coverage_matrix" in briefing
     assert "evidence_refs" in briefing
-    assert "Unable to produce a coverage/evidence-backed review report" in briefing
+    failure_command = next(
+        line for line in briefing.splitlines()
+        if " emit workflow.child.failed " in line
+    )
+    args = shlex.split(failure_command)
+    prefix = shlex.split(cli_command)
+    assert args[:len(prefix)] == prefix
+    assert "--payload" not in args
+    failure_payload = json.loads(
+        Path(args[args.index("--payload-file") + 1]).read_text(encoding="utf-8")
+    )
+    assert failure_payload["reason"] == (
+        "Unable to produce a coverage/evidence-backed review report."
+    )
+    assert failure_payload["report"]["coverage_matrix"] == []
+    assert failure_payload["report"]["uncovered"] == [
+        "Unable to inspect assigned scope."
+    ]
 
 
 def test_refactor_review_profiled_briefing_uses_flat_semantic_result(

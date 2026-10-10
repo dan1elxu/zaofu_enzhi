@@ -17,6 +17,11 @@ _CODE_ARGUMENT_FLAGS = {
 }
 _SHELL_COMMAND_SEPARATORS = {"&&", "||", ";", "|", "&"}
 _RUNTIME_PATH_VALUE_FLAGS = {"--state-dir"}
+_DOCKER_VALUE_FLAGS = {
+    "--env", "-e", "--mount", "--volume", "-v", "--workdir", "-w",
+    "--user", "-u", "--network", "--entrypoint", "--name", "--publish", "-p",
+    "--hostname", "--add-host", "--platform", "--tmpfs",
+}
 _OCI_DIGEST_REF_RE = re.compile(
     r"^(?:[A-Za-z0-9._-]+(?::[0-9]+)?/)+"
     r"[A-Za-z0-9._-]+@sha256:[0-9a-fA-F]{64}$"
@@ -31,9 +36,31 @@ def command_path_refs(command: str) -> list[str]:
     refs: list[str] = []
     skip_code_argument = False
     skip_runtime_path_value = False
+    docker_run = len(tokens) >= 2 and tokens[0] == "docker" and tokens[1] == "run"
+    docker_image_seen = not docker_run
+    skip_docker_value = False
     command_position = True
-    for token in tokens:
+    for index, token in enumerate(tokens):
         normalized = str(token).strip()
+        if docker_run and index < 2:
+            continue
+        if docker_run and not docker_image_seen:
+            if skip_docker_value:
+                skip_docker_value = False
+                continue
+            if normalized in _DOCKER_VALUE_FLAGS:
+                skip_docker_value = True
+                continue
+            if any(normalized.startswith(f"{flag}=") for flag in _DOCKER_VALUE_FLAGS):
+                continue
+            if normalized.startswith("-"):
+                continue
+            # The first non-option after docker run is the image name. Docker
+            # runtime identifiers and mount destinations are not repository
+            # paths; only the command after the image belongs to this gate.
+            docker_image_seen = True
+            command_position = True
+            continue
         if normalized in _SHELL_COMMAND_SEPARATORS:
             command_position = True
             skip_code_argument = False

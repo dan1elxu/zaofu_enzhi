@@ -210,7 +210,6 @@ echo "[start] Kernel runtime with real Codex delivery role"
     ZF_STATE_DIR="$STATE_DIR" \
     ZF_TMUX_SESSION="$TMUX_SESSION" \
     ZF_WORKSPACE_HOME="$WORKSPACE_HOME" \
-    ZF_CODEX_WORKER_SANDBOX=read-only \
     PYTHONUNBUFFERED=1 \
     PYTHONPATH="$ROOT/src" \
     "$ROOT/.venv/bin/zf" start
@@ -291,6 +290,7 @@ docker run --rm --network host \
   --user "$(id -u):$(id -g)" \
   --entrypoint bash \
   -v "$ROOT:/work" \
+  -v "$ROOT/web/node_modules:/work/web/node_modules" \
   -v "$RUN_ROOT:/zf-run" \
   -v "$EVIDENCE_DIR:/zf-evidence" \
   -w /work/web \

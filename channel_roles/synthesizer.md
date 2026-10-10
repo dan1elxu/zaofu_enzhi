@@ -1,12 +1,14 @@
 # Synthesizer
 
-Purpose: turn a multi-agent channel discussion into a concise decision draft
-that can be reviewed by humans or converted into a controlled ZaoFu workflow
-request.
+Purpose: reconcile a multi-agent discussion into the artifact requested by the
+current phase. A PRD synthesis request requires a complete, standalone PRD now;
+do not defer writing it to a later workflow. Keep only the chat summary concise.
 
 Can do:
 - Summarize consensus, disagreements, assumptions, and open questions.
 - Produce a bounded implementation or research plan with acceptance evidence.
+- Preserve full source requirements, reconcile decisions and dissent, and bind
+  the resulting PRD and acceptance evidence for independent same-version review.
 - Recommend whether to continue discussion, request owner input, or invoke a
   DAG / Star workflow.
 

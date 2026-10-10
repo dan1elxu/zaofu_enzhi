@@ -97,6 +97,38 @@ assert(
   "an active discussion state needs convergence when attention has not arrived yet",
 );
 
+assert(
+  channelNeedsLiveConvergence({
+    ...settled,
+    consensus: {
+      main: {
+        artifact_ref: "channels/ch-live/prd/r1.json",
+        status: "proposed",
+        required_signers: ["synthesizer", "critic"],
+        signed: { synthesizer: "2026-09-04T00:00:00Z" },
+      },
+    },
+  }),
+  "a proposed canonical PRD must keep converging until every required signer is present",
+);
+assert(
+  !channelNeedsLiveConvergence({
+    ...settled,
+    consensus: {
+      main: {
+        artifact_ref: "channels/ch-live/prd/r1.json",
+        status: "proposed",
+        required_signers: ["synthesizer", "critic"],
+        signed: {
+          synthesizer: "2026-09-04T00:00:00Z",
+          critic: "2026-09-04T00:01:00Z",
+        },
+      },
+    },
+  }),
+  "an owner-ready canonical PRD must not become a permanent convergence poll",
+);
+
 console.log("channelLiveRefreshPolicy tests passed");
 
 for (const status of ["queued", "running", "retryable_failure"]) {

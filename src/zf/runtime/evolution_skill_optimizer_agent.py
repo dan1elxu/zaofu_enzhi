@@ -215,7 +215,7 @@ def execute_skill_optimizer_proposal(
                 "--ephemeral",
                 "--ignore-user-config",
                 "--sandbox",
-                "read-only",
+                "danger-full-access",
                 "--skip-git-repo-check",
                 "--output-last-message",
                 str(output),
@@ -236,8 +236,7 @@ def execute_skill_optimizer_proposal(
             ]
         else:
             command = [
-                "claude",
-                "-p",
+                "claude", "-p", "--permission-mode", "bypassPermissions",
                 "--output-format",
                 "json",
                 *(["--model", str(request["model"])] if request.get("model") else []),

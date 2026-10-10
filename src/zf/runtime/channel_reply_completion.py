@@ -8,7 +8,8 @@ from typing import Any
 from zf.core.events import EventWriter
 from zf.core.security.redaction import redact_obj
 from zf.runtime.channel_dispatch_claim import ChannelDispatchResult
-from zf.runtime.channel_run_owner import provider_run_fields_for_request
+from zf.runtime.channel_run_owner import provider_run_fields_for_request, reply_generation_is_current
+from zf.runtime.channel_reply_remediation import emit_channel_reply_failed
 from zf.runtime.channel_sidecar import channel_message_event_payload
 
 
@@ -55,7 +56,7 @@ def complete_deterministic_reply(
         "mentions": [],
         "refs": {
             "request_id": request_id,
-            "run_id": run_fields["run_id"],
+            **run_fields,
             "deterministic_reply": {
                 "kind": "canonical_projection",
                 "reason": reason or "deterministic canonical reply completed",
@@ -103,3 +104,22 @@ def complete_deterministic_reply(
         source=source,
     )
     return ChannelDispatchResult(dispatched=[request_id], completed=[request_id])
+
+
+def close_superseded_reply(
+    *, writer: EventWriter, request: dict[str, Any], request_id: str,
+    channel_id: str, started_event_id: str, actor: str, source: str,
+    provider_session_id: str,
+) -> bool:
+    """Close a late attempt before it can publish a reply body or contract."""
+    if reply_generation_is_current(
+        writer.event_log.read_all(), channel_id=channel_id, request=request,
+    ):
+        return False
+    emit_channel_reply_failed(
+        writer=writer, request=request, request_id=request_id,
+        started_event_id=started_event_id, actor=actor, source=source,
+        channel_id=channel_id, reason="superseded by newer requested generation",
+        provider_session_id=provider_session_id, failure_status="stale",
+    )
+    return True

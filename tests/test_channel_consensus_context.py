@@ -1,19 +1,29 @@
-"""签署评审必须收到经过哈希校验的完整 PRD，而不只是路径或摘要。"""
+"""Consensus review context contains the exact, hash-bound PRD."""
 
 from __future__ import annotations
 
 import hashlib
 import json
+from tests.channel_dispatch_fixture import channel_dispatches
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from zf.core.events import EventLog, EventWriter
 from zf.runtime.channel_context import build_channel_context_pack
+from zf.runtime.channel_contract_artifacts import (
+    persist_channel_prd,
+    persist_channel_prd_readiness,
+)
 from zf.runtime.channel_projection import project_channel
 from zf.runtime.channel_provider_prompt import build_channel_provider_prompt
 from zf.runtime.channel_router import route_channel_message
-from zf.runtime.channel_sidecar import channel_message_event_payload
+from zf.runtime.channel_sidecar import (
+    channel_message_event_payload,
+    hydrate_channel_context_pack_payload,
+)
+from zf.runtime.channel_synthesis_reactor import react_channel_consensus_proposed
 
 
 def review_channel(state_dir: Path):
@@ -27,20 +37,27 @@ def review_channel(state_dir: Path):
         "channel_role": "critic", "visibility_profile": "reviewer",
         "permission_profile": "read_only", "permissions": ["read", "message"],
     })
-    artifact_ref = "channels/ch-review/prd/r2.json"
+    readiness = persist_channel_prd_readiness(
+        state_dir, channel_id="ch-review", thread_id="main", revision=2,
+        body={"verdict": "ready", "implementation_start": False},
+        created_by="test", source_event_id="evt-synthesis",
+    )
+    prd = persist_channel_prd(
+        state_dir, channel_id="ch-review", thread_id="main", revision=2,
+        previous_ref="", previous_digest="", readiness_descriptor=readiness,
+        body={"summary": "Short summary", "markdown": "完整边界 " * 600 + "FINAL-ACCEPTANCE"},
+        created_by="test", source_event_id="evt-synthesis",
+    )
+    artifact_ref = prd["ref"]
     artifact_path = state_dir / artifact_ref
-    artifact_path.parent.mkdir(parents=True, exist_ok=True)
-    body = {"channel_id": "ch-review", "thread_id": "main", "revision": 2,
-            "body": {"summary": "Short summary", "acceptance": "完整边界 " * 600 + "FINAL-ACCEPTANCE"}}
-    artifact_path.write_text(json.dumps(body, ensure_ascii=False), encoding="utf-8")
-    digest = hashlib.sha256(artifact_path.read_bytes()).hexdigest()
+    digest = prd["sha256"]
     payload = channel_message_event_payload(state_dir, {
         "channel_id": "ch-review", "thread_id": "main", "message_id": "msg-review",
         "member_id": "operator", "role": "user", "source": "runtime",
         "text": "@reviewer Review the exact synthesis artifact.",
         "mentions": ["reviewer"], "refs": {
             "consensus_review_id": "review-r2", "artifact_ref": artifact_ref,
-            "artifact_digest": digest,
+            "artifact_digest": digest, "prd_revision": 2,
         },
     }, created_by="test")
     message = writer.emit("channel.message.posted", actor="test", payload=payload)
@@ -60,6 +77,7 @@ def test_router_binds_full_consensus_artifact_through_provider_prompt(tmp_path):
     pack = channel["context_packs"][0]
     assert pack["semantic_source_required"] is True
     assert pack["semantic_source_stage"] == "consensus_review"
+    assert pack["semantic_source_required_digests"] == [digest]
     assert "semantic_source_documents" not in pack
     prompt = build_channel_provider_prompt(
         channel=channel, member=channel["members"][0], message=message.payload,
@@ -68,7 +86,7 @@ def test_router_binds_full_consensus_artifact_through_provider_prompt(tmp_path):
     assert "FINAL-ACCEPTANCE" in prompt
     assert digest in prompt
     assert "consumed_message_digests" not in prompt
-    assert path.read_text(encoding="utf-8").endswith('"}}')
+    assert hashlib.sha256(path.read_bytes()).hexdigest() == digest
 
 
 @pytest.mark.parametrize("failure", ["missing", "hash_mismatch", "unsafe_path", "missing_digest"])
@@ -107,9 +125,12 @@ def test_review_target_does_not_accumulate_unrelated_transcript(tmp_path):
         trigger_message_id=message.payload["message_id"], state_dir=tmp_path,
     )
     assert pack["semantic_source_complete"] is True
-    assert len(pack["semantic_source_documents"]) == 1
-    assert "FINAL-ACCEPTANCE" in pack["semantic_source_documents"][0]["content"]
-    assert pack["semantic_source_required_digests"] == [digest]
+    documents = pack["semantic_source_documents"]
+    assert {document["kind"] for document in documents} == {"channel_prd", "channel_prd_readiness"}
+    target = next(document for document in documents if document["kind"] == "channel_prd")
+    assert target["content"]["body"]["markdown"].endswith("FINAL-ACCEPTANCE")
+    assert target["artifact_digest"] == digest
+    assert "previous discussion" not in json.dumps(documents, ensure_ascii=False)
 
 
 def test_review_artifact_over_budget_is_not_silently_truncated(tmp_path):
@@ -157,3 +178,84 @@ def test_revision_uses_verified_prd_and_preserves_concurrent_delta(tmp_path, cor
         assert [d["kind"] for d in bundle["documents"]] == ["prd_checkpoint", "requirement", "owner_input"]
         assert "FINAL-ACCEPTANCE" in bundle["documents"][0]["content"]
         assert "NEW-BOUNDARY" in bundle["documents"][2]["content"]
+
+
+def review_fixture(tmp_path: Path):
+    state_dir = tmp_path / ".runtime" / "channel state"
+    writer = EventWriter(EventLog(state_dir / "events.jsonl"))
+    writer.emit("channel.created", actor="test", payload={"channel_id": "ch-review", "name": "Review"})
+    writer.emit("channel.member.invited", actor="test", payload={
+        "channel_id": "ch-review", "member_id": "arch", "member_type": "provider_agent",
+        "provider": "fake", "backend": "fake", "channel_role": "arch",
+        "permissions": ["read", "message", "summarize"],
+    })
+    readiness = persist_channel_prd_readiness(
+        state_dir, channel_id="ch-review", thread_id="main", revision=1,
+        body={"verdict": "ready", "implementation_start": True, "reason": "Owner inputs resolved"},
+        created_by="pm", source_event_id="evt-synthesis",
+    )
+    prd = persist_channel_prd(
+        state_dir, channel_id="ch-review", thread_id="main", revision=1,
+        previous_ref="", previous_digest="", readiness_descriptor=readiness,
+        body={"summary": "Exact PRD", "markdown": "full evidence " * 500 + "END-OF-EXACT-PRD"},
+        created_by="pm", source_event_id="evt-synthesis",
+    )
+    host = SimpleNamespace(state_dir=state_dir, event_log=writer.event_log, event_writer=writer,
+                           project_root=tmp_path, config=None, openclaw_client=None)
+    payload = {"channel_id": "ch-review", "thread_id": "main", "proposed_by": "pm",
+               "required_signers": ["pm", "arch"], "artifact_ref": prd["ref"],
+               "artifact_digest": prd["sha256"], "prd_revision": 1}
+    return host, payload, prd, readiness
+
+
+def test_consensus_caller_supplies_complete_bound_prd_and_readiness(tmp_path: Path, channel_dispatches):
+    host, payload, prd, readiness = review_fixture(tmp_path)
+    proposed = host.event_writer.emit("channel.consensus.proposed", actor="pm", payload=payload)
+    host.event_writer.emit("channel.consensus.signed", actor="pm", payload={
+        **payload, "member_id": "pm",
+    })
+    react_channel_consensus_proposed(host, proposed)
+    react_channel_consensus_proposed(host, proposed)
+    channel_dispatches()
+    events = host.event_log.read_all()
+    packs = [event for event in events if event.type == "channel.context_pack.built"]
+    assert len(packs) == 1
+    pack = hydrate_channel_context_pack_payload(host.state_dir, packs[0].payload, strict=True)
+    assert pack["semantic_source_required"] is True
+    assert pack["semantic_source_complete"] is True
+    documents = pack["semantic_source_documents"]
+    target = next(doc for doc in documents if doc.get("artifact_ref") == prd["ref"])
+    assert target["artifact_digest"] == prd["sha256"]
+    assert target["content"]["body"]["markdown"].endswith("END-OF-EXACT-PRD")
+    assert any(doc.get("artifact_digest") == readiness["sha256"] for doc in documents)
+    channel = project_channel(host.state_dir, "ch-review")
+    request = channel["reply_requests"][0]
+    trigger = next(message for message in channel["messages"] if message["message_id"] == request["message_id"])
+    prompt = build_channel_provider_prompt(channel=channel, member={"member_id": "arch"},
+                                          message=trigger, request=request, state_dir=host.state_dir)
+    assert "END-OF-EXACT-PRD" in prompt
+    assert "Do not call tools" in prompt
+    assert len([event for event in events if event.type == "channel.consensus.signed"
+                and event.payload.get("member_id") == "arch"]) == 1
+
+
+@pytest.mark.parametrize("fault", ["missing", "digest", "outside", "readiness", "foreign_thread", "no_digest"])
+def test_consensus_dispatch_rejects_unreadable_or_unbound_source(tmp_path: Path, fault: str):
+    host, payload, prd, readiness = review_fixture(tmp_path)
+    if fault == "missing":
+        payload["artifact_ref"] = "channels/ch-review/prd/missing.json"
+    elif fault == "digest":
+        payload["artifact_digest"] = "0" * 64
+    elif fault == "outside":
+        payload["artifact_ref"] = "../outside.json"
+    elif fault == "readiness":
+        (host.state_dir / readiness["ref"]).write_text("{}")
+    elif fault == "foreign_thread":
+        payload["thread_id"] = "other"
+    elif fault == "no_digest":
+        payload["artifact_digest"] = ""
+    proposed = host.event_writer.emit("channel.consensus.proposed", actor="pm", payload=payload)
+    react_channel_consensus_proposed(host, proposed)
+    events = host.event_log.read_all()
+    assert any(event.type == "channel.context_pack.rejected" for event in events)
+    assert not any(event.type in {"channel.agent.reply.requested", "channel.consensus.signed"} for event in events)

@@ -3127,7 +3127,7 @@ def test_verification_briefing_nests_binding_identity_in_typed_result(
     briefing = path.read_text(encoding="utf-8")
     command = briefing.split("Success command:\n```bash\n", 1)[1].split("\n```", 1)[0]
     argv = shlex.split(command)
-    payload = json.loads(argv[argv.index("--payload") + 1])
+    payload = json.loads(Path(argv[argv.index("--payload-file") + 1]).read_text())
     result = payload["verification_result"]
     for key in (
         "workflow_run_id",
@@ -3147,7 +3147,9 @@ def test_verification_briefing_nests_binding_identity_in_typed_result(
         "Failure command:\n```bash\n", 1,
     )[1].split("\n```", 1)[0]
     failure_argv = shlex.split(failure_command)
-    failure_payload = json.loads(failure_argv[failure_argv.index("--payload") + 1])
+    failure_payload = json.loads(
+        Path(failure_argv[failure_argv.index("--payload-file") + 1]).read_text()
+    )
     failure_result = failure_payload["verification_result"]
     assert failure_result["verdict"] == "rejected"
     assert {

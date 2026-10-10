@@ -100,9 +100,10 @@ def test_full_prd_rework_review_and_freeze(tmp_path: Path, monkeypatch, corrupt:
     def provider(member, message, pack):
         refs = message.get("refs") or {}
         if refs.get("consensus_review_id"):
-            document = pack["semantic_source_documents"][0]
-            assert document["message_body_digest"] == refs["artifact_digest"]
-            body = json.loads(document["content"])
+            document = next(item for item in pack["semantic_source_documents"]
+                            if item["kind"] == "channel_prd")
+            assert document["artifact_digest"] == refs["artifact_digest"]
+            body = document["content"]
             assert body["body"]["synthesis"]["acceptance_criteria"]
             reviewed.append((member["member_id"], body["revision"]))
             if member["member_id"] == "qa_analyst":

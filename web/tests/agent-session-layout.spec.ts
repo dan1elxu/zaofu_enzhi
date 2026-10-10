@@ -1,5 +1,7 @@
 import { expect, test, type Locator, type Page } from "@playwright/test";
 
+const actionToken = process.env.ZF_WEB_ACTION_TOKEN_FOR_TEST ?? "";
+
 type Rect = {
   bottom: number;
   height: number;
@@ -72,6 +74,30 @@ async function selectSplitThread(page: Page) {
   await splitSelect.selectOption(value ?? "");
 }
 
+async function stubPendingProposal(page: Page) {
+  await page.route("**/kanban-agent/pending-proposals", async (route) => {
+    await route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({
+        schema_version: "kanban-agent.pending-proposals.v1",
+        project_id: "layout-test",
+        items: [{
+          proposal_event_id: "evt-layout-proposal",
+          proposal_id: "evt-layout-proposal",
+          action: "idea-to-product",
+          requested_action: "idea-to-product",
+          reason: "Verify pending proposal layout",
+          valid: true,
+          validation_error: "",
+          title: "Start product workflow",
+          payload: {},
+          refs: {},
+        }],
+      }),
+    });
+  });
+}
+
 test("Kanban Agent docked and fullscreen layout stays inside the workbench", async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
   await openKanbanAgent(page);
@@ -96,6 +122,62 @@ test("Kanban Agent docked and fullscreen layout stays inside the workbench", asy
   await expect(page.locator(".agent-session-panes.split")).toBeVisible();
   await expect(page.getByRole("button", { name: "Resize split pane" })).toBeVisible();
   await expectHorizontallyInsideViewport(page, page.locator(".agent-session-panes.split"), "split panes");
+});
+
+test("Kanban Agent centers an empty chat and moves resources into the composer", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.addInitScript((token) => {
+    if (token) window.localStorage.setItem("zf.webActionToken", token);
+  }, actionToken);
+  await openKanbanAgent(page);
+
+  await expect(page.locator(".orchestrator-panel .webchat-toolbar")).toHaveCount(0);
+  await expect(page.locator(".orchestrator-panel .agent-state-pill")).toHaveCount(0);
+  await page.getByRole("button", { name: "New Kanban Agent chat" }).click();
+
+  const welcome = page.getByText("What should we work through?", { exact: true });
+  const composer = page.locator(".headless-composer");
+  await expect(page.locator(".headless-chat.welcome")).toBeVisible();
+  await expect(welcome).toBeVisible();
+  await expect(composer.getByPlaceholder(/Message (Claude|Codex)/)).toBeVisible();
+  const welcomeBox = await box(welcome);
+  const composerBox = await box(composer);
+  expect(welcomeBox.bottom, "welcome should be above composer").toBeLessThan(composerBox.top);
+  expect(composerBox.top - welcomeBox.bottom, "welcome and composer should form one focus area").toBeLessThan(100);
+
+  const trigger = composer.getByRole("button", { name: "Tools and resources" });
+  await expect(trigger).toBeVisible();
+  await trigger.click();
+  const menu = page.getByRole("menu", { name: "Tools and resources" });
+  await expect(menu).toBeVisible();
+  await expect(menu.getByRole("menuitemcheckbox", { name: /Conversation/ })).toBeVisible();
+  await expect(menu.getByRole("menuitemcheckbox", { name: /Artifacts/ })).toBeVisible();
+  await expect(menu.getByRole("menuitemcheckbox", { name: /Activity/ })).toBeVisible();
+  await expect(menu.getByRole("menuitemcheckbox", { name: /Agent profile/ })).toBeVisible();
+  await expect(menu.getByLabel("Agent runtime status")).toContainText(/Permission/);
+  await expect(menu.getByLabel("Agent runtime status")).toContainText(/tools available/);
+  await page.keyboard.press("Escape");
+  await expect(menu).not.toBeVisible();
+  await expect(trigger).toBeFocused();
+
+  await trigger.click();
+  await menu.getByRole("menuitemcheckbox", { name: /Artifacts/ }).click();
+  await expect(page.getByRole("dialog", { name: "Artifacts" })).toBeVisible();
+  await page.getByRole("button", { name: "Close artifacts" }).click();
+  await expect(page.getByRole("dialog", { name: "Artifacts" })).not.toBeVisible();
+});
+
+test("Kanban Agent pending proposal card stays separate from the composer", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await stubPendingProposal(page);
+  await openKanbanAgent(page);
+
+  const pending = await box(page.getByLabel("Pending proposals"));
+  const composer = await box(page.locator(".headless-composer"));
+  expect(composer.top - pending.bottom, "proposal card and composer gap").toBeGreaterThanOrEqual(8);
+  expect(Math.abs(pending.left - composer.left), "proposal and composer left edges").toBeLessThanOrEqual(1);
+  expect(Math.abs(pending.right - composer.right), "proposal and composer right edges").toBeLessThanOrEqual(1);
+  await expectInsideViewport(page, page.getByLabel("Pending proposals"), "pending proposal card");
 });
 
 test("Kanban Agent session navigation stays fixed and preserves each thread position", async ({ page }) => {

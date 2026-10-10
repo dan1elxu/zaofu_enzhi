@@ -1916,6 +1916,7 @@ export interface ChannelDiscussionAttention {
   running_reply_count: number;
   completed_reply_count: number;
   failed_reply_count: number;
+  context_rejections?: Array<{ context_pack_id: string; target_member_id: string; reason: string }>;
   open_question_count: number;
   owner_question_count: number;
   total_question_count: number;
@@ -1944,6 +1945,7 @@ export interface ChannelSummary {
   attention?: Array<Record<string, unknown>>;
   syntheses?: Array<Record<string, unknown>>;
   synthesis_requests?: Array<Record<string, unknown>>;
+  cross_reviews?: Array<Record<string, unknown>>;
   workflow_requests?: Array<Record<string, unknown>>;
   mentions_detected?: Array<Record<string, unknown>>;
   routes?: Array<Record<string, unknown>>;
@@ -2691,6 +2693,182 @@ export interface AgentSessionRawOutput {
   metadata?: Record<string, unknown>;
 }
 
+export interface WebChatTurn {
+  schema_version: "webchat-turn.v1" | string;
+  turn_id: string;
+  project_id: string;
+  conversation_id: string;
+  thread_id: string;
+  task_id?: string;
+  backend: string;
+  permission_profile: string;
+  state: string;
+  current_attempt_id?: string;
+  stream_cursor?: number;
+  pending_interaction_id?: string;
+  terminal_reason?: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface WebChatInteraction {
+  interaction_id: string;
+  turn_id: string;
+  attempt_id?: string;
+  kind: "ask_user" | "tool_approval" | "action_approval" | "artifact_adoption" | string;
+  revision: number;
+  request_digest: string;
+  request: Record<string, unknown>;
+  response?: Record<string, unknown>;
+  status: string;
+  currentness?: Record<string, unknown>;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface WebChatQueueItem {
+  queue_id: string;
+  idempotency_key: string;
+  project_id: string;
+  conversation_id: string;
+  thread_id: string;
+  message: string;
+  request?: Record<string, unknown>;
+  state: string;
+  source_turn_id?: string;
+  claimed_turn_id?: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface WebChatControlReceipt {
+  receipt_id: string;
+  idempotency_key: string;
+  operation: "steer" | "interrupt" | "cancel" | string;
+  turn_id: string;
+  attempt_id?: string;
+  status: string;
+  fallback?: string;
+  payload?: Record<string, unknown>;
+  created_at: string;
+}
+
+export interface WebChatArtifact {
+  artifact_id: string;
+  version_id: string;
+  logical_name: string;
+  digest: string;
+  media_type: string;
+  size_bytes: number;
+  storage_uri: string;
+  visibility: "private" | "published" | "adopted" | "expired" | string;
+  producer: Record<string, unknown>;
+  lineage: Record<string, unknown>;
+  adopted_target?: Record<string, unknown>;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface WebChatChildActivity {
+  activity_id: string;
+  kind: "ephemeral_child" | "channel_member" | "delivery_worker" | string;
+  parent_turn_id?: string;
+  task_id?: string;
+  channel_id?: string;
+  thread_id?: string;
+  role?: string;
+  provider?: string;
+  model?: string;
+  permission_profile?: string;
+  status: string;
+  current_stage?: string;
+  heartbeat_at?: string;
+  updated_at?: string;
+  artifact_refs?: string[];
+  capabilities?: string[];
+  controls?: Array<{
+    operation: "queue" | "steer" | "interrupt" | "cancel" | string;
+    route: "controlled_action" | "webchat_turn" | "webchat_queue" | string;
+    action?: string;
+    target_id?: string;
+    payload?: Record<string, unknown>;
+    requires_message?: boolean;
+  }>;
+  why_not_done?: string;
+  terminal_evidence?: Array<Record<string, unknown>>;
+  usage?: Record<string, unknown>;
+  cost?: Record<string, unknown>;
+}
+
+export interface WebChatToolCatalog {
+  schema_version: string;
+  digest: string;
+  surface: string;
+  credentials_exposed: boolean;
+  items: Array<{
+    name: string;
+    tool_class: string;
+    description: string;
+    effective_policy: "allow" | "deny" | "ask" | string;
+  }>;
+}
+
+export interface WebChatRuntime {
+  schema_version: "webchat-runtime.v1" | string;
+  project_id: string;
+  conversation_id: string;
+  thread_id: string;
+  rollout?: {
+    mode: "durable" | "legacy" | string;
+    store_schema: string;
+    rollback_env: string;
+  };
+  capabilities: {
+    actions: string[];
+    controls: string[];
+    native_steer: boolean;
+    steer_fallback: string;
+    completion_authority: boolean;
+  };
+  turns: WebChatTurn[];
+  interactions: WebChatInteraction[];
+  queue: WebChatQueueItem[];
+  control_receipts?: WebChatControlReceipt[];
+  threads: Array<Record<string, unknown>>;
+  artifacts: WebChatArtifact[];
+  tool_catalog: WebChatToolCatalog;
+  agent_profile?: {
+    profile_id: string;
+    revision: number;
+    profile_digest: string;
+    profile: Record<string, unknown>;
+  };
+  shadow?: Record<string, unknown>;
+}
+
+export interface WebChatSearchResult {
+  message_id: string;
+  conversation_id: string;
+  thread_id: string;
+  parent_message_id?: string;
+  role: string;
+  preview: string;
+  created_at: string;
+}
+
+export interface AgentProfileCatalog {
+  schema_version: string;
+  providers: string[];
+  roles: string[];
+  permission_profiles: string[];
+  skills: string[];
+  tools: string[];
+  contains_secrets: boolean;
+  current_profile?: Record<string, unknown>;
+  current_revision?: number;
+  current_digest?: string;
+}
+
 export interface ChannelsPage {
   schema_version?: string;
   generated_at?: string;
@@ -2737,6 +2915,7 @@ export interface WorkspaceProjectsPage {
 }
 
 export interface ChannelDetail extends ChannelSummary {
+  member_invitation_proposals?: Array<Record<string, unknown>>;
   empty?: boolean;
   schema_version?: string;
   generated_at?: string;

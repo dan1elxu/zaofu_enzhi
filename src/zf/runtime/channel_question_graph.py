@@ -12,6 +12,7 @@ QUESTION_KINDS = frozenset({
     "owner_decision",
     "tradeoff",
     "clarification",
+    "revision_request",
 })
 QUESTION_PRIORITIES = frozenset({"p0", "p1", "p2", "p3"})
 OWNER_QUESTION_KINDS = frozenset({

@@ -23,6 +23,9 @@ def render_channel_prd_artifact(
     summary: str,
     source_refs: list[str],
 ) -> str:
+    if synthesis.get("prd_markdown"):
+        from zf.runtime.channel_prd_document import render_prd_document
+        return render_prd_document(synthesis, channel_id=channel_id, thread_id=thread_id, source_refs=source_refs)
     title = str(
         synthesis.get("title")
         or channel.get("name")

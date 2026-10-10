@@ -22,13 +22,13 @@ from zf.runtime.channel_contracts import normalize_permissions
 from zf.runtime.channel_contracts import normalize_provider
 from zf.runtime.channel_contracts import normalize_visibility_profile
 from zf.runtime.channel_contracts import permission_profile_write_policy
+from zf.runtime.control_actions_channel_creation import ChannelCreationActionsMixin
 from zf.runtime.channel_openclaw import prepare_openclaw_member_connection
 from zf.runtime.channel_profiles import (
     bind_channel_member_profile,
     resolve_channel_role_definition,
     write_channel_profile_snapshot,
 )
-from zf.runtime.channel_owner_authority import normalize_owner_delegates
 from zf.runtime.channel_projection import project_channel
 from zf.runtime.channel_roles import normalize_role_context_ref
 from zf.runtime.control_actions_helpers import _normal_channel_id
@@ -139,75 +139,7 @@ def _write_runtime_skill_manifest(
     )
 
 
-class ChannelAdminActionsMixin:
-    def _channel_create(
-        self,
-        *,
-        requested: ZfEvent,
-        action: str,
-        requested_action: str,
-        payload: dict,
-    ) -> dict:
-        name = _required_text(payload, "name") or _required_text(payload, "channel_name")
-        channel_id = _normal_channel_id(payload.get("channel_id") or payload.get("id") or name)
-        event = self.writer.emit(
-            "channel.created",
-            actor=self.actor,
-            task_id=_task_id_from_payload(payload),
-            causation_id=requested.id,
-            correlation_id=channel_id,
-            payload={
-                "channel_id": channel_id,
-                "name": name,
-                "channel_name": name,
-                "thread_id": _optional_str(payload.get("thread_id")) or "main",
-                "task_id": str(payload.get("task_id") or ""),
-                "created_by": str(payload.get("created_by") or self.actor),
-                "owner_actor_ref": str(
-                    payload.get("owner_actor_ref") or self.actor
-                ),
-                "owner_delegates": normalize_owner_delegates(
-                    payload.get("owner_delegates")
-                ),
-                "leader_member_id": str(
-                    payload.get("leader_member_id") or ""
-                ),
-                "leader_revision": int(payload.get("leader_revision") or 0),
-                "origin_binding": (
-                    payload.get("origin_binding")
-                    if isinstance(payload.get("origin_binding"), dict)
-                    else {
-                        "surface": self.surface,
-                        "channel_id": channel_id,
-                        "thread_id": (
-                            _optional_str(payload.get("thread_id")) or "main"
-                        ),
-                    }
-                ),
-                "source": self.surface,
-                "scope": payload.get("scope") if isinstance(payload.get("scope"), dict) else {},
-            },
-        )
-        self._completed(
-            requested=requested,
-            event=event,
-            action=action,
-            requested_action=requested_action,
-            status="created",
-            task_id=_task_id_from_payload(payload),
-            extra={"channel_id": channel_id, "name": name},
-        )
-        return {
-            "_status_code": 202,
-            "ok": True,
-            "status": "created",
-            "action": action,
-            "requested_action": requested_action,
-            "reason": "channel created",
-            "channel_id": channel_id,
-            "name": name,
-            "event_id": event.id,
-        }
+class ChannelAdminActionsMixin(ChannelCreationActionsMixin):
     def _channel_invite_member(
         self,
         *,
@@ -215,7 +147,12 @@ class ChannelAdminActionsMixin:
         action: str,
         requested_action: str,
         payload: dict,
+        invitation: dict | None = None,
     ) -> dict:
+        if payload.get("proposal_id"):
+            from zf.runtime.channel_member_admission import decide_member_invitation
+            return decide_member_invitation(self, requested=requested, action=action,
+                                            requested_action=requested_action, payload=payload)
         channel_id = _normal_channel_id(_required_text(payload, "channel_id"))
         thread_id = _optional_str(payload.get("thread_id")) or "main"
         member_id = _required_text(payload, "member_id")
@@ -398,6 +335,7 @@ class ChannelAdminActionsMixin:
             correlation_id=channel_id,
             payload={
                 "channel_id": channel_id,
+                "invitation_proposal_id": (invitation or {}).get("proposal_id", ""),
                 "thread_id": thread_id,
                 "member_id": member_id,
                 "persona": str(payload.get("persona") or member_id),
@@ -445,6 +383,15 @@ class ChannelAdminActionsMixin:
                 "workflow_role_binding": workflow_role_binding,
                 "discussion_policy": payload.get("discussion_policy") if isinstance(payload.get("discussion_policy"), dict) else {},
                 "output_contract": payload.get("output_contract") if isinstance(payload.get("output_contract"), dict) else {},
+                "role_selection_reason": str(
+                    payload.get("role_selection_reason")
+                    or payload.get("reason")
+                    or ""
+                ),
+                "requirement_ref": str(payload.get("requirement_ref") or ""),
+                "requirement_digest": str(
+                    payload.get("requirement_digest") or ""
+                ),
                 "capabilities": openclaw_capabilities,
                 "source": self.surface,
             },
@@ -496,6 +443,9 @@ class ChannelAdminActionsMixin:
                     "source": self.surface,
                 }),
             )
+        if invitation:
+            from zf.runtime.channel_member_admission import complete_member_admission
+            complete_member_admission(self, requested=requested, proposal=invitation, invited=connected_event)
         self._completed(
             requested=requested,
             event=connected_event,

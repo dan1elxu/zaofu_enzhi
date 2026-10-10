@@ -25,6 +25,7 @@ def normalize_channel_setup_submit_payload(
         "task_id",
         "template_id",
         "thread_id",
+        "dispatch_policy",
     }
     unknown = sorted(set(raw_payload) - allowed_keys)
     if unknown:
@@ -79,11 +80,20 @@ def normalize_channel_setup_submit_payload(
             {},
             "submit_payload.mode must be conversation, clarification, or multi_lens",
         )
+    dispatch_policy = str(raw_payload.get("dispatch_policy") or "auto").strip()
+    if dispatch_policy not in {"auto", "trigger_only"}:
+        return (
+            {},
+            {},
+            "submit_payload.dispatch_policy must be auto or trigger_only",
+        )
 
     payload: dict[str, Any] = {
         "template_id": template_id,
         "mode": mode,
     }
+    if "dispatch_policy" in raw_payload:
+        payload["dispatch_policy"] = dispatch_policy
     name = str(raw_payload.get("name") or "").strip()
     if name:
         payload["name"] = name
@@ -111,6 +121,23 @@ def normalize_channel_setup_submit_payload(
         if isinstance(materialized.get("discussion"), dict)
         else {}
     )
+    leader_member_id = str(materialized.get("leader_member_id") or "").strip()
+    default_responder_id = str(
+        discussion.get("default_responder_id")
+        or materialized.get("default_responder_id")
+        or ""
+    ).strip()
+    if not leader_member_id or not default_responder_id:
+        return {}, {}, "Channel setup requires a moderator and default responder"
+    member_ids = {
+        str(member.get("member_id") or "").strip()
+        for member in materialized.get("members") or []
+        if isinstance(member, dict)
+    }
+    if leader_member_id not in member_ids:
+        return {}, {}, "Channel setup moderator must be an active member"
+    if default_responder_id not in member_ids:
+        return {}, {}, "Channel setup default responder must be an active member"
     engine_mode = discussion_engine_mode(mode)
     details = {
         "template_id": template_id,
@@ -122,9 +149,14 @@ def normalize_channel_setup_submit_payload(
         ),
         "member_count": len(members),
         "members": members,
+        "leader_member_id": leader_member_id,
+        "moderator_member_id": leader_member_id,
+        "default_responder_id": default_responder_id,
+        "workflow_trigger": "moderator_propose_workflow",
         "product_mode": mode,
         "mode": mode,
         "engine_mode": engine_mode,
+        "dispatch_policy": dispatch_policy,
         "routing_strategy": {
             "conversation": "single_responder",
             "clarification": "facilitated_relay",

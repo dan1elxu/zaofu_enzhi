@@ -63,6 +63,10 @@ def validate_channel_contract(
         if freeze is not None and not isinstance(freeze, bool):
             return "freeze must be a boolean"
     else:
+        from zf.runtime.channel_prd_document import validate_prd_document
+        document_error = validate_prd_document(body)
+        if document_error:
+            return document_error
         _, next_round_error = normalize_synthesis_next_round(
             body.get("next_round")
         )

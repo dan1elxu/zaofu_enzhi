@@ -59,6 +59,25 @@ def provider_run_fields_for_request(
     )
 
 
+def reply_generation_is_current(
+    events: Iterable[Any], *, channel_id: str, request: dict[str, Any],
+) -> bool:
+    """Only a requested generation may publish the current reply body/contract."""
+    request_id = str(request.get("request_id") or "")
+    if not request_id:
+        return True
+    generations = [
+        _positive_int(event.payload.get("run_generation"), default=1)
+        for event in events
+        if event.type == "channel.agent.reply.requested"
+        and event.payload.get("channel_id") == channel_id
+        and event.payload.get("request_id") == request_id
+    ]
+    return not generations or _positive_int(
+        request.get("run_generation"), default=1
+    ) == max(generations)
+
+
 def active_reply_for_target(
     channel: dict[str, Any],
     target_member_id: str,
@@ -118,3 +137,41 @@ def _positive_int(value: object, *, default: int) -> int:
     except (TypeError, ValueError):
         return default
     return parsed if parsed > 0 else default
+
+
+_PHASE_SESSION_REF_KEYS = (
+    "synthesis_repair_id",
+    "question_dedup_request_id",
+    "synthesis_request_id",
+    "cross_review_request_id",
+    "consensus_review_id",
+)
+
+
+def channel_provider_thread_key(
+    *,
+    channel_id: str,
+    request: dict[str, Any],
+    message: dict[str, Any],
+) -> str:
+    """Return the durable provider-thread key for one Channel reply.
+
+    Conversational contributions retain a member-scoped logical thread. A
+    typed deliberation phase is different: it receives an authoritative,
+    complete context pack and must be isolated from prior agent tool history.
+    Synthesis repairs have their own identity and authoritative context so a
+    new repair's generation 1 cannot resume an earlier failed synthesis turn.
+    In-turn continuations retain the provider session; each Channel dispatch
+    starts a fresh native session, and typed retries also get a new logical key.
+    """
+    thread_id = str(request.get("thread_id") or "main")
+    member_id = str(request.get("target_member_id") or "")
+    base = f"channel:{channel_id}:{thread_id}:{member_id}"
+    refs = message.get("refs") if isinstance(message.get("refs"), dict) else {}
+    for ref_key in _PHASE_SESSION_REF_KEYS:
+        phase_id = str(refs.get(ref_key) or "").strip()
+        if phase_id:
+            generation = provider_run_fields_for_request(channel_id, request)["run_generation"]
+            suffix = f":attempt:{generation}" if generation > 1 else ""
+            return f"{base}:phase:{ref_key}:{phase_id}{suffix}"
+    return base

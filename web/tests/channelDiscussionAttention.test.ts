@@ -6,6 +6,7 @@ import {
   channelDiscussionControlPolicy,
   presentChannelDiscussionAttention,
   selectChannelDiscussionAttention,
+  selectDiscussionStartSource,
 } from "../src/components/channel/channelDiscussionAttention.js";
 
 function assert(condition: unknown, message: string): void {
@@ -46,6 +47,20 @@ function attention(
     ...overrides,
   };
 }
+
+const requirementMessages = [
+  {message_id: "original", thread_id: "main", role: "user", text: "Full PRD", refs: {evaluation_source_document: true}},
+  {message_id: "review", thread_id: "main", role: "user", text: "@qa Review this draft", refs: {consensus_review_id: "creview"}},
+  {message_id: "restart", thread_id: "main", role: "user", text: "@qa Review this draft", refs: {source_requirement_message_id: "review"}},
+];
+assert(
+  selectDiscussionStartSource(requirementMessages, "main", true, "restart")?.message_id === "original",
+  "restart binds the marked source document instead of an operator review prompt",
+);
+assert(
+  selectDiscussionStartSource(requirementMessages, "main", false, "")?.message_id === "original",
+  "new discussion ignores generated review prompts",
+);
 
 const running = attention("running", {
   execution_state: "running",
@@ -111,6 +126,15 @@ const blockedView = presentChannelDiscussionAttention(blocked);
 assert(blockedView.label === "Blocked", "failed discussion is blocked");
 assert(blockedView.summary.includes("1 reply failure"), "failure count is readable");
 
+const stalledReviewView = presentChannelDiscussionAttention(attention("blocked", {
+  reason: "discussion_stalled",
+  execution_state: "blocked",
+  attention_kind: "none",
+  last_outcome: "stalled",
+}));
+assert(stalledReviewView.label === "PRD review blocked", "revision stall is not an owner decision");
+assert(stalledReviewView.summary.includes("diagnosis"), "stalled review asks for diagnosis");
+
 const done = attention("done");
 assert(!presentChannelDiscussionAttention(done).visible, "completed discussion leaves the main chat quiet");
 
@@ -127,8 +151,27 @@ assert(
   "selected actionable thread wins",
 );
 assert(
-  selectChannelDiscussionAttention(detail, "main")?.thread_id === "feature",
-  "an actionable thread outranks a completed preferred thread",
+  selectChannelDiscussionAttention(detail, "main")?.thread_id === "main",
+  "another thread cannot replace the selected conversation status",
+);
+
+const foldedPreferred = {
+  members: [],
+  workflow_requests: [],
+  discussion_attention: {
+    main: attention("running", { thread_id: "main", owner_question_count: 0 }),
+    "kanban:newloshu": attention("needs_input", {
+      thread_id: "kanban:newloshu",
+      attention_kind: "question",
+      execution_state: "ready",
+      owner_question_count: 2,
+      open_question_count: 2,
+    }),
+  },
+} as unknown as ChannelDetail;
+assert(
+  selectChannelDiscussionAttention(foldedPreferred, "main")?.thread_id === "main",
+  "transport and main threads have independent decision state",
 );
 
 const runningPolicy = channelDiscussionControlPolicy(running, "phase2_relay", true);
@@ -155,3 +198,5 @@ assert(!idlePolicy.restart, "fresh idle discussion does not send restart intent"
 assert(idlePolicy.startLabel === "Start discussion", "idle thread uses start copy");
 
 console.log("channelDiscussionAttention.test.ts OK");
+
+assert(selectChannelDiscussionAttention(detail, "new-thread") === null, "new threads do not inherit another conversation status");

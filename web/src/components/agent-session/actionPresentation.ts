@@ -40,7 +40,7 @@ const ACTION_PRESENTATIONS: Record<string, ActionPresentation> = {
     title: "Start product workflow",
     confirmLabel: "Start workflow",
     busyLabel: "Starting",
-    completedLabel: "Product workflow started",
+    completedLabel: "Product workflow start requested",
   },
   "research-adopt": {
     title: "Adopt research",
@@ -58,13 +58,13 @@ const ACTION_PRESENTATIONS: Record<string, ActionPresentation> = {
     title: "Start workflow",
     confirmLabel: "Start workflow",
     busyLabel: "Starting",
-    completedLabel: "Workflow started",
+    completedLabel: "Workflow start requested",
   },
   "task-workflow-start": {
     title: "Start workflow",
     confirmLabel: "Start workflow",
     busyLabel: "Starting",
-    completedLabel: "Workflow started",
+    completedLabel: "Workflow start requested",
   },
   "update-task": {
     title: "Update task",
@@ -76,7 +76,7 @@ const ACTION_PRESENTATIONS: Record<string, ActionPresentation> = {
     title: "Start workflow",
     confirmLabel: "Start workflow",
     busyLabel: "Starting",
-    completedLabel: "Workflow started",
+    completedLabel: "Workflow start requested",
   },
 };
 

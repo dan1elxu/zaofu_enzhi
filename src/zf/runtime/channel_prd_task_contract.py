@@ -143,7 +143,27 @@ def compile_channel_prd_task_payload(
         if isinstance(payload.get("contract"), dict)
         else {}
     )
-    commands = _verification_commands(raw_contract, semantic, prd_body)
+    raw_evidence = raw_contract.get("evidence_contract") or {}
+    if not isinstance(raw_evidence, dict):
+        raise ChannelPrdTaskContractError("evidence_contract must be a mapping")
+    binding_scope = raw_evidence.get("channel_prd_binding_scope", "full_product")
+    if binding_scope not in ("full_product", "approved_task"):
+        raise ChannelPrdTaskContractError("invalid channel_prd_binding_scope")
+    scoped = binding_scope == "approved_task"
+    if scoped:
+        for field in ("behavior", "acceptance", "verification"):
+            if not isinstance(raw_contract.get(field), str) or not raw_contract[field].strip():
+                raise ChannelPrdTaskContractError(f"approved_task requires {field}")
+        acceptance_criteria = _canonical_acceptance_criteria(raw_contract.get("acceptance_criteria"))
+        if not acceptance_criteria:
+            raise ChannelPrdTaskContractError("approved_task requires acceptance_criteria")
+        tiers = raw_contract.get("verification_tiers")
+        if not isinstance(tiers, list) or not tiers or any(
+            tier not in ("static", "runtime", "e2e", "manual_evidence") for tier in tiers
+        ):
+            raise ChannelPrdTaskContractError("approved_task requires valid verification_tiers")
+    commands = _verification_commands(raw_contract, {} if scoped else semantic,
+                                      {} if scoped else prd_body)
     if not commands:
         raise ChannelPrdTaskContractError(
             "Channel PRD must declare at least one executable verification command"
@@ -156,7 +176,7 @@ def compile_channel_prd_task_payload(
             )
 
     exclusions = _dedupe_strings([
-        *_string_items(semantic.get("out_of_scope")),
+        *_string_items(semantic.get("out_of_scope") if not scoped else []),
         *_string_items(raw_contract.get("exclusions")),
         *_string_items(raw_contract.get("explicit_non_goals")),
     ])
@@ -175,6 +195,7 @@ def compile_channel_prd_task_payload(
     )
     evidence.update({
         "execution_owner": "workflow",
+        "channel_prd_binding_scope": binding_scope,
         "channel_id": channel_id,
         "thread_id": thread_id,
         "channel_member_id": str(authority.get("channel_member_id") or ""),
@@ -200,14 +221,14 @@ def compile_channel_prd_task_payload(
         **raw_contract,
         "schema_version": "task-contract.v1",
         "behavior": str(
-            prd_body.get("summary")
+            (raw_contract.get("behavior") if scoped else prd_body.get("summary"))
             or synthesis.get("summary")
             or raw_contract.get("behavior")
             or payload.get("title")
             or ""
         ).strip(),
         "acceptance": str(
-            raw_contract.get("acceptance")
+            (raw_contract.get("acceptance") if scoped else "")
             or "All canonical Channel PRD acceptance criteria pass."
         ).strip(),
         "acceptance_criteria": acceptance_criteria,
@@ -230,10 +251,10 @@ def compile_channel_prd_task_payload(
         "handoff_artifacts": handoff_artifacts,
         "exclusions": exclusions,
         "explicit_non_goals": exclusions,
-        "scope": _semantic_paths(raw_contract, semantic, "scope"),
-        "affected_files": _semantic_paths(raw_contract, semantic, "affected_files"),
-        "shared_files": _semantic_paths(raw_contract, semantic, "shared_files"),
-        "exclusive_files": _semantic_paths(raw_contract, semantic, "exclusive_files"),
+        "scope": _semantic_paths(raw_contract, {} if scoped else semantic, "scope"),
+        "affected_files": _semantic_paths(raw_contract, {} if scoped else semantic, "affected_files"),
+        "shared_files": _semantic_paths(raw_contract, {} if scoped else semantic, "shared_files"),
+        "exclusive_files": _semantic_paths(raw_contract, {} if scoped else semantic, "exclusive_files"),
         "evidence_contract": evidence,
     }
     return {

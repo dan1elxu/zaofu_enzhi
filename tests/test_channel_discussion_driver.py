@@ -15,6 +15,7 @@ from zf.runtime import channel_discussion as discussion_driver
 from zf.runtime.channel_discussion import advance_discussion, relay_depth_of
 from zf.runtime.channel_projection import project_channel
 from zf.runtime.channel_reply_contract import emit_structured_reply_events
+from zf.runtime.channel_question_gate import question_dedup_gate_state
 from zf.runtime.channel_router import route_channel_message
 
 
@@ -613,11 +614,15 @@ def test_synthesis_questions_trigger_next_generation(tmp_path: Path, auto: bool)
     consensus = detail["consensus"]["main"]
     assert consensus["prd_revision"] == 2
     assert consensus["artifact_digest"] == second["prd_digest"]
-    stale = [
+    # Replays of an already published request are idempotent. The latest
+    # canonical revision must stay bound to the second synthesis regardless
+    # of whether the duplicate produces an advisory stale event.
+    assert detail["syntheses"][-1]["request_id"] == second_request_id
+    assert not [
         event for event in writer.event_log.read_all()
-        if event.type == "channel.synthesis.stale_ignored"
+        if event.type == "channel.consensus.proposed"
+        and event.payload.get("prd_revision", 0) > 2
     ]
-    assert [event.payload["request_id"] for event in stale] == [first_request_id]
 
     for member in consensus["required_signers"]:
         _consensus(writer, "signed", member, member_id=member,
@@ -654,6 +659,8 @@ def test_consensus_blocked_reopens_phase2(tmp_path: Path) -> None:
     assert detail["discussions"]["main"]["state"] == "phase2_relay"
     questions = {q["question_id"]: q for q in detail["open_questions"]}
     assert questions["q-blocker"]["status"] == "open"
+    assert question_dedup_gate_state(detail, thread_id="main") == "open"
+    assert detail["discussion_attention"]["main"]["owner_question_count"] == 1
 
     # tick again: the blocker must not be reopened twice
     advance_discussion(state_dir, writer, channel_id=CH, thread_id="main")
@@ -661,6 +668,167 @@ def test_consensus_blocked_reopens_phase2(tmp_path: Path) -> None:
               if e.type == "channel.question.opened"
               and e.payload.get("question_id") == "q-blocker"]
     assert len(opened) == 1
+
+
+def test_artifact_revision_review_restarts_synthesis_without_owner_input(
+    tmp_path: Path,
+) -> None:
+    state_dir, writer = _run_to_phase3(tmp_path)
+    _consensus(writer, "proposed", "pm-1",
+               artifact_ref="prd/r1.json", proposed_by="pm-1")
+    _consensus(
+        writer, "blocked", "critic-1", member_id="critic-1",
+        blocker_kind="revision_request", blocker_question_id="q-revise",
+        blocker_question="Split the source coverage into atomic cases.",
+    )
+
+    advance_discussion(state_dir, writer, channel_id=CH, thread_id="main")
+    detail = project_channel(state_dir, CH)
+    question = next(q for q in detail["open_questions"] if q["question_id"] == "q-revise")
+    assert question["kind"] == "revision_request"
+    assert question["status"] == "resolved"
+    assert question["resolution"] == "revision_requested"
+    assert detail["discussion_attention"]["main"]["owner_question_count"] == 0
+    assert detail["discussions"]["main"]["state"] == "phase2_relay"
+
+    advance_discussion(state_dir, writer, channel_id=CH, thread_id="main")
+    assert len([
+        event for event in EventLog(state_dir / "events.jsonl").read_all()
+        if event.type == "channel.synthesis.requested"
+    ]) == 2
+
+
+def test_artifact_revision_waits_for_every_review_before_rework(
+    tmp_path: Path,
+) -> None:
+    state_dir, writer = _run_to_phase3(tmp_path)
+    _consensus(writer, "proposed", "pm-1", artifact_ref="prd/r1.json",
+               proposed_by="pm-1", required_signers=["pm-1", "arch-1", "critic-1"])
+    _consensus(
+        writer, "blocked", "critic-1", member_id="critic-1",
+        blocker_kind="revision_request", blocker_question_id="q-revise",
+        blocker_question="Add one missing acceptance case.",
+    )
+    advance_discussion(state_dir, writer, channel_id=CH, thread_id="main")
+    advance_discussion(state_dir, writer, channel_id=CH, thread_id="main")
+    assert len([
+        event for event in EventLog(state_dir / "events.jsonl").read_all()
+        if event.type == "channel.synthesis.requested"
+    ]) == 1
+
+    _consensus(writer, "signed", "pm-1", member_id="pm-1")
+    _consensus(writer, "signed", "arch-1", member_id="arch-1")
+    advance_discussion(state_dir, writer, channel_id=CH, thread_id="main")
+    assert len([
+        event for event in EventLog(state_dir / "events.jsonl").read_all()
+        if event.type == "channel.synthesis.requested"
+    ]) == 2
+
+
+def test_only_discussion_runtime_can_acknowledge_revision_request(
+    tmp_path: Path,
+) -> None:
+    state_dir, writer = _setup_trio(tmp_path)
+    writer.emit(
+        "channel.question.opened", actor="critic-1", correlation_id=CH,
+        payload={"channel_id": CH, "thread_id": "main",
+                 "question_id": "q-revise", "question": "Correct the draft.",
+                 "kind": "revision_request", "target_member_id": "pm-1"},
+    )
+    writer.emit(
+        "channel.question.resolved", actor="critic-1", correlation_id=CH,
+        payload={"channel_id": CH, "thread_id": "main",
+                 "question_id": "q-revise", "resolution": "revision_requested",
+                 "resolved_by": "critic-1", "answer": "Correct the draft."},
+    )
+    detail = project_channel(state_dir, CH)
+    question = next(q for q in detail["open_questions"] if q["question_id"] == "q-revise")
+    assert question["status"] == "open"
+    assert detail["rejected_resolutions"][-1]["reason"] == "invalid_revision_resolution"
+
+
+def test_artifact_revision_rework_stalls_after_bounded_attempts(
+    tmp_path: Path,
+) -> None:
+    state_dir, writer = _run_to_phase3(tmp_path)
+    writer.emit(
+        "channel.question.opened", actor="channel-discussion", correlation_id=CH,
+        payload={"channel_id": CH, "thread_id": "main", "question_id": "q-prev",
+                 "question": "Revise the draft.", "kind": "revision_request",
+                 "target_member_id": "pm-1"},
+    )
+    writer.emit(
+        "channel.question.resolved", actor="channel-discussion", correlation_id=CH,
+        payload={"channel_id": CH, "thread_id": "main", "question_id": "q-prev",
+                 "resolution": "revision_requested", "resolved_by": "channel-discussion",
+                 "answer": "Revise the draft."},
+    )
+    for request_id in ("second", "third", "fourth"):
+        writer.emit(
+            "channel.synthesis.requested", actor="channel-discussion",
+            correlation_id=CH,
+            payload={"channel_id": CH, "thread_id": "main",
+                     "request_id": request_id, "target_member_id": "pm-1"},
+        )
+    _consensus(writer, "proposed", "pm-1",
+               artifact_ref="prd/r3.json", proposed_by="pm-1")
+    _consensus(
+        writer, "blocked", "critic-1", member_id="critic-1",
+        blocker_kind="revision_request", blocker_question_id="q-revise",
+        blocker_question="Still missing atomic acceptance cases.",
+    )
+
+    advance_discussion(state_dir, writer, channel_id=CH, thread_id="main")
+    advance_discussion(state_dir, writer, channel_id=CH, thread_id="main")
+    detail = project_channel(state_dir, CH)
+    assert detail["discussions"]["main"]["last_outcome"] == "stalled"
+    question = next(q for q in detail["open_questions"] if q["question_id"] == "q-revise")
+    assert question["resolution"] == "revision_requested"
+    closed = [
+        event for event in EventLog(state_dir / "events.jsonl").read_all()
+        if event.type == "channel.discussion.closed"
+    ]
+    assert closed[-1].payload["stalled_phase"] == "automatic_revision_limit"
+
+
+def test_legacy_owner_answered_revisions_do_not_consume_auto_retry_budget(
+    tmp_path: Path,
+) -> None:
+    state_dir, writer = _run_to_phase3(tmp_path)
+    for request_id in ("legacy-second", "legacy-third"):
+        writer.emit(
+            "channel.synthesis.requested", actor="channel-discussion",
+            correlation_id=CH,
+            payload={"channel_id": CH, "thread_id": "main",
+                     "request_id": request_id, "target_member_id": "pm-1"},
+        )
+    _consensus(writer, "proposed", "pm-1",
+               artifact_ref="prd/r3.json", proposed_by="pm-1")
+    _consensus(
+        writer, "blocked", "critic-1", member_id="critic-1",
+        blocker_kind="revision_request", blocker_question_id="q-revise",
+        blocker_question="Add the missing acceptance cases.",
+    )
+
+    advance_discussion(state_dir, writer, channel_id=CH, thread_id="main")
+    advance_discussion(state_dir, writer, channel_id=CH, thread_id="main")
+    detail = project_channel(state_dir, CH)
+    assert detail["discussions"]["main"]["state"] == "phase3_synthesis"
+    assert len([
+        event for event in EventLog(state_dir / "events.jsonl").read_all()
+        if event.type == "channel.synthesis.requested"
+    ]) == 4
+
+
+def test_review_blocker_does_not_bypass_dedup_for_other_open_questions() -> None:
+    channel = {
+        "open_questions": [
+            {"question_id": "q-blocker", "thread_id": "main", "status": "open", "category": "blocker"},
+            {"question_id": "q-scope", "thread_id": "main", "status": "open", "category": "scope"},
+        ],
+        "discussions": {"main": {"state": "phase2_relay", "phase_reason": "consensus_blocked"}},
+    }
+    assert question_dedup_gate_state(channel, thread_id="main") == "consolidating"
 
 
 def test_late_consensus_blocker_opens_while_phase2_is_already_active(
@@ -865,6 +1033,49 @@ def test_consensus_recovery_replays_missing_prd_freeze(
     events = writer.event_log.read_all()
     assert len([event for event in events if event.type == "channel.prd.frozen"]) == 1
     assert len([event for event in events if event.type == "channel.discussion.closed"]) == 1
+
+
+@pytest.mark.parametrize("fail_once", [False, True])
+def test_approved_revision_after_close_freezes_once_and_recovers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fail_once: bool,
+) -> None:
+    state_dir, writer = _run_to_phase3(tmp_path)
+    for revision in (1, 2):
+        prd = persist_test_prd(state_dir, CH, revision=revision)
+        _consensus(writer, "proposed", "pm-1", **prd, proposed_by="pm-1")
+        for member in ("pm-1", "arch-1", "critic-1", "operator"):
+            _consensus(writer, "signed", member, member_id=member)
+        if revision == 1:
+            advance_discussion(state_dir, writer, channel_id=CH, thread_id="main")
+
+    assert project_channel(state_dir, CH)["discussions"]["main"]["state"] == "idle"
+    original_emit = discussion_driver.emit_prd_frozen
+    attempts = 0
+
+    def emit_or_fail(*args, **kwargs):
+        nonlocal attempts
+        attempts += 1
+        if fail_once and attempts == 1:
+            raise RuntimeError("simulated idle freeze failure")
+        return original_emit(*args, **kwargs)
+
+    monkeypatch.setattr(discussion_driver, "emit_prd_frozen", emit_or_fail)
+    if fail_once:
+        with pytest.raises(RuntimeError, match="simulated idle freeze failure"):
+            advance_discussion(state_dir, writer, channel_id=CH, thread_id="main")
+    discussion_driver.sweep_discussion_deadlines(state_dir, writer)
+    advance_discussion(state_dir, writer, channel_id=CH, thread_id="main")
+
+    events = writer.event_log.read_all()
+    reached = [e for e in events if e.type == "channel.consensus.reached"]
+    freezes = [e for e in events if e.type == "channel.prd.frozen"]
+    assert [e.payload["prd_revision"] for e in reached] == [1, 2]
+    assert [e.payload["prd_revision"] for e in freezes] == [1, 2]
+    assert freezes[-1].payload["source_event_id"] == reached[-1].id
+    assert freezes[-1].payload["source_snapshot"]["source_event_id"] == reached[-1].id
+    assert len([e for e in events if e.type == "channel.discussion.closed"]) == 1
+    assert not any(e.type in {"task.created", "workflow.invoke.requested"} for e in events)
+    assert discussion_driver.sweep_discussion_deadlines(state_dir, writer) == 0
 
 
 def test_all_mention_without_roster_does_not_start(tmp_path: Path) -> None:

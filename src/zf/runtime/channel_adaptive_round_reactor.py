@@ -138,7 +138,7 @@ def react_channel_synthesis_next_round_proposed(
             current_context_digest=current_context_digest,
         )
         return
-    roster = _string_list(session.get("roster"))
+    roster = _string_list(session.get("participants") or session.get("roster"))
     active_members = {
         str(member.get("member_id") or "")
         for member in channel.get("members") or []

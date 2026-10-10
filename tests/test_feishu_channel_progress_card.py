@@ -21,6 +21,7 @@ from zf.integrations.feishu.channel_progress_card import (
 from zf.integrations.feishu import channel_progress_card
 from zf.integrations.feishu.transport import MockFeishuTransport
 from zf.integrations.feishu.gateway import AuthLevel
+from tests.channel_prd_fixture import persist_test_prd
 
 
 CHANNEL_ID = "ch-prd-1"
@@ -528,7 +529,7 @@ def test_callback_gateway_routes_progress_command_and_classifies_it_signed(
 
 def test_confirm_click_is_wired_to_real_controlled_action(tmp_path: Path):
     state_dir = tmp_path / ".zf"
-    digest = "c" * 64
+    prd = persist_test_prd(state_dir, CHANNEL_ID, revision=1, verdict="ready")
     _append(
         state_dir,
         _discussion_events()
@@ -538,9 +539,15 @@ def test_confirm_click_is_wired_to_real_controlled_action(tmp_path: Path):
                 {
                     "channel_id": CHANNEL_ID,
                     "thread_id": "main",
-                    "artifact_ref": "channel-artifacts/prd.md",
-                    "artifact_digest": digest,
+                    "artifact_ref": prd["artifact_ref"],
+                    "artifact_digest": prd["artifact_digest"],
                     "prd_revision": 1,
+                    "prd_ref": prd["prd_ref"],
+                    "prd_digest": prd["prd_digest"],
+                    "readiness_ref": prd["readiness_ref"],
+                    "readiness_digest": prd["readiness_digest"],
+                    "conclusion_ref": prd["conclusion_ref"],
+                    "conclusion_digest": prd["conclusion_digest"],
                 },
             ),
             _event(
@@ -548,9 +555,7 @@ def test_confirm_click_is_wired_to_real_controlled_action(tmp_path: Path):
                 {
                     "channel_id": CHANNEL_ID,
                     "thread_id": "main",
-                    "artifact_ref": "channel-artifacts/prd.md",
-                    "artifact_digest": digest,
-                    "prd_revision": 1,
+                    **prd,
                     "required_signers": [],
                     "owner_actor_ref": OWNER,
                 },

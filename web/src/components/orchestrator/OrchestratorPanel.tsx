@@ -1,14 +1,41 @@
 // OrchestratorPanel + exclusive closure, extracted verbatim from App.tsx (P1 split).
 import { OPERATOR_BACKENDS } from "../../app/sharedTypes";
-import type { ActionResponse, RecentEvent, Snapshot } from "../../api/types";
-import { getAgentSessionHistory, getKanbanPendingProposals } from "../../api/client";
+import type { ActionResponse, RecentEvent, Snapshot, WebChatArtifact, WebChatChildActivity, WebChatInteraction, WebChatQueueItem, WebChatRuntime } from "../../api/types";
+import {
+  answerWebChatInteraction,
+  cancelWebChatQueue,
+  controlWebChatTurn,
+  enqueueWebChatMessage,
+  getAgentSessionHistory,
+  getKanbanPendingProposals,
+  getWebChatChildActivities,
+  getWebChatRuntime,
+} from "../../api/client";
 import type { PendingKanbanProposal } from "../../api/client";
 import { AgentSessionTimeline } from "../../components/agent-session/AgentSessionTimeline";
 import { AgentThreadNavigation } from "../../components/agent-session/AgentThreadNavigation";
 import { ComposerSubmitButton } from "../../components/agent-session/ComposerSubmitButton";
+import { DuringRunComposerActions } from "../../components/agent-session/DuringRunComposerActions";
 import { actionPresentation } from "../../components/agent-session/actionPresentation";
 import { deriveComposerStatus } from "../../components/agent-session/workState";
 import { useWorkingTitle } from "../../components/agent-session/useWorkingTitle";
+import { WebChatActivityDrawer } from "../../components/webchat/WebChatActivityDrawer";
+import { WebChatArtifactDrawer } from "../../components/webchat/WebChatArtifactDrawer";
+import { WebChatAttachments } from "../../components/webchat/WebChatAttachments";
+import { WebChatConversationDrawer } from "../../components/webchat/WebChatConversationDrawer";
+import { WebChatProfileDrawer } from "../../components/webchat/WebChatProfileDrawer";
+import { WebChatResourceMenu, type WebChatDrawerKind } from "../../components/webchat/WebChatResourceMenu";
+import { WebChatInteractionCards } from "../../components/webchat/WebChatInteractionCards";
+import { WebChatInteractionPanel } from "../../components/webchat/WebChatInteractionPanel";
+import { WebChatPendingControls } from "../../components/webchat/WebChatPendingControls";
+import {
+  emptyInteractionDraft,
+  interactionDraftStorageKey,
+  interactionKey,
+  loadInteractionDrafts,
+  saveInteractionDrafts,
+  type WebChatInteractionDraft,
+} from "../../components/webchat/webChatInteractionModel";
 import { buildKanbanConversation } from "../../components/agent-session/projection";
 import { proposalRunNotice } from "../../app/triageProposals";
 import { planDiscussionBackend } from "../../app/kanbanAgentInteractionPolicy";
@@ -46,6 +73,7 @@ import {
   mergeBoundedKanbanSessionEvents,
   mergeEventsByIdentity,
 } from "./kanbanSessionEvents";
+import { resolveKanbanTurnPermission } from "./kanbanAgentPermission";
 import { ChevronDown, Maximize2, MessageCircle, Minimize2, Minus, Plus, Send, ShieldAlert, X } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { AgentPanelMode, OrchestratorContext, OperatorBackend } from "../../app/sharedTypes";
@@ -62,16 +90,12 @@ interface OperatorBackendOption {
 }
 
 
-interface HeadlessQueueItem {
+interface HeadlessPendingMessage {
   id: string;
   threadId: string;
   message: string;
   createdAt: string;
   requestPatch?: Record<string, unknown>;
-}
-
-
-interface HeadlessPendingMessage extends HeadlessQueueItem {
   backend: OperatorBackend;
   turnId: string;
 }
@@ -433,7 +457,18 @@ export function OrchestratorPanel({
     loadKanbanThreadReadState(localStorage, headlessProjectId)
   ));
   const [headlessReadProjectId, setHeadlessReadProjectId] = useState(headlessProjectId);
-  const [headlessQueue, setHeadlessQueue] = useState<HeadlessQueueItem[]>([]);
+  const [headlessQueue, setHeadlessQueue] = useState<WebChatQueueItem[]>([]);
+  const [webChatRuntime, setWebChatRuntime] = useState<WebChatRuntime | null>(null);
+  const [webChatArtifacts, setWebChatArtifacts] = useState<WebChatArtifact[]>([]);
+  const [webChatActivities, setWebChatActivities] = useState<WebChatChildActivity[]>([]);
+  const [webChatAttachments, setWebChatAttachments] = useState<WebChatArtifact[]>([]);
+  const [webChatDrawer, setWebChatDrawer] = useState<WebChatDrawerKind>("");
+  const [webChatAnswering, setWebChatAnswering] = useState<WebChatInteraction | null>(null);
+  const [webChatInteractionDrafts, setWebChatInteractionDrafts] = useState<Record<string, WebChatInteractionDraft>>({});
+  const [webChatInteractionErrors, setWebChatInteractionErrors] = useState<Record<string, string>>({});
+  const [webChatInteractionBusy, setWebChatInteractionBusy] = useState("");
+  const [webChatCollapsedInteractions, setWebChatCollapsedInteractions] = useState<string[]>([]);
+  const [webChatQueueBusy, setWebChatQueueBusy] = useState("");
   const [headlessPendingMessages, setHeadlessPendingMessages] = useState<HeadlessPendingMessage[]>([]);
   const [headlessHistoryEvents, setHeadlessHistoryEvents] = useState<RecentEvent[]>([]);
   const [headlessBufferedEvents, setHeadlessBufferedEvents] = useState<RecentEvent[]>([]);
@@ -452,17 +487,25 @@ export function OrchestratorPanel({
   const headlessThreadScrollPositions = useRef(new Map<string, HeadlessThreadScrollPosition>());
   const headlessThreadProjectRef = useRef(headlessProjectId);
   const headlessActivityRef = useRef<KanbanThreadActivity>({});
+  const webChatResourceIdentityRef = useRef("");
   const [headlessPinnedToBottom, setHeadlessPinnedToBottom] = useState(true);
   const [headlessHasNewBelow, setHeadlessHasNewBelow] = useState(false);
 
   const allowedActions = snapshot?.runtime.actions?.allowed ?? [];
   const webSession = snapshot?.runtime.web_session;
   const agentSurface = snapshot?.runtime.agent_surface;
+  const appliedAgentProfile = recordValue(webChatRuntime?.agent_profile?.profile);
   const permissionProfile = textValue(
-    agentSurface?.permission_profile,
+    appliedAgentProfile?.permission_profile || agentSurface?.permission_profile,
   ).trim() || "dangerous_full";
   const mutationEnabled = Boolean(snapshot?.runtime.actions?.mutation_enabled);
   const headlessConversationId = kanbanAgentConversationId(headlessProjectId);
+  const webChatInteractionDraftKey = interactionDraftStorageKey(
+    headlessProjectId,
+    headlessConversationId,
+    headlessThreadKey,
+  );
+  webChatResourceIdentityRef.current = `${headlessProjectId}:${headlessConversationId}:${headlessThreadKey}`;
   const sessionActionReady = Boolean(webSession?.actions_enabled);
   const tokenFallbackAvailable = webSession?.mode === "token_required"
     || Boolean(webSession?.token_fallback_enabled);
@@ -574,6 +617,16 @@ export function OrchestratorPanel({
   }, [agentSurface?.allowed_actions, operatorBackendOptions]);
 
   useEffect(() => {
+    const profileBackend = kanbanChatBackend(
+      asOperatorBackend(textValue(appliedAgentProfile?.provider)) ?? "claude-headless",
+    );
+    if (!profileBackend || !appliedAgentProfile?.provider) return;
+    setOperatorBackend(profileBackend);
+    setOperatorBackendTouched(true);
+    window.localStorage.setItem("zf.operatorBackend", profileBackend);
+  }, [webChatRuntime?.agent_profile?.profile_digest]);
+
+  useEffect(() => {
     if (operatorBackendTouched) return;
     setOperatorBackend(preferredHeadlessBackend(headlessBackendOptions));
   }, [headlessBackendOptions, operatorBackendTouched]);
@@ -622,6 +675,17 @@ export function OrchestratorPanel({
     setHeadlessHistoryError("");
     setHeadlessSplitThreadKey("");
     setHeadlessQueue([]);
+    setWebChatRuntime(null);
+    setWebChatArtifacts([]);
+    setWebChatActivities([]);
+    setWebChatAttachments([]);
+    setWebChatDrawer("");
+    setWebChatAnswering(null);
+    setWebChatInteractionDrafts({});
+    setWebChatInteractionErrors({});
+    setWebChatInteractionBusy("");
+    setWebChatCollapsedInteractions([]);
+    setWebChatQueueBusy("");
     setHeadlessPendingMessages([]);
     setHeadlessPlanDiscussion(null);
     setHeadlessHasNewBelow(false);
@@ -639,6 +703,64 @@ export function OrchestratorPanel({
     });
     return () => { cancelled = true; };
   }, [headlessProjectId, visible, pendingProposalsRefresh]);
+
+  async function refreshWebChatResources(): Promise<void> {
+    const identity = `${headlessProjectId}:${headlessConversationId}:${headlessThreadKey}`;
+    try {
+      const runtime = await getWebChatRuntime(headlessProjectId, {
+        conversationId: headlessConversationId,
+        threadId: headlessThreadKey,
+      });
+      if (webChatResourceIdentityRef.current !== identity) return;
+      setWebChatRuntime(runtime);
+      setHeadlessQueue(runtime.queue ?? []);
+      setWebChatArtifacts(runtime.artifacts ?? []);
+    } catch {
+      // Legacy history remains usable while the candidate resource API is
+      // unavailable during rollout.
+    }
+  }
+
+  useEffect(() => {
+    if (!visible || !headlessProjectId) return undefined;
+    let cancelled = false;
+    const refresh = () => {
+      if (!cancelled) void refreshWebChatResources();
+    };
+    refresh();
+    const timer = window.setInterval(refresh, 5000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+    // The callback reads the current thread/conversation and is intentionally
+    // restarted only when that resource identity changes.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [headlessConversationId, headlessProjectId, headlessThreadKey, visible]);
+
+  useEffect(() => {
+    setWebChatInteractionDrafts(loadInteractionDrafts(localStorage, webChatInteractionDraftKey));
+    setWebChatInteractionErrors({});
+    setWebChatInteractionBusy("");
+    setWebChatCollapsedInteractions([]);
+    setWebChatAnswering(null);
+  }, [localStorage, webChatInteractionDraftKey]);
+
+  useEffect(() => {
+    if (!visible || webChatDrawer !== "activity") return undefined;
+    let cancelled = false;
+    const refresh = () => {
+      void getWebChatChildActivities(headlessProjectId).then((page) => {
+        if (!cancelled) setWebChatActivities(page.items ?? []);
+      }).catch(() => undefined);
+    };
+    refresh();
+    const timer = window.setInterval(refresh, 5000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [headlessProjectId, visible, webChatDrawer]);
 
   useEffect(() => {
     if (!visible) return;
@@ -702,6 +824,30 @@ export function OrchestratorPanel({
     if (!scopedEvents.length) return;
     setHeadlessBufferedEvents((current) => mergeBoundedKanbanSessionEvents(current, scopedEvents));
   }, [context.taskId, events, headlessConversationId, headlessProjectId, operatorBackend]);
+
+  async function reconcileHeadlessHistoryAfterTurn(): Promise<void> {
+    // SSE is the primary path. A successful action response is also a
+    // deterministic terminal boundary, so reconcile the durable transcript
+    // here when an event-stream delivery is delayed or dropped. Without this,
+    // a plan card could exist in the ledger but remain invisible until reload.
+    try {
+      const page = await getAgentSessionHistory(headlessProjectId, {
+        ...kanbanAgentHistoryParams({
+          threadId: headlessThreadKey,
+          conversationId: headlessConversationId,
+          backend: operatorBackend,
+          limit: 160,
+        }),
+        requireFresh: true,
+      });
+      setHeadlessHistoryEvents((current) => mergeEventsByIdentity(current, page.items ?? []));
+      setHeadlessHistoryBeforeSeq(page.next_before_seq ?? null);
+      setHeadlessHistoryHasMore(Boolean(page.has_more));
+    } catch {
+      // The successful action is authoritative. Keep the live transcript when
+      // this read-only recovery request is temporarily unavailable.
+    }
+  }
 
   // 任务自动引用(operator 2026-07-11):从 TaskDetail 打开时 context.taskId
   // 已自动派生;这里补"看得见/可解除"——chip + 可关。关掉后消息不再携带
@@ -803,24 +949,42 @@ export function OrchestratorPanel({
     headlessInputRef.current?.focus();
   }
 
-  function queueHeadlessMessage(
+  async function queueHeadlessMessage(
     message: string,
     requestPatch?: Record<string, unknown>,
+    backend: OperatorBackend = operatorBackend,
+    turnPermissionProfile: string = permissionProfile,
   ) {
-    const item: HeadlessQueueItem = {
-      id: `queue-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`,
-      threadId: headlessThreadKey,
-      message,
-      createdAt: new Date().toISOString(),
-      requestPatch,
-    };
-    setHeadlessQueue((current) => [...current, item]);
-    setHeadlessMessage("");
+    const idempotencyKey = `queue-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+    try {
+      const result = await enqueueWebChatMessage(headlessProjectId, {
+        ...requestPatch,
+        ...contextPayload(),
+        backend,
+        permission_profile: turnPermissionProfile,
+        thread_id: headlessThreadKey,
+        message,
+        idempotency_key: idempotencyKey,
+        source_turn_id: webChatRuntime?.turns.find((item) => (
+          item.thread_id === headlessThreadKey
+          && ["claimed", "running", "waiting_input"].includes(item.state)
+        ))?.turn_id || "",
+      });
+      setHeadlessQueue((current) => [
+        ...current.filter((item) => item.queue_id !== result.item.queue_id),
+        result.item,
+      ]);
+      setHeadlessMessage("");
+      setWebChatAttachments([]);
+      setOperatorError("");
+      await refreshWebChatResources();
+    } catch (err) {
+      setOperatorError(err instanceof Error ? err.message : String(err));
+    }
   }
 
   async function submitHeadlessMessage(messageOverride?: string, options: SubmitHeadlessOptions = {}) {
     const message = (messageOverride ?? headlessMessage).trim();
-    const turnPermissionProfile = options.permissionProfileOverride ?? permissionProfile;
     const explicitRequestPatch = options.requestPatch ?? {};
     const discussionRequestPatch = (
       headlessPlanDiscussion
@@ -833,8 +997,19 @@ export function OrchestratorPanel({
           revision: headlessPlanDiscussion.revision,
         },
       } : {};
+    const attachmentPatch = webChatAttachments.length && !("attachment_refs" in explicitRequestPatch)
+      ? {
+          attachment_refs: webChatAttachments.map((item) => ({
+            ref: item.storage_uri,
+            digest: item.digest,
+            version_id: item.version_id,
+            logical_name: item.logical_name,
+          })),
+        }
+      : {};
     const requestPatch = {
       ...discussionRequestPatch,
+      ...attachmentPatch,
       ...explicitRequestPatch,
     };
     const isPlanDiscussion = "plan_discussion" in requestPatch;
@@ -848,8 +1023,28 @@ export function OrchestratorPanel({
       : null;
     const targetBackend = options.backendOverride ?? boundDiscussionBackend ?? operatorBackend;
     if (!message || !isChatBackend(targetBackend) || headlessSubmitting) return;
+    const permissionResolution = await resolveKanbanTurnPermission({
+      override: options.permissionProfileOverride,
+      projectId: headlessProjectId,
+      runtime: webChatRuntime,
+      fallback: textValue(agentSurface?.permission_profile).trim() || "dangerous_full",
+      loadRuntime: () => getWebChatRuntime(headlessProjectId, {
+        conversationId: headlessConversationId,
+        threadId: headlessThreadKey,
+      }),
+    });
+    const turnPermissionProfile = permissionResolution.permissionProfile;
+    if (
+      permissionResolution.runtime
+      && webChatResourceIdentityRef.current
+        === `${headlessProjectId}:${headlessConversationId}:${headlessThreadKey}`
+    ) {
+      setWebChatRuntime(permissionResolution.runtime);
+      setHeadlessQueue(permissionResolution.runtime.queue ?? []);
+      setWebChatArtifacts(permissionResolution.runtime.artifacts ?? []);
+    }
     if (activeThreadBusy && !options.force && !isPlanDiscussion) {
-      queueHeadlessMessage(message, requestPatch);
+      await queueHeadlessMessage(message, requestPatch, targetBackend, turnPermissionProfile);
       return;
     }
     if (!canUseAction("chat-orchestrator")) {
@@ -954,9 +1149,12 @@ export function OrchestratorPanel({
         return;
       }
       setOperatorError("");
+      setWebChatAttachments([]);
       if (isPlanDiscussion) {
         setHeadlessPlanDiscussion(null);
       }
+      await reconcileHeadlessHistoryAfterTurn();
+      await refreshWebChatResources();
     } catch (err) {
       setOperatorError(err instanceof Error ? err.message : String(err));
       setHeadlessMessage(message);
@@ -987,10 +1185,54 @@ export function OrchestratorPanel({
     });
   }
 
+  async function findPendingDurableInteraction(
+    matches: (interaction: WebChatInteraction) => boolean,
+  ): Promise<WebChatInteraction | undefined> {
+    let runtime = webChatRuntime;
+    try {
+      const freshRuntime = await getWebChatRuntime(headlessProjectId, {
+        conversationId: headlessConversationId,
+        threadId: headlessThreadKey,
+      });
+      runtime = freshRuntime;
+      if (
+        webChatResourceIdentityRef.current
+        === `${headlessProjectId}:${headlessConversationId}:${headlessThreadKey}`
+      ) {
+        setWebChatRuntime(freshRuntime);
+        setHeadlessQueue(freshRuntime.queue ?? []);
+        setWebChatArtifacts(freshRuntime.artifacts ?? []);
+      }
+    } catch {
+      // Preserve the last fresh projection as a compatibility fallback while
+      // the candidate runtime endpoint is temporarily unavailable.
+    }
+    return runtime?.interactions.find((item) => {
+      if (item.status !== "pending") return false;
+      const interactionTurn = runtime?.turns.find((turn) => turn.turn_id === item.turn_id);
+      return interactionTurn?.thread_id === headlessThreadKey && matches(item);
+    });
+  }
+
+  async function pendingProposalInteraction(
+    proposal: AgentSessionActionProposal,
+  ): Promise<WebChatInteraction | undefined> {
+    return findPendingDurableInteraction((item) => {
+      if (item.kind !== "action_approval") return false;
+      const proposalId = String(item.request.proposal_id || "");
+      const proposalEventId = String(item.request.proposal_event_id || "");
+      return Boolean(
+        (proposal.proposalId && proposalId === proposal.proposalId)
+        || (proposal.proposalEventId && proposalEventId === proposal.proposalEventId),
+      );
+    });
+  }
+
   async function runHeadlessProposal(proposal: AgentSessionActionProposal, key: string) {
     if (!proposal.valid || !canUseAction(proposal.action)) return;
     setHeadlessProposalRunning(key);
     try {
+      const durableInteraction = await pendingProposalInteraction(proposal);
       const payload: Record<string, unknown> = {
         ...proposal.payload,
         project_id: textValue(proposal.payload.project_id) || headlessProjectId,
@@ -1008,7 +1250,28 @@ export function OrchestratorPanel({
         setOperatorError(actionFailureReason(result));
         return;
       }
+      if (durableInteraction) {
+        await answerWebChatInteraction(
+          headlessProjectId,
+          durableInteraction.interaction_id,
+          {
+            revision: durableInteraction.revision,
+            response: {
+              decision: "approved",
+              action: proposal.action,
+              proposal_id: proposal.proposalId || "",
+              proposal_event_id: proposal.proposalEventId || "",
+              applied_action: proposal.action,
+            },
+            currentness: durableInteraction.currentness || {},
+            resume: false,
+          },
+        );
+        await refreshWebChatResources();
+      }
       setOperatorError("");
+    } catch (err) {
+      setOperatorError(err instanceof Error ? err.message : String(err));
     } finally {
       setHeadlessProposalRunning("");
       setPendingProposalsRefresh((value) => value + 1);
@@ -1019,6 +1282,7 @@ export function OrchestratorPanel({
     if (!proposal.proposalEventId || !canUseAction("kanban-proposal-dismiss")) return;
     setHeadlessProposalRunning(key);
     try {
+      const durableInteraction = await pendingProposalInteraction(proposal);
       const result = await Promise.resolve(onAction("kanban-proposal-dismiss", {
         project_id: headlessProjectId,
         proposal_event_id: proposal.proposalEventId,
@@ -1028,7 +1292,28 @@ export function OrchestratorPanel({
         setOperatorError(actionFailureReason(result));
         return;
       }
+      if (durableInteraction) {
+        await answerWebChatInteraction(
+          headlessProjectId,
+          durableInteraction.interaction_id,
+          {
+            revision: durableInteraction.revision,
+            response: {
+              decision: "rejected",
+              action: proposal.action,
+              proposal_id: proposal.proposalId || "",
+              proposal_event_id: proposal.proposalEventId,
+              applied_action: "kanban-proposal-dismiss",
+            },
+            currentness: durableInteraction.currentness || {},
+            resume: false,
+          },
+        );
+        await refreshWebChatResources();
+      }
       setOperatorError("");
+    } catch (err) {
+      setOperatorError(err instanceof Error ? err.message : String(err));
     } finally {
       setHeadlessProposalRunning("");
       setPendingProposalsRefresh((value) => value + 1);
@@ -1089,6 +1374,25 @@ export function OrchestratorPanel({
         || request.submitMode
         || (submitAction ? "apply" : "continue")
       );
+      const planResponse = {
+        request_event_id: response.requestEventId,
+        request_id: response.requestId,
+        revision: response.revision,
+        question_id: response.questionId,
+        option_id: response.optionId,
+        answer: response.answer,
+        answers: response.answers.map((answer) => ({
+          question_id: answer.questionId,
+          option_id: answer.optionId,
+          answer: answer.answer,
+        })),
+      };
+      const durableInteraction = await findPendingDurableInteraction((item) => {
+        const interactionRequestId = String(item.request.request_id || "");
+        const interactionEventId = String(item.request.request_event_id || "");
+        return interactionRequestId === request.requestId
+          || interactionEventId === request.requestEventId;
+      });
       if (submitAction && submitMode !== "continue") {
         if (!canUseAction("kanban-plan-apply")) {
           setOperatorError(`action kanban-plan-apply is ${actionState}`);
@@ -1099,24 +1403,52 @@ export function OrchestratorPanel({
           conversation_id: headlessConversationId,
           thread_id: headlessThreadKey,
           task_id: context.taskId || undefined,
-          plan_response: {
-            request_event_id: response.requestEventId,
-            request_id: response.requestId,
-            revision: response.revision,
-            question_id: response.questionId,
-            option_id: response.optionId,
-            answer: response.answer,
-            answers: response.answers.map((answer) => ({
-              question_id: answer.questionId,
-              option_id: answer.optionId,
-              answer: answer.answer,
-            })),
-          },
+          plan_response: planResponse,
         }));
         if (actionFailed(result)) {
           setOperatorError(actionFailureReason(result));
           return;
         }
+        if (durableInteraction) {
+          await answerWebChatInteraction(
+            headlessProjectId,
+            durableInteraction.interaction_id,
+            {
+              revision: durableInteraction.revision,
+              response: {
+                answer: response.answer,
+                option_id: response.optionId,
+                question_id: response.questionId,
+                answers: planResponse.answers,
+                plan_response: planResponse,
+                applied_action: submitAction,
+              },
+              currentness: durableInteraction.currentness || {},
+              resume: false,
+            },
+          );
+          await refreshWebChatResources();
+        }
+        setOperatorError("");
+        return;
+      }
+      if (durableInteraction) {
+        await answerWebChatInteraction(
+          headlessProjectId,
+          durableInteraction.interaction_id,
+          {
+            revision: durableInteraction.revision,
+            response: {
+              answer: response.answer,
+              option_id: response.optionId,
+              question_id: response.questionId,
+              answers: planResponse.answers,
+              plan_response: planResponse,
+            },
+            currentness: durableInteraction.currentness || {},
+          },
+        );
+        await refreshWebChatResources();
         setOperatorError("");
         return;
       }
@@ -1129,22 +1461,12 @@ export function OrchestratorPanel({
             ?? operatorBackend
           ),
           requestPatch: {
-            plan_response: {
-              request_event_id: response.requestEventId,
-              request_id: response.requestId,
-              revision: response.revision,
-              question_id: response.questionId,
-              option_id: response.optionId,
-              answer: response.answer,
-              answers: response.answers.map((answer) => ({
-                question_id: answer.questionId,
-                option_id: answer.optionId,
-                answer: answer.answer,
-              })),
-            },
+            plan_response: planResponse,
           },
         },
       );
+    } catch (err) {
+      setOperatorError(err instanceof Error ? err.message : String(err));
     } finally {
       setHeadlessProposalRunning("");
       setPendingProposalsRefresh((value) => value + 1);
@@ -1164,6 +1486,13 @@ export function OrchestratorPanel({
       const result = await Promise.resolve(onAction(item.action, {
         ...item.payload,
         project_id: textValue(item.payload.project_id) || headlessProjectId,
+        conversation_id: textValue(item.payload.conversation_id)
+          || item.conversation_id
+          || headlessConversationId,
+        thread_id: textValue(item.payload.thread_id)
+          || item.thread_key
+          || headlessThreadKey,
+        run_id: textValue(item.payload.run_id) || item.turn_id || undefined,
         proposal_event_id: item.proposal_event_id,
         source: textValue(item.payload.source) || "kanban-agent-pending-proposal",
       }));
@@ -1228,11 +1557,28 @@ export function OrchestratorPanel({
   }
 
   async function cancelHeadlessRun(runId: string) {
-    if (!canUseAction("agent-session-cancel")) {
-      setOperatorError(`cancel is ${actionState}`);
-      return;
-    }
+    const durableTurn = webChatRuntime?.turns.find((item) => (
+      item.turn_id === runId
+      || item.current_attempt_id === runId
+      || (
+        item.thread_id === headlessThreadKey
+        && ["claimed", "running", "waiting_input", "resume_queued", "retry_wait"].includes(item.state)
+      )
+    ));
     try {
+      if (durableTurn) {
+        await controlWebChatTurn(headlessProjectId, durableTurn.turn_id, {
+          operation: "cancel",
+          idempotency_key: `cancel-${durableTurn.turn_id}`,
+        });
+        await refreshWebChatResources();
+        setOperatorError("");
+        return;
+      }
+      if (!canUseAction("agent-session-cancel")) {
+        setOperatorError(`cancel is ${actionState}`);
+        return;
+      }
       const result = await Promise.resolve(onAction("agent-session-cancel", {
         ...contextPayload(),
         backend: operatorBackend,
@@ -1244,6 +1590,137 @@ export function OrchestratorPanel({
       if (actionFailed(result)) {
         setOperatorError(actionFailureReason(result));
       }
+    } catch (err) {
+      setOperatorError(err instanceof Error ? err.message : String(err));
+    }
+  }
+
+  async function removeQueuedMessage(item: WebChatQueueItem) {
+    setWebChatQueueBusy(item.queue_id);
+    try {
+      await cancelWebChatQueue(headlessProjectId, item.queue_id);
+      await refreshWebChatResources();
+      setOperatorError("");
+    } catch (err) {
+      setOperatorError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setWebChatQueueBusy("");
+    }
+  }
+
+  async function restoreQueuedMessage(item: WebChatQueueItem) {
+    if (headlessMessage.trim()) {
+      setOperatorError("Clear the current draft before restoring a queued message.");
+      headlessInputRef.current?.focus();
+      return;
+    }
+    setWebChatQueueBusy(item.queue_id);
+    try {
+      if (item.state === "queued") {
+        await cancelWebChatQueue(headlessProjectId, item.queue_id);
+      }
+      setHeadlessMessage(item.message);
+      await refreshWebChatResources();
+      setOperatorError("");
+      window.requestAnimationFrame(() => headlessInputRef.current?.focus());
+    } catch (err) {
+      setOperatorError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setWebChatQueueBusy("");
+    }
+  }
+
+  function updateWebChatInteractionDraft(
+    interaction: WebChatInteraction,
+    draft: WebChatInteractionDraft,
+  ) {
+    const key = interactionKey(interaction);
+    setWebChatInteractionDrafts((current) => {
+      const next = { ...current, [key]: draft };
+      saveInteractionDrafts(localStorage, webChatInteractionDraftKey, next);
+      return next;
+    });
+  }
+
+  function composeWebChatInteraction(interaction: WebChatInteraction) {
+    const key = interactionKey(interaction);
+    setWebChatCollapsedInteractions((current) => current.filter((item) => item !== key));
+    setWebChatAnswering(interaction);
+    setHeadlessMessage("");
+  }
+
+  function collapseWebChatInteraction(interaction: WebChatInteraction) {
+    const key = interactionKey(interaction);
+    setWebChatCollapsedInteractions((current) => (
+      current.includes(key) ? current : [...current, key]
+    ));
+    setWebChatAnswering((current) => (
+      current && interactionKey(current) === key ? null : current
+    ));
+  }
+
+  async function answerDurableInteraction(
+    interaction: WebChatInteraction,
+    response: Record<string, unknown>,
+  ) {
+    const key = interactionKey(interaction);
+    if (webChatInteractionBusy === key) return;
+    setWebChatInteractionBusy(key);
+    setWebChatInteractionErrors((current) => ({ ...current, [key]: "" }));
+    try {
+      const result = await answerWebChatInteraction(headlessProjectId, interaction.interaction_id, {
+        revision: interaction.revision,
+        response,
+        currentness: interaction.currentness || {},
+      });
+      setWebChatAnswering(null);
+      setWebChatCollapsedInteractions((current) => current.filter((item) => item !== key));
+      setWebChatInteractionDrafts((current) => {
+        const next = { ...current };
+        delete next[key];
+        saveInteractionDrafts(localStorage, webChatInteractionDraftKey, next);
+        return next;
+      });
+      await refreshWebChatResources();
+      const resume = recordValue(result.resume);
+      setOperatorError(
+        resume?.status === "awaiting_exact_interaction_consumer"
+          ? "Approval recorded. Waiting for the exact tool consumer to continue."
+          : "",
+      );
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      setWebChatInteractionErrors((current) => ({ ...current, [key]: message }));
+      setOperatorError("");
+      await refreshWebChatResources();
+    } finally {
+      setWebChatInteractionBusy("");
+    }
+  }
+
+  async function applyDurableControl(operation: "steer" | "interrupt", messageOverride = "") {
+    const turn = webChatRuntime?.turns.find((item) => (
+      item.thread_id === headlessThreadKey
+      && ["claimed", "running", "waiting_input", "resume_queued", "retry_wait"].includes(item.state)
+    ));
+    if (!turn) return;
+    const controlMessage = (messageOverride || (operation === "steer" ? headlessMessage : "")).trim();
+    try {
+      const result = await controlWebChatTurn(headlessProjectId, turn.turn_id, {
+        operation,
+        message: controlMessage,
+        idempotency_key: `${operation}-${turn.turn_id}-${Date.now().toString(36)}`,
+      });
+      const receipt = recordValue(result.receipt);
+      if (controlMessage) {
+        setHeadlessMessage("");
+      }
+      setOperatorError(
+        receipt?.status === "queued_fallback" || receipt?.fallback === "queue"
+        ? "Native steer is unavailable; the message was queued for the next turn."
+        : "",
+      );
+      await refreshWebChatResources();
     } catch (err) {
       setOperatorError(err instanceof Error ? err.message : String(err));
     }
@@ -1355,9 +1832,16 @@ export function OrchestratorPanel({
   }), [headlessThreadKey, headlessUnreadCounts, visibleHeadlessConversation]);
   const activeHeadlessThread = displayedHeadlessConversation.threads.find((thread) => thread.id === headlessThreadKey)
     ?? displayedHeadlessConversation.threads[0];
+  const activeDurableTurn = webChatRuntime?.turns.find((item) => (
+    item.thread_id === headlessThreadKey
+    && ["submitted", "queued", "claimed", "running", "waiting_input", "resume_queued", "retry_wait"].includes(item.state)
+  ));
   const activeThreadBusy = Boolean(
-    activeHeadlessThread
-    && ["streaming", "submitted", "queued", "waiting_input"].includes(activeHeadlessThread.status),
+    activeDurableTurn
+    || (
+      activeHeadlessThread
+      && ["streaming", "submitted", "queued", "waiting_input"].includes(activeHeadlessThread.status)
+    ),
   );
   // Tab title shows "● …" while the headless session is working. Single owner:
   // channel group chat deliberately doesn't drive it.
@@ -1368,20 +1852,61 @@ export function OrchestratorPanel({
     ? [...activeHeadlessThread.turns.flatMap((turn) => turn.runs)].reverse()
         .find((run) => run.status === "streaming" || run.status === "submitted")
     : undefined;
-  const headlessQueueCards: AgentSessionCard[] = headlessQueue
-    .filter((item) => item.threadId === headlessThreadKey)
-    .map((item) => ({
-      id: item.id,
-      kind: "queue",
-      title: "Queued message",
-      body: item.message,
-      status: "queued",
-      threadId: item.threadId,
-    }));
+  const durableControls = new Set(webChatRuntime?.capabilities.controls ?? []);
+  const canNativeSteer = Boolean(
+    activeDurableTurn
+    && webChatRuntime?.capabilities.native_steer
+    && durableControls.has("steer")
+    && activeDurableTurn.state !== "waiting_input"
+  );
+  const canInterruptDurableTurn = Boolean(
+    activeDurableTurn
+    && durableControls.has("interrupt")
+    && activeDurableTurn.state !== "waiting_input"
+  );
+  const canCancelDurableTurn = Boolean(activeDurableTurn && durableControls.has("cancel"));
+  const scopedHeadlessQueue = headlessQueue.filter((item) => item.thread_id === headlessThreadKey);
+  const pendingDurableInteractions = useMemo(() => {
+    const projectedInteractionIds = new Set(
+      (activeHeadlessThread?.turns || []).flatMap((turn) => turn.cards.flatMap((card) => [
+        card.id,
+        card.planRequest?.requestId || "",
+        card.planRequest?.requestEventId || "",
+        String(card.proposal?.payload?.proposal_id || ""),
+      ])).filter(Boolean),
+    );
+    return (webChatRuntime?.interactions || []).filter((item) => {
+      if (item.status !== "pending") return false;
+      const turn = webChatRuntime?.turns.find((candidate) => candidate.turn_id === item.turn_id);
+      if (!turn || turn.thread_id !== headlessThreadKey) return false;
+      const requestId = String(
+        item.request.request_id
+        || item.request.request_event_id
+        || item.request.proposal_id
+        || item.request.id
+        || "",
+      );
+      return !requestId || !projectedInteractionIds.has(requestId);
+    });
+  }, [activeHeadlessThread?.turns, headlessThreadKey, webChatRuntime]);
+  const activeInteractionKey = webChatAnswering ? interactionKey(webChatAnswering) : "";
+  useEffect(() => {
+    setWebChatAnswering((current) => {
+      const currentKey = current ? interactionKey(current) : "";
+      const refreshed = currentKey
+        ? pendingDurableInteractions.find((item) => interactionKey(item) === currentKey)
+        : undefined;
+      if (refreshed) return refreshed === current ? current : refreshed;
+      return pendingDurableInteractions.find((item) => (
+        ["ask_user", "tool_approval"].includes(item.kind)
+        && !webChatCollapsedInteractions.includes(interactionKey(item))
+      )) ?? null;
+    });
+  }, [pendingDurableInteractions, webChatCollapsedInteractions]);
   const headlessScrollSignature = agentConversationScrollSignature(
     visibleHeadlessConversation,
     headlessThreadKey,
-    headlessQueueCards,
+    [],
   );
 
   // Each thread owns its reading position. Restoring after history settles keeps
@@ -1424,19 +1949,6 @@ export function OrchestratorPanel({
     scrollElementToBottom(headlessThreadRef.current);
     rememberHeadlessThreadScroll(headlessProjectId, headlessThreadKey);
   }
-  useEffect(() => {
-    if (activeThreadBusy || headlessSubmitting) return undefined;
-    const next = headlessQueue.find((item) => item.threadId === headlessThreadKey);
-    if (!next) return undefined;
-    const timer = window.setTimeout(() => {
-      setHeadlessQueue((current) => current.filter((item) => item.id !== next.id));
-      void submitHeadlessMessage(next.message, {
-        force: true,
-        requestPatch: next.requestPatch,
-      });
-    }, 650);
-    return () => window.clearTimeout(timer);
-  }, [activeThreadBusy, headlessQueue, headlessSubmitting, headlessThreadKey]);
   const activeBackendTitle = operatorBackendLabel(operatorBackend);
   const headlessCapabilities = headlessBackendOptions.map((item) =>
     item.capabilities ?? backendCapability(item, agentSurface?.allowed_actions ?? []),
@@ -1448,9 +1960,9 @@ export function OrchestratorPanel({
       : "readonly";
   const fullscreen = panelMode === "fullscreen";
   const headlessCanChat = canUseAction("chat-orchestrator");
-  const headlessEmptyTitle = headlessCanChat ? "Chat with your agents" : "Action token needed";
+  const headlessEmptyTitle = headlessCanChat ? "What should we work through?" : "Action token needed";
   const headlessEmptyBody = headlessCanChat
-    ? "Ask for a board summary, plan a handoff, or prepare a task action."
+    ? "Ask about this project, shape a plan, or prepare a controlled action."
     : "Save a valid action token to send messages. Existing replies will still appear here.";
   const headlessPlaceholder = !headlessCanChat
     ? "Save action token to send..."
@@ -1458,7 +1970,16 @@ export function OrchestratorPanel({
       ? `Ask about ${headlessPlanDiscussion.header || "this plan"}...`
     : taskRefOn && context.taskId
       ? `问关于 ${context.taskId} 的任何事(状态 / 合同 / 证据 / 时间线…)`
-      : "Tell me what to do...";
+      : `Message ${activeBackendTitle}...`;
+  const headlessWelcome = Boolean(
+    headlessHistoryReady
+    && !headlessHistoryLoading
+    && !activeHeadlessThread?.turns.length
+    && !pendingDurableInteractions.length
+    && !pendingProposals.length
+    && !pendingProposalNotice
+    && !permissionEscalation,
+  );
 
   return (
     <section
@@ -1497,12 +2018,13 @@ export function OrchestratorPanel({
             <button
               aria-expanded={backendMenuOpen}
               aria-haspopup="listbox"
-              aria-label={`Agent backend: ${activeBackendTitle}`}
+              aria-label={`Agent backend: ${activeBackendTitle}; ${actionState}`}
               className="agent-model-trigger"
+              title={`${activeBackendTitle} · ${actionState}`}
               type="button"
               onClick={() => setBackendMenuOpen((open) => !open)}
             >
-              <span className="agent-model-dot active" aria-hidden="true" />
+              <span className={`agent-model-dot ${actionStateClass}`} aria-hidden="true" />
               <span>{activeBackendTitle}</span>
               <span className="agent-model-chevron" aria-hidden="true" />
             </button>
@@ -1539,7 +2061,6 @@ export function OrchestratorPanel({
               </div>
             ) : null}
           </div>
-          <span className={`agent-state-pill compact ${actionStateClass}`}>{actionState}</span>
         </div>
         <div className="agent-header-actions">
           {webSession?.mode === "remote_passcode" && sessionActionReady ? (
@@ -1609,7 +2130,7 @@ export function OrchestratorPanel({
           </button>
         </form> : null}
 
-        <div className="headless-chat">
+        <div className={`headless-chat ${headlessWelcome ? "welcome" : ""}`}>
           <AgentThreadNavigation
             activeThreadId={headlessThreadKey}
             allowSplit={fullscreen}
@@ -1643,6 +2164,16 @@ export function OrchestratorPanel({
                 History unavailable: {headlessHistoryError}
               </div>
             ) : null}
+            <WebChatInteractionCards
+              activeKey={activeInteractionKey}
+              busyKey={webChatInteractionBusy}
+              drafts={webChatInteractionDrafts}
+              errors={webChatInteractionErrors}
+              interactions={pendingDurableInteractions}
+              onCompose={composeWebChatInteraction}
+              onDraftChange={updateWebChatInteractionDraft}
+              onRespond={answerDurableInteraction}
+            />
             <AgentSessionTimeline
               actionBusyId={headlessProposalRunning}
               activeThreadId={headlessThreadKey}
@@ -1654,7 +2185,6 @@ export function OrchestratorPanel({
               collapseCompletedRunDetails
               emptyBody={headlessEmptyBody}
               emptyTitle={headlessEmptyTitle}
-              extraCards={headlessQueueCards}
               onActiveThreadChange={selectHeadlessThread}
               onAdoptResearchResult={(card, cardId) => void adoptResearchResult(card, cardId)}
               onAnswerQuestion={(card) => {
@@ -1668,7 +2198,6 @@ export function OrchestratorPanel({
                 ? (request, response, cardId) => void submitPlanResponse(request, response, cardId)
                 : undefined}
               onChatAboutPlan={(request) => chatAboutPlan(request)}
-              onCancelQueued={(cardId) => setHeadlessQueue((current) => current.filter((item) => item.id !== cardId))}
               onCancelRun={(runId) => void cancelHeadlessRun(runId)}
               providerCapabilities={headlessCapabilities}
               onSplitThreadChange={setHeadlessSplitThreadKey}
@@ -1683,6 +2212,67 @@ export function OrchestratorPanel({
               <ChevronDown size={15} />
               New messages
             </button>
+          ) : null}
+          {webChatDrawer === "conversation" ? (
+            <WebChatConversationDrawer
+              conversationId={headlessConversationId}
+              projectId={headlessProjectId}
+              threadId={headlessThreadKey}
+              onClose={() => setWebChatDrawer("")}
+              onFork={(threadId) => {
+                setHeadlessThreads((current) => saveKanbanThreadRefs(
+                  localStorage,
+                  headlessProjectId,
+                  threadId,
+                  [...current, { id: threadId, title: "Fork", createdAt: new Date().toISOString() }],
+                ));
+                selectHeadlessThread(threadId);
+                setWebChatDrawer("");
+              }}
+              onRetry={(content, messageId) => {
+                setWebChatDrawer("");
+                void submitHeadlessMessage(content, {
+                  force: true,
+                  requestPatch: { retry_message_id: messageId },
+                });
+              }}
+            />
+          ) : null}
+          {webChatDrawer === "artifacts" ? (
+            <WebChatArtifactDrawer
+              artifacts={webChatArtifacts}
+              projectId={headlessProjectId}
+              taskId={context.taskId}
+              onChanged={refreshWebChatResources}
+              onClose={() => setWebChatDrawer("")}
+            />
+          ) : null}
+          {webChatDrawer === "activity" ? (
+            <WebChatActivityDrawer
+              activities={webChatActivities}
+              projectId={headlessProjectId}
+              onClose={() => setWebChatDrawer("")}
+              onOpenThread={(threadId) => {
+                setHeadlessThreads((current) => saveKanbanThreadRefs(
+                  localStorage,
+                  headlessProjectId,
+                  threadId,
+                  [...current, { id: threadId, title: "Child activity", createdAt: new Date().toISOString() }],
+                ));
+                selectHeadlessThread(threadId);
+                setWebChatDrawer("");
+              }}
+              onUpdated={refreshWebChatResources}
+            />
+          ) : null}
+          {webChatDrawer === "profile" ? (
+            <WebChatProfileDrawer
+              currentPermission={permissionProfile}
+              currentProvider={operatorBackend}
+              projectId={headlessProjectId}
+              onApplied={refreshWebChatResources}
+              onClose={() => setWebChatDrawer("")}
+            />
           ) : null}
           {pendingProposals.length || pendingProposalNotice ? (
             <div aria-label="Pending proposals" className="headless-pending-proposals">
@@ -1814,6 +2404,27 @@ export function OrchestratorPanel({
                 </button>
               </div>
             ) : null}
+            <WebChatPendingControls
+              busyId={webChatQueueBusy}
+              composerHasDraft={Boolean(headlessMessage.trim())}
+              queue={scopedHeadlessQueue}
+              receipts={webChatRuntime?.control_receipts ?? []}
+              turns={webChatRuntime?.turns ?? []}
+              onCancel={(item) => void removeQueuedMessage(item)}
+              onRestore={(item) => void restoreQueuedMessage(item)}
+            />
+            {webChatAnswering ? (
+              <WebChatInteractionPanel
+                busy={webChatInteractionBusy === activeInteractionKey}
+                draft={webChatInteractionDrafts[activeInteractionKey] ?? emptyInteractionDraft()}
+                error={webChatInteractionErrors[activeInteractionKey] ?? ""}
+                interaction={webChatAnswering}
+                mode="composer"
+                onCollapse={() => collapseWebChatInteraction(webChatAnswering)}
+                onDraftChange={(draft) => updateWebChatInteractionDraft(webChatAnswering, draft)}
+                onRespond={(response) => void answerDurableInteraction(webChatAnswering, response)}
+              />
+            ) : null}
             {permissionEscalation ? (
               <div className="headless-permission-request" role="alert">
                 <ShieldAlert aria-hidden="true" size={18} />
@@ -1852,7 +2463,10 @@ export function OrchestratorPanel({
               // the token gate (submitHeadlessMessage:7945) silently set
               // operatorError but the input had no visible block, and the
               // experience read as "first message hangs, refresh fixes it".
-              <div className="headless-composer-alert" role="alert">
+              <div
+                className={`headless-composer-alert ${snapshot ? "blocked" : "connecting"}`}
+                role={snapshot ? "alert" : "status"}
+              >
                 {snapshot
                   ? `${activeBackendTitle} is ${actionState}. Save a valid action token to send messages.`
                   // Gate not resolved yet (first snapshot in flight): saying
@@ -1861,36 +2475,78 @@ export function OrchestratorPanel({
                   : "Connecting — messages send automatically once ready."}
               </div>
             ) : null}
-            <textarea
-              ref={headlessInputRef}
-              className="headless-input"
-              placeholder={headlessPlaceholder}
-              aria-invalid={!headlessCanChat || undefined}
-              disabled={headlessSubmitting || Boolean(permissionEscalation)}
-              value={headlessMessage}
-              onChange={(event) => setHeadlessMessage(event.target.value)}
-              onKeyDown={(event) => {
-                if (
-                  event.key === "Enter"
-                  && !event.shiftKey
-                  && !event.nativeEvent.isComposing
-                ) {
-                  event.preventDefault();
-                  void submitHeadlessMessage(event.currentTarget.value);
-                }
-              }}
-            />
-            <div className="headless-composer-footer">
-              <ComposerSubmitButton
-                className="headless-send-button"
-                disabled={!headlessMessage.trim() || Boolean(permissionEscalation)}
-                iconSize={21}
-                status={deriveComposerStatus(activeHeadlessThread?.status, headlessSubmitting)}
-                onStop={activeHeadlessRun ? () => void cancelHeadlessRun(activeHeadlessRun.id) : undefined}
-                title={canUseAction("chat-orchestrator") ? "Send" : `${actionState}; save action token first`}
-                onClick={() => void submitHeadlessMessage()}
-              />
-            </div>
+            {!webChatAnswering ? (
+              <>
+                <textarea
+                  ref={headlessInputRef}
+                  className="headless-input"
+                  placeholder={headlessPlaceholder}
+                  aria-invalid={!headlessCanChat || undefined}
+                  disabled={headlessSubmitting || Boolean(permissionEscalation)}
+                  value={headlessMessage}
+                  onChange={(event) => setHeadlessMessage(event.target.value)}
+                  onKeyDown={(event) => {
+                    if (
+                      event.key === "Enter"
+                      && !event.shiftKey
+                      && !event.nativeEvent.isComposing
+                    ) {
+                      event.preventDefault();
+                      if (canNativeSteer) {
+                        void applyDurableControl("steer", event.currentTarget.value);
+                      } else {
+                        void submitHeadlessMessage(event.currentTarget.value);
+                      }
+                    }
+                  }}
+                />
+                <div className="headless-composer-footer">
+                  <div className="headless-composer-tools">
+                    <WebChatAttachments
+                      artifacts={webChatAttachments}
+                      conversationId={headlessConversationId}
+                      disabled={headlessSubmitting}
+                      projectId={headlessProjectId}
+                      threadId={headlessThreadKey}
+                      onChange={setWebChatAttachments}
+                      onError={setOperatorError}
+                    />
+                    <WebChatResourceMenu
+                      active={webChatDrawer}
+                      activityCount={webChatActivities.length}
+                      artifactCount={webChatArtifacts.length}
+                      permissionProfile={activeDurableTurn?.permission_profile || permissionProfile}
+                      toolCount={webChatRuntime?.tool_catalog.items.length || 0}
+                      onChange={setWebChatDrawer}
+                    />
+                  </div>
+                  {activeDurableTurn ? (
+                    <DuringRunComposerActions
+                      canCancel={canCancelDurableTurn}
+                      canInterrupt={canInterruptDurableTurn}
+                      canSteer={canNativeSteer}
+                      disabled={headlessSubmitting || Boolean(permissionEscalation)}
+                      hasMessage={Boolean(headlessMessage.trim())}
+                      primaryAction={canNativeSteer ? "steer" : "queue"}
+                      onCancel={() => void cancelHeadlessRun(activeDurableTurn.turn_id)}
+                      onQueue={() => void submitHeadlessMessage()}
+                      onSteer={() => void applyDurableControl("steer")}
+                      onSteerSooner={() => void applyDurableControl("interrupt", headlessMessage)}
+                    />
+                  ) : (
+                    <ComposerSubmitButton
+                      className="headless-send-button"
+                      disabled={!headlessMessage.trim() || Boolean(permissionEscalation)}
+                      iconSize={21}
+                      status={deriveComposerStatus(activeHeadlessThread?.status, headlessSubmitting)}
+                      onStop={activeHeadlessRun ? () => void cancelHeadlessRun(activeHeadlessRun.id) : undefined}
+                      title={canUseAction("chat-orchestrator") ? "Send" : `${actionState}; save action token first`}
+                      onClick={() => void submitHeadlessMessage()}
+                    />
+                  )}
+                </div>
+              </>
+            ) : null}
           </div>
         </div>
       </div>

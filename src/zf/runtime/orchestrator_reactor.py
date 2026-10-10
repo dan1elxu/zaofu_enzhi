@@ -204,6 +204,7 @@ _BUILTIN_HANDLER_METHODS: tuple[tuple[str, str], ...] = (
     ("channel.moderator.verdict.proposed", "_on_channel_discussion_event"),
     ("channel.moderator.verdict.fallback", "_on_channel_discussion_event"),
     ("channel.consensus.proposed", "_on_channel_consensus_proposed"),
+    ("channel.prd_evaluation.requested", "_on_channel_prd_evaluation_requested"),
     ("channel.consensus.signed", "_on_channel_discussion_event"),
     ("channel.consensus.blocked", "_on_channel_discussion_event"),
     ("cost.budget.exceeded", "_on_cost_budget_exceeded"),
@@ -5900,12 +5901,11 @@ class EventReactorMixin(OrchestratorAgentReactorMixin, DurableCallWorkflowMixin)
         return None
 
     def _on_channel_discussion_event(self, event: ZfEvent) -> WorkflowRuntimeDecision | None:
-        """Tick the doc-122 discussion state machine on ledger / reply /
-        consensus events arriving over async transports (`zf emit`). The tick
-        is idempotent against the folded projection, so double invocation via
-        the inline router path is a no-op.
+        """Tick doc-122 discussion on ledger, reply and consensus events.
+        The folded projection makes inline-router double invocation idempotent.
         """
-        if event.actor == "channel-discussion":
+        from zf.runtime.channel_review_rework import discussion_tick_is_self_loop
+        if discussion_tick_is_self_loop(event):
             return None
         payload = event.payload if isinstance(event.payload, dict) else {}
         channel_id = str(payload.get("channel_id") or event.correlation_id or "")
@@ -5996,12 +5996,12 @@ class EventReactorMixin(OrchestratorAgentReactorMixin, DurableCallWorkflowMixin)
         dispatch_channel_replies_background(
             state_dir=self.state_dir,
             channel_id=channel_id,
-            max_dispatch=64,
             actor="orchestrator-reactor",
             source="runtime",
             project_root=getattr(self, "project_root", None),
             config=getattr(self, "config", None),
             openclaw_client=getattr(self, "openclaw_client", None),
+            max_dispatch=64,
         )
         return None
 
@@ -6020,28 +6020,16 @@ class EventReactorMixin(OrchestratorAgentReactorMixin, DurableCallWorkflowMixin)
         if not any(event.type.startswith("channel.agent.reply.") for event in events):
             return
 
-        def _dispatch(channel_id: str, request_id: str) -> None:
-            dispatch_channel_replies_background(
-                state_dir=self.state_dir,
-                channel_id=channel_id,
-                max_dispatch=64,
-                actor="orchestrator-remediation",
-                source="runtime",
-                project_root=getattr(self, "project_root", None),
-                config=getattr(self, "config", None),
-                openclaw_client=getattr(self, "openclaw_client", None),
-            )
-
         remediate_channel_replies(
             self.event_writer,
             events=events,
-            dispatch=_dispatch,
         )
         from zf.runtime.channel_reply_remediation import (
             resume_pending_channel_reply_queues,
         )
 
-        resume_pending_channel_reply_queues(self, events)
+        # Include generations just emitted by remediation in this drain.
+        resume_pending_channel_reply_queues(self, self.event_log.read_all())
 
     def _on_worker_completed(self, event: ZfEvent) -> WorkflowRuntimeDecision | None:
         """Route provider/worker self-completion through completion audit.

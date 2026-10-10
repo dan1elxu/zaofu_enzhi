@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from zf.core.events import ZfEvent
+from zf.core.state.locks import locked_path
 from zf.runtime.channel_contracts import (
     discussion_engine_mode,
     normalize_channel_role,
@@ -24,9 +25,10 @@ from zf.runtime.channel_profiles import (
     write_channel_profile_snapshot,
 )
 from zf.runtime.channel_owner_authority import normalize_owner_delegates
-from zf.runtime.channel_templates import (
-    channel_template_default_backend,
-    materialize_channel_template,
+from zf.runtime.channel_templates import channel_template_default_backend, materialize_channel_template
+from zf.runtime.channel_provider_preflight import (
+    channel_provider_preflight,
+    normalize_channel_dispatch_policy,
 )
 from zf.runtime.control_actions_channel_admin import _materialize_channel_skill_refs
 from zf.runtime.control_actions_helpers import (
@@ -48,6 +50,38 @@ class ChannelTemplateActionsMixin:
         emit_completion: bool = True,
     ) -> dict:
         template_id = _required_text(payload, "template_id")
+        channel_id = _normal_channel_id(
+            payload.get("channel_id")
+            or f"{template_id}-{requested.id.removeprefix('evt-')[:10]}"
+        )
+        # Direct and template-backed creation must serialize on the canonical
+        # channel identity.  Without this lock a direct request can emit
+        # channel.created while this path is still materializing members, and
+        # both requests then observe an empty projection and create duplicates.
+        with locked_path(
+            self.state_dir / "locks" / _stable_control_id("channel-create", channel_id)
+        ):
+            return self._channel_create_from_template_locked(
+                requested=requested,
+                action=action,
+                requested_action=requested_action,
+                payload=payload,
+                emit_completion=emit_completion,
+                template_id=template_id,
+                channel_id=channel_id,
+            )
+
+    def _channel_create_from_template_locked(
+        self,
+        *,
+        requested: ZfEvent,
+        action: str,
+        requested_action: str,
+        payload: dict,
+        emit_completion: bool,
+        template_id: str,
+        channel_id: str,
+    ) -> dict:
         materialized, error = materialize_channel_template(
             template_id,
             overrides=payload.get("overrides"),
@@ -119,10 +153,6 @@ class ChannelTemplateActionsMixin:
                 status="profile_selection_superseded",
             )
         name = str(payload.get("name") or materialized["name"])
-        channel_id = _normal_channel_id(
-            payload.get("channel_id")
-            or f"{template_id}-{requested.id.removeprefix('evt-')[:10]}"
-        )
         existing = project_channel(self.state_dir, channel_id) or {}
         existing_template: dict = {}
         if existing.get("created_by_event"):
@@ -241,9 +271,9 @@ class ChannelTemplateActionsMixin:
                 "owner_delegates": normalize_owner_delegates(
                     payload.get("owner_delegates")
                 ),
-                "leader_member_id": str(
-                    materialized.get("leader_member_id") or ""
-                ),
+                "leader_member_id": str(materialized.get("leader_member_id") or ""),
+                "default_responder_id": str(materialized["discussion"].get("default_responder_id") or ""),
+                "control_anchor_policy": "strict",
                 "leader_revision": 1,
                 "origin_binding": (
                     payload.get("origin_binding")
@@ -451,6 +481,9 @@ class ChannelTemplateActionsMixin:
             ],
             "member_count": len(materialized["members"]),
             "participants": list(materialized["discussion"]["participants"]),
+            "leader_member_id": str(materialized.get("leader_member_id") or ""),
+            "default_responder_id": str(materialized["discussion"].get("default_responder_id") or ""),
+            "workflow_trigger": "moderator_propose_workflow",
             "max_rounds": int(materialized["discussion"]["max_rounds"]),
             "round_policy": (
                 "explicit_cap"
@@ -472,6 +505,86 @@ class ChannelTemplateActionsMixin:
         requested_action: str,
         payload: dict,
     ) -> dict:
+        try:
+            dispatch_policy = normalize_channel_dispatch_policy(
+                payload.get("dispatch_policy")
+            )
+        except ValueError as exc:
+            return self._failed(
+                requested=requested,
+                action=action,
+                requested_action=requested_action,
+                task_id=_task_id_from_payload(payload),
+                reason=str(exc),
+                status_code=422,
+                status="invalid_dispatch_policy",
+            )
+        materialized, materialization_error = materialize_channel_template(
+            _required_text(payload, "template_id"),
+            overrides=payload.get("overrides"),
+        )
+        if materialization_error or materialized is None:
+            return self._failed(
+                requested=requested,
+                action=action,
+                requested_action=requested_action,
+                task_id=_task_id_from_payload(payload),
+                reason=materialization_error or "channel template preflight failed",
+                status_code=422,
+                status="invalid_template",
+            )
+        expected_digest = str(
+            payload.get("expected_materialization_digest") or ""
+        ).strip()
+        if expected_digest and expected_digest != materialized["materialization_digest"]:
+            return self._failed(
+                requested=requested,
+                action=action,
+                requested_action=requested_action,
+                task_id=_task_id_from_payload(payload),
+                reason=(
+                    "channel template materialization changed after Plan "
+                    "selection was presented"
+                ),
+                status_code=409,
+                status="template_superseded",
+            )
+        provider_preflight = channel_provider_preflight(
+            list(materialized.get("members") or []),
+            dispatch_policy=dispatch_policy,
+        )
+        if provider_preflight["status"] == "blocked":
+            channel_id = _normal_channel_id(
+                payload.get("channel_id")
+                or f"{_required_text(payload, 'template_id')}-{requested.id.removeprefix('evt-')[:10]}"
+            )
+            self.writer.emit(
+                "channel.provider.preflight.failed",
+                actor=self.actor,
+                task_id=_task_id_from_payload(payload),
+                causation_id=requested.id,
+                correlation_id=channel_id,
+                payload={
+                    "schema_version": "channel.provider-preflight.v1",
+                    "channel_id": channel_id,
+                    "template_id": _required_text(payload, "template_id"),
+                    **provider_preflight,
+                    "source": self.surface,
+                },
+            )
+            return self._failed(
+                requested=requested,
+                action=action,
+                requested_action=requested_action,
+                task_id=_task_id_from_payload(payload),
+                reason=(
+                    "channel provider preflight blocked: "
+                    + str(provider_preflight.get("reason") or "unknown provider readiness failure")
+                ),
+                status_code=503,
+                status="provider_preflight_blocked",
+                extra={"provider_preflight": provider_preflight},
+            )
         created = self._channel_create_from_template(
             requested=requested,
             action=action,
@@ -538,6 +651,7 @@ class ChannelTemplateActionsMixin:
                     "thread_id": thread_id,
                     "message_id": message_id,
                     "message": message,
+                    "dispatch_policy": dispatch_policy,
                 },
                 emit_completion=False,
             )
@@ -583,6 +697,8 @@ class ChannelTemplateActionsMixin:
                 "template_id": str(created.get("template_id") or ""),
                 "member_count": int(created.get("member_count") or 0),
                 "participants": participants,
+                "leader_member_id": str(created.get("leader_member_id") or ""),
+                "default_responder_id": str(created.get("default_responder_id") or ""),
                 "max_rounds": int(created.get("max_rounds") or 0),
                 "mode": str(created.get("mode") or "conversation"),
                 "engine_mode": str(created.get("engine_mode") or ""),
@@ -591,6 +707,8 @@ class ChannelTemplateActionsMixin:
                 ),
                 "message_id": message_id,
                 "thread_id": thread_id,
+                "dispatch_policy": dispatch_policy,
+                "provider_preflight": provider_preflight,
             },
         )
         return {
@@ -605,6 +723,9 @@ class ChannelTemplateActionsMixin:
             "creation_status": str(created.get("status") or ""),
             "member_count": int(created.get("member_count") or 0),
             "participants": participants,
+            "leader_member_id": str(created.get("leader_member_id") or ""),
+            "default_responder_id": str(created.get("default_responder_id") or ""),
+            "workflow_trigger": "moderator_propose_workflow",
             "max_rounds": int(created.get("max_rounds") or 0),
             "mode": str(created.get("mode") or "conversation"),
             "engine_mode": str(created.get("engine_mode") or ""),
@@ -614,6 +735,8 @@ class ChannelTemplateActionsMixin:
             "reply_request_count": int(
                 started.get("reply_request_count") or 0
             ),
+            "dispatch_policy": dispatch_policy,
+            "provider_preflight": provider_preflight,
         }
 
     def _channel_discussion_start(
@@ -827,6 +950,9 @@ class ChannelTemplateActionsMixin:
             "discussion_revision": revision,
             "discussion_context_digest": context_digest,
             "discussion_product_mode": product_mode,
+            "dispatch_policy": normalize_channel_dispatch_policy(
+                payload.get("dispatch_policy")
+            ),
         })
         source_requirement_message_id = str(
             payload.get("requirement_message_id") or ""

@@ -220,6 +220,35 @@ class PlanApplyActionsMixin:
             if isinstance(gate.get("request"), dict)
             else {}
         )
+        request_event_payload = (
+            request_event.payload
+            if isinstance(request_event.payload, dict)
+            else {}
+        )
+        # A Plan may create a durable proposal that is approved later from a
+        # fresh Web, Feishu, or CLI session. Preserve its transport context in
+        # the bound action payload so a follow-on Task workflow Plan remains
+        # attached to the originating Kanban thread.
+        for payload_key, request_keys in (
+            ("project_id", ("project_id",)),
+            ("conversation_id", ("conversation_id",)),
+            ("thread_id", ("thread_id", "thread_key")),
+            ("run_id", ("turn_id",)),
+            ("backend", ("backend",)),
+        ):
+            if str(submit_payload.get(payload_key) or "").strip():
+                continue
+            value = ""
+            for key in request_keys:
+                for context_payload in (request, request_event_payload):
+                    candidate = str(context_payload.get(key) or "").strip()
+                    if candidate:
+                        value = candidate
+                        break
+                if value:
+                    break
+            if value:
+                submit_payload[payload_key] = value
         if submit_mode == "propose":
             if submit_action not in PLAN_PROPOSAL_ACTIONS:
                 return self._failed(
@@ -305,7 +334,7 @@ class PlanApplyActionsMixin:
             "channel_id": child_channel_id,
             "thread_id": child_thread_id,
             "message_id": f"msg-{request_id}",
-            "message": discussion_seed,
+            "message": origin_message,
             **({"origin_binding": origin_binding} if origin_binding else {}),
             "expected_materialization_digest": str(
                 submit_details.get("materialization_digest") or ""
@@ -327,6 +356,7 @@ class PlanApplyActionsMixin:
                     else {}
                 ),
                 **external_refs,
+                "discussion_seed": discussion_seed,
                 "plan_requirement_event_ids": [
                     str(item)
                     for item in request.get(
