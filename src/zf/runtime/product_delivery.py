@@ -17,6 +17,7 @@ from zf.core.task.schema import Task, TaskContract
 from zf.core.task.store import TaskStore
 from zf.runtime.replan_contract_eval import event_payload_for_eval
 from zf.runtime.task_map import (
+    _verification_contains_prose,
     task_verification_commands,
     validate_coverage_report_payload,
     validate_source_index_payload,
@@ -1237,25 +1238,6 @@ def _first_nonempty(*values: Any) -> str:
         if text:
             return text
     return ""
-
-
-def _verification_contains_prose(command: str) -> bool:
-    text = str(command or "").strip()
-    if not text:
-        return False
-    if any("\u4e00" <= ch <= "\u9fff" for ch in text):
-        return True
-    if any(ch in text for ch in ("（", "）", "；")):
-        return True
-    lowered = text.lower()
-    prose_markers = (
-        "expected red",
-        "red expected",
-        "expected failure",
-        "should fail",
-        "evidence:",
-    )
-    return any(marker in lowered for marker in prose_markers)
 
 
 __all__ = [

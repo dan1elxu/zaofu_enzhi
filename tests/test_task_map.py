@@ -832,6 +832,23 @@ def test_task_map_validation_accepts_quoted_cjk_test_data_in_command() -> None:
     assert result.errors == []
 
 
+def test_task_map_validation_accepts_cjk_in_javascript_regex_literal() -> None:
+    result = validate_task_map_payload({
+        "schema_version": "task-map.v1",
+        "tasks": [{
+            "task_id": "TASK-CJK-REGEX",
+            "title": "browser smoke",
+            "wave": 1,
+            "verification": r'''node <<'JS'
+const start = page.getByRole('button', {name: /^开始(?:游戏)?$/});
+JS''',
+        }],
+    })
+
+    assert result.passed is True
+    assert result.errors == []
+
+
 def test_task_map_validation_can_accept_structural_candidate_map() -> None:
     result = validate_task_map_payload(
         {

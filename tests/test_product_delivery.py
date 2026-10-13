@@ -465,6 +465,28 @@ def test_product_delivery_accepts_structured_expected_red_validation(
     assert (state_dir / "task_docs" / "TASK-RED-1" / "task.md").exists()
 
 
+def test_product_delivery_accepts_literal_heredoc_verification(tmp_path: Path) -> None:
+    state_dir = _state_dir(tmp_path)
+    command = "node <<'JS'\nconst pattern = /^开始(?:游戏)?$/;\nJS"
+    result = ingest_task_map_to_kanban(state_dir, {
+        **_task_map(),
+        "tasks": [{
+            "task_id": "TASK-HEREDOC",
+            "title": "browser selector check",
+            "owner_role": "dev",
+            "wave": 1,
+            "scope": ["index.html"],
+            "verification": command,
+            "verification_tiers": ["runtime"],
+        }],
+    })
+
+    assert result.passed is True, result.errors
+    task = TaskStore(state_dir / "kanban.json").get("TASK-HEREDOC")
+    assert task is not None
+    assert task.contract.verification == command
+
+
 def test_product_delivery_rejects_prose_in_verification_command(tmp_path: Path) -> None:
     state_dir = _state_dir(tmp_path)
     writer = EventWriter(EventLog(state_dir / "events.jsonl"))

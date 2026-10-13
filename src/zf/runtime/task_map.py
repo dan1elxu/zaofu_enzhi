@@ -537,11 +537,12 @@ def _verification_command_errors(command: str) -> list[str]:
             "must be an executable command only; put expected-red/prose in "
             "validation or evidence_contract"
         ]
+    shell_text = verification_command_safety.without_quoted_heredoc_bodies(text)
     early_errors = [
-        *_single_quoted_bash_c_errors(text),
-        *verification_command_safety.escape_sensitive_inline_eval_errors(text),
-        *_unquoted_glob_filter_errors(text),
-        *_unquoted_path_glob_errors(text),
+        *_single_quoted_bash_c_errors(shell_text),
+        *verification_command_safety.escape_sensitive_inline_eval_errors(shell_text),
+        *_unquoted_glob_filter_errors(shell_text),
+        *_unquoted_path_glob_errors(shell_text),
     ]
     if early_errors:
         return early_errors
@@ -895,11 +896,10 @@ def _verification_contains_prose(command: str) -> bool:
     text = str(command or "").strip()
     if not text:
         return False
-    # Scan only the shell structure: CJK / full-width punctuation / prose
-    # markers inside quoted string literals are executable test DATA, not
-    # prose (2026-09-16 auto-e2e: `todo.py add "<CJK title>"` is a valid
-    # command). Unquoted prose stays rejected.
-    unquoted = re.sub(r"'[^']*'|\"[^\"]*\"", "", text)
+    # Literal here-document programs and quoted arguments are test data.
+    # Keep checking unquoted prose outside those shell data boundaries.
+    shell_text = verification_command_safety.without_quoted_heredoc_bodies(text)
+    unquoted = re.sub(r"'[^']*'|\"[^\"]*\"", "", shell_text)
     if any("\u4e00" <= ch <= "\u9fff" for ch in unquoted):
         return True
     if any(ch in unquoted for ch in ("（", "）", "；")):

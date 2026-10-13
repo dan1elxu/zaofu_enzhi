@@ -48,6 +48,7 @@ def _ready_prd_fixture(
     readiness_gaps: list[str] | None = None,
     risk_accepted: bool = False,
     open_questions: list[str] | None = None,
+    verification_command: str = "python -m pytest -q",
 ) -> tuple[Path, EventWriter, ControlledActionService, dict[str, object]]:
     state_dir = tmp_path / ".zf"
     state_dir.mkdir()
@@ -125,7 +126,7 @@ def _ready_prd_fixture(
         "verification_commands": [
             {
                 "id": "VC-01",
-                "command": "python -m pytest -q",
+                "command": verification_command,
                 "covers": ["AC-01"],
                 "producer_paths": ["tests/test_strict_json.py"],
             },
@@ -293,6 +294,33 @@ def test_web_preflight_defers_exact_channel_prd_contract_to_compiler() -> None:
     }
 
     assert default_validate_payload("create-task", payload) == ""
+
+
+def test_channel_task_preserves_literal_heredoc_verification_and_prd_digest(
+    tmp_path: Path,
+) -> None:
+    command = """bash -s <<'SH'
+set -eu
+node <<'JS'
+const start = page.getByRole('button', {name: /^开始(?:游戏)?$/});
+JS
+SH"""
+    state_dir, writer, service, authority = _ready_prd_fixture(
+        tmp_path, implementation_start=True, verification_command=command,
+    )
+    prd_path = state_dir / str(authority["source_ref"])
+    prd_before = prd_path.read_bytes()
+
+    result = _execute(service, writer, "create-task", _task_payload(authority))
+
+    assert result["ok"] is True, result
+    task = TaskStore(state_dir / "kanban.json").get("TASK-CHANNEL-PRD")
+    assert task is not None
+    assert task.contract.verification == command
+    assert task.contract.validation["commands"][0]["command"] == command
+    assert task.contract.evidence_contract["channel_prd_digest"] == authority["source_digest"]
+    assert prd_path.read_bytes() == prd_before
+    assert hashlib.sha256(prd_before).hexdigest() == authority["source_digest"]
 
 
 def test_web_preflight_keeps_plain_workflow_contract_strict() -> None:
