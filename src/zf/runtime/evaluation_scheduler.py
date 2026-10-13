@@ -14,7 +14,10 @@ from typing import Any, Callable
 from zf.core.events import EventLog, EventWriter
 from zf.core.state.atomic_io import atomic_write_text
 from zf.runtime.evaluation_turns import EvaluationCancelled
-from zf.runtime.evaluation_prompts import EVALUATION_PROMPT_VERSION
+from zf.runtime.evaluation_prompts import (
+    evaluation_contract_for_stage,
+    prompt_version_for_stage,
+)
 from zf.runtime.evaluation_packets import evaluation_request_id
 
 QUEUE_RELATIVE_PATH = Path("artifacts/benchmark-evaluations/scheduler.json")
@@ -24,10 +27,15 @@ PROGRESS_EVENT = "benchmark.evaluation.progress"
 TERMINAL = {"completed", "inconclusive"}
 # The observer is the only production producer of queue entries.  Keep this
 # allowlist at the durable queue boundary as well, so a scheduler restart
-# cannot revive entries written by the retired evaluation contract.
+# cannot revive entries written by the retired evaluation contract.  The two
+# lane stages belong to the eval-run driver (trial-local queues).
 SUPPORTED_JUDGE_TYPES = frozenset({
     "task_type", "contribution", "discussion", "prd_fidelity", "conclusion",
+    "lane_prd_fidelity", "cross_compare",
 })
+# Aggregator stages may consume terminal dependency failures so they can
+# record an incomplete verdict / leave a missing lane blank.
+_AGGREGATOR_JUDGE_TYPES = frozenset({"conclusion", "cross_compare"})
 
 
 def configured_slot_count() -> int:
@@ -146,6 +154,7 @@ class EvaluationScheduler:
                             trial_id=entry.trial_id,
                             judge_type=entry.judge_type,
                             source_snapshot_digest=entry.source_snapshot_digest,
+                            prompt_version=prompt_version_for_stage(entry.judge_type),
                         )
                         if entry.job_id != expected_job:
                             entry.status = "inconclusive"
@@ -213,6 +222,7 @@ class EvaluationScheduler:
                     trial_id=entry.trial_id,
                     judge_type=entry.judge_type,
                     source_snapshot_digest=entry.source_snapshot_digest,
+                    prompt_version=prompt_version_for_stage(entry.judge_type),
                 )
                 if entry.job_id != expected_job:
                     return False
@@ -352,7 +362,7 @@ class EvaluationScheduler:
             dep = self._entries.get(dep_id)
             if dep is None or dep.superseded_by or dep.status not in TERMINAL:
                 return False
-            if entry.judge_type != "conclusion" and dep.judge_type == "task_type":
+            if entry.judge_type not in _AGGREGATOR_JUDGE_TYPES and dep.judge_type == "task_type":
                 classifier_failed = dep.status != "completed"
         return not classifier_failed
 
@@ -363,7 +373,7 @@ class EvaluationScheduler:
             changed = False
             for entry in self._entries.values():
                 if (entry.superseded_by or entry.status != "queued"
-                        or entry.judge_type == "conclusion"):
+                        or entry.judge_type in _AGGREGATOR_JUDGE_TYPES):
                     continue
                 missing = [dep for dep in entry.depends_on if dep not in self._entries]
                 failed = [
@@ -455,8 +465,8 @@ class EvaluationScheduler:
             PROGRESS_EVENT, actor="evaluation-scheduler",
             correlation_id=entry.workflow_run_id,
             payload={
-                "evaluation_contract": "channel-prd-eval.v1",
-                "prompt_version": EVALUATION_PROMPT_VERSION,
+                "evaluation_contract": evaluation_contract_for_stage(entry.judge_type),
+                "prompt_version": prompt_version_for_stage(entry.judge_type),
                 **{key: value for key, value in asdict(entry).items()
                    if key not in {"input_ref", "depends_on"}},
             },

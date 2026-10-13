@@ -16,6 +16,15 @@ from typing import Any
 NECESSITY_VALUES = frozenset({"must", "optional", "not_needed"})
 NECESSITY_UNDETERMINED = "undetermined"
 
+# Blind per-lane PRD rubric (three-lane eval): the same four dimensions are
+# scored per lane and reused as the cross-compare comparison axes.
+LANE_PRD_FIDELITY_DIMENSIONS: tuple[str, ...] = (
+    "coverage",
+    "fidelity",
+    "actionability",
+    "structure",
+)
+
 
 def canonical_necessity(value: Any) -> str:
     """Return the stable necessity value for a judge-provided value.
@@ -339,7 +348,206 @@ class TaskTypeResult:
         )
 
 
-JudgeResult = ContributionResult | DiscussionResult | PrdFidelityResult | ConclusionResult | TaskTypeResult
+@dataclass(frozen=True)
+class LanePrdFidelityResult:
+    """Blind four-dimension score of one de-identified lane PRD."""
+
+    schema_version: str
+    judge_type: str = "lane_prd_fidelity"
+    status: str = ""
+    run_id: str = ""
+    source_snapshot_digest: str = ""
+    dimensions: list[DimensionScore] = field(default_factory=list)
+    differences: list[str] = field(default_factory=list)
+    lane_prd_fidelity_score: float | None = None
+    missing_evidence: list[str] = field(default_factory=list)
+    task_type: str = ""
+    role_id: str = ""
+    role_version: str = ""
+    role_metadata: dict[str, Any] = field(default_factory=dict)
+    score_scale: str = "0-4"
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, value: dict[str, Any]) -> "LanePrdFidelityResult":
+        return cls(
+            schema_version=str(value.get("schema_version") or ""),
+            judge_type=str(value.get("judge_type") or "lane_prd_fidelity"),
+            status=str(value.get("status") or ""),
+            run_id=str(value.get("run_id") or ""),
+            source_snapshot_digest=str(value.get("source_snapshot_digest") or ""),
+            dimensions=[
+                DimensionScore.from_dict(item)
+                for item in value.get("dimensions") or []
+                if isinstance(item, dict)
+            ],
+            differences=_string_list(value.get("differences")),
+            lane_prd_fidelity_score=_float_or_none(value.get("lane_prd_fidelity_score")),
+            missing_evidence=_string_list(value.get("missing_evidence")),
+            task_type=str(value.get("task_type") or ""),
+            role_id=str(value.get("role_id") or ""),
+            role_version=str(value.get("role_version") or ""),
+            role_metadata=_dict_value(value.get("role_metadata")),
+            score_scale=str(value.get("score_scale") or "0-4"),
+        )
+
+
+@dataclass(frozen=True)
+class PairwiseComparison:
+    pair: str
+    dimension_id: str
+    winner: str
+    margin: str
+    confidence: float = 0.0
+    evidence_refs: list[str] = field(default_factory=list)
+    rationale: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, value: dict[str, Any]) -> "PairwiseComparison":
+        return cls(
+            pair=str(value.get("pair") or ""),
+            dimension_id=str(value.get("dimension_id") or ""),
+            winner=str(value.get("winner") or ""),
+            margin=str(value.get("margin") or ""),
+            confidence=_float_or_zero(value.get("confidence")),
+            evidence_refs=_string_list(value.get("evidence_refs")),
+            rationale=str(value.get("rationale") or ""),
+        )
+
+
+@dataclass(frozen=True)
+class DimensionRanking:
+    dimension_id: str
+    ranking: list[str] = field(default_factory=list)
+    confidence: float = 0.0
+    evidence_refs: list[str] = field(default_factory=list)
+    rationale: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, value: dict[str, Any]) -> "DimensionRanking":
+        return cls(
+            dimension_id=str(value.get("dimension_id") or ""),
+            ranking=_string_list(value.get("ranking")),
+            confidence=_float_or_zero(value.get("confidence")),
+            evidence_refs=_string_list(value.get("evidence_refs")),
+            rationale=str(value.get("rationale") or ""),
+        )
+
+
+@dataclass(frozen=True)
+class DifferenceAttribution:
+    dimension_id: str
+    pair: str
+    category: str
+    summary: str = ""
+    evidence_refs: list[str] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, value: dict[str, Any]) -> "DifferenceAttribution":
+        return cls(
+            dimension_id=str(value.get("dimension_id") or ""),
+            pair=str(value.get("pair") or ""),
+            category=str(value.get("category") or ""),
+            summary=str(value.get("summary") or ""),
+            evidence_refs=_string_list(value.get("evidence_refs")),
+        )
+
+
+@dataclass(frozen=True)
+class RankingConflict:
+    dimension_id: str
+    blind_favorite: str
+    pairwise_favorite: str
+    resolution: str = ""
+    evidence_refs: list[str] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, value: dict[str, Any]) -> "RankingConflict":
+        return cls(
+            dimension_id=str(value.get("dimension_id") or ""),
+            blind_favorite=str(value.get("blind_favorite") or ""),
+            pairwise_favorite=str(value.get("pairwise_favorite") or ""),
+            resolution=str(value.get("resolution") or ""),
+            evidence_refs=_string_list(value.get("evidence_refs")),
+        )
+
+
+@dataclass(frozen=True)
+class CrossCompareResult:
+    """De-identified cross-lane comparison over frozen blind scores."""
+
+    schema_version: str
+    judge_type: str = "cross_compare"
+    status: str = ""
+    run_id: str = ""
+    source_snapshot_digest: str = ""
+    candidates: list[str] = field(default_factory=list)
+    dimension_rankings: list[DimensionRanking] = field(default_factory=list)
+    pairwise: list[PairwiseComparison] = field(default_factory=list)
+    attributions: list[DifferenceAttribution] = field(default_factory=list)
+    conflicts: list[RankingConflict] = field(default_factory=list)
+    recommendation: dict[str, Any] = field(default_factory=dict)
+    missing_evidence: list[str] = field(default_factory=list)
+    task_type: str = ""
+    score_scale: str = "0-4"
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, value: dict[str, Any]) -> "CrossCompareResult":
+        return cls(
+            schema_version=str(value.get("schema_version") or ""),
+            judge_type=str(value.get("judge_type") or "cross_compare"),
+            status=str(value.get("status") or ""),
+            run_id=str(value.get("run_id") or ""),
+            source_snapshot_digest=str(value.get("source_snapshot_digest") or ""),
+            candidates=_string_list(value.get("candidates")),
+            dimension_rankings=[
+                DimensionRanking.from_dict(item)
+                for item in value.get("dimension_rankings") or []
+                if isinstance(item, dict)
+            ],
+            pairwise=[
+                PairwiseComparison.from_dict(item)
+                for item in value.get("pairwise") or []
+                if isinstance(item, dict)
+            ],
+            attributions=[
+                DifferenceAttribution.from_dict(item)
+                for item in value.get("attributions") or []
+                if isinstance(item, dict)
+            ],
+            conflicts=[
+                RankingConflict.from_dict(item)
+                for item in value.get("conflicts") or []
+                if isinstance(item, dict)
+            ],
+            recommendation=_dict_value(value.get("recommendation")),
+            missing_evidence=_string_list(value.get("missing_evidence")),
+            task_type=str(value.get("task_type") or ""),
+            score_scale=str(value.get("score_scale") or "0-4"),
+        )
+
+
+JudgeResult = (
+    ContributionResult | DiscussionResult | PrdFidelityResult | ConclusionResult
+    | TaskTypeResult | LanePrdFidelityResult | CrossCompareResult
+)
 
 
 @dataclass(frozen=True)
@@ -512,12 +720,19 @@ __all__ = [
     "AgentFinding",
     "NECESSITY_UNDETERMINED",
     "NECESSITY_VALUES",
+    "CrossCompareResult",
+    "DifferenceAttribution",
+    "DimensionRanking",
+    "DimensionScore",
     "DiscussionResult",
     "ConclusionResult",
-    "DimensionScore",
     "EvaluationPacket",
     "JudgeRecord",
     "JudgeResult",
+    "LANE_PRD_FIDELITY_DIMENSIONS",
+    "LanePrdFidelityResult",
+    "PairwiseComparison",
+    "RankingConflict",
     "ContributionResult",
     "canonical_necessity",
     "necessity_label",

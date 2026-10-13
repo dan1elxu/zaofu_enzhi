@@ -30,6 +30,30 @@ FREEZE_TRIGGER_EVENTS = frozenset({"channel.prd.frozen"})
 TASK_TYPES = frozenset({"bugfix", "refactor", "greenfield", "ambiguous"})
 
 
+def missing_prd_fidelity_inputs(packet: Any) -> list[str]:
+    """Deterministic pre-flight check for the channel PRD fidelity stage."""
+
+    def has_body(value: Any) -> bool:
+        # Markdown and scalar JSON artifacts are wrapped by the observer.
+        while isinstance(value, dict) and set(value) == {"body"}:
+            value = value["body"]
+        if isinstance(value, str):
+            return bool(value.strip())
+        return isinstance(value, (dict, list)) and bool(value)
+
+    missing = []
+    statement = ((packet.get("task_details") or {}).get("statement")
+                 or (packet.get("task") or {}).get("statement"))
+    if not isinstance(statement, str) or not statement.strip():
+        missing.append("task.statement")
+    if not has_body((packet.get("channel_frozen_prd") or {}).get("body")):
+        missing.append("channel_frozen_prd.body")
+    bound = packet.get("workflow_bound_prd")
+    if bound and not has_body(bound.get("body")):
+        missing.append("workflow_bound_prd.body")
+    return missing
+
+
 def _prepare_channel(
     *, state_dir: Path, events: list[Any], channel_id: str,
     freeze: dict[str, Any], bound_workflows: list[dict[str, Any]],
@@ -698,4 +722,5 @@ __all__ = [
     "_frozen_discussion_events",
     "_snapshot_evaluation_roles",
     "_packet_messages",
+    "missing_prd_fidelity_inputs",
 ]

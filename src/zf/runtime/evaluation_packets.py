@@ -112,6 +112,7 @@ def build_packet(
     role_digest: str = "",
     evaluator_profile: str = "",
     subagent_scope: str = "",
+    prompt_version: str = "",
 ) -> EvaluationPacket:
     """Assemble one stage packet; allowed evidence refs are derived here.
 
@@ -179,7 +180,7 @@ def build_packet(
         "trial_id": trial_id,
         "stage": stage,
         "source_snapshot_digest": source_snapshot_digest,
-        "prompt_version": EVALUATION_PROMPT_VERSION,
+        "prompt_version": str(prompt_version or "") or EVALUATION_PROMPT_VERSION,
         "task": task,
         "task_details": details,
         "agent_profiles": [item for item in (agent_profiles or []) if isinstance(item, dict)],

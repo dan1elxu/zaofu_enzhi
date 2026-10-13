@@ -20,7 +20,7 @@ from zf.runtime.evaluation_packets import (
     evaluation_request_id,
     stable_digest,
 )
-from zf.runtime.evaluation_prompts import EVALUATION_PROMPT_VERSION
+from zf.runtime.evaluation_prompts import prompt_version_for_stage
 from zf.runtime.evaluation_schemas import SCHEMA_VERSIONS
 
 
@@ -172,7 +172,7 @@ def _validate_read_record(
     if expected_source_snapshot_digest and source_digest != expected_source_snapshot_digest:
         return None
     prompt_version = str(record.get("prompt_version") or "")
-    if prompt_version != EVALUATION_PROMPT_VERSION:
+    if prompt_version != prompt_version_for_stage(judge_type):
         return None
     try:
         expected_request = evaluation_request_id(

@@ -51,11 +51,16 @@ from zf.runtime.evaluation_artifacts import (
     write_report,
 )
 from zf.runtime.evaluation_prompts import (
-    EVALUATION_PROMPTS,
     EVALUATION_PROMPT_VERSION,
     JUDGE_TYPES,
+    LANE_JUDGE_TYPES,
     SYSTEM_PROMPT,
+    evaluation_contract_for_stage,
+    prompt_for_stage,
+    prompt_version_for_stage,
+    require_stage_prompt_version,
 )
+from zf.runtime import evaluation_lane_packets as lane_packets
 from zf.runtime.evaluation_schemas import SCHEMA_VERSIONS, normalize_judge_output
 from zf.runtime.evaluation_output import normalize_provider_output
 from zf.runtime.evaluation_types import (
@@ -67,7 +72,7 @@ from zf.runtime.evaluation_role_binding import role_binding_error
 
 JUDGE_COMPLETED_EVENT = "benchmark.evaluation.judge.completed"
 CONCLUSION_COMPLETED_EVENT = "benchmark.evaluation.conclusion.completed"
-SUPPORTED_JUDGE_TYPES = frozenset(JUDGE_TYPES)
+SUPPORTED_JUDGE_TYPES = frozenset(JUDGE_TYPES) | frozenset(LANE_JUDGE_TYPES)
 
 TERMINAL_JUDGE_STATUSES = frozenset({
     "scored",
@@ -273,10 +278,7 @@ def _prompt_file_reference(
 
 def _prompt_template(judge_type: str, packet: Any) -> str:
     del packet
-    try:
-        return EVALUATION_PROMPTS[judge_type]
-    except KeyError as exc:
-        raise KeyError(f"unknown evaluation prompt stage: {judge_type}") from exc
+    return prompt_for_stage(judge_type)
 
 
 def _schema_version(judge_type: str, packet: Any) -> str:
@@ -312,11 +314,14 @@ def run_judge(
             f"unsupported evaluation judge type retired; not dispatched: {judge_type}"
         )
     log = log or (lambda message: None)
+    prompt_version = require_stage_prompt_version(judge_type, packet)
+    evaluation_contract = evaluation_contract_for_stage(judge_type)
     request_id = evaluation_request_id(
         workflow_run_id=workflow_run_id,
         trial_id=trial_id,
         judge_type=judge_type,
         source_snapshot_digest=str(packet.get("source_snapshot_digest") or ""),
+        prompt_version=prompt_version,
     )
     existing = read_judge_result(
         state_dir, workflow_run_id=workflow_run_id, judge_type=judge_type,
@@ -356,14 +361,14 @@ def run_judge(
             correlation_id=workflow_run_id,
             payload={
                 "schema_version": "benchmark.evaluation.judge.v1",
-                "evaluation_contract": "channel-prd-eval.v1",
+                "evaluation_contract": evaluation_contract,
                 "request_id": request_id, "channel_id": channel_id,
                 "attempt": result["attempt"], "max_attempts": result["max_attempts"],
                 "judge_type": judge_type, "workflow_run_id": workflow_run_id,
                 "trial_id": trial_id, "run_id": str(packet.get("run_id") or ""),
                 "status": result["status"],
                 "source_snapshot_digest": str(packet.get("source_snapshot_digest") or ""),
-                "prompt_version": EVALUATION_PROMPT_VERSION,
+                "prompt_version": prompt_version,
                 "freeze_event_id": str((packet.get("task_details") or {}).get("freeze_event_id") or ""),
                 "artifact_ref": _rel(path, state_dir),
                 "artifact_digest": stable_digest(result), "error": result["error"],
@@ -397,6 +402,7 @@ def run_judge(
         allowed_evidence_refs=json.dumps(
             prompt_view.get("allowed_evidence_refs"), ensure_ascii=False, default=str,
         ),
+        **lane_packets.lane_template_values(prompt_view),
     )
     packet_path = _write_judge_prompt_sidecar(
         state_dir,
@@ -410,14 +416,15 @@ def run_judge(
         schema_version=_schema_version(judge_type, packet),
     )
 
-    missing = _missing_prd_inputs(packet) if judge_type == "prd_fidelity" else []
+    missing = lane_packets.missing_stage_inputs(judge_type, packet)
     if missing:
         result = _judge_record(
             judge_type=judge_type, workflow_run_id=workflow_run_id, trial_id=trial_id,
             request_id=request_id, packet=packet, status="evidence_missing",
-            result={"schema_version": _schema_version(judge_type, packet), "judge_type": judge_type,
-                    "status": "evidence_missing", "dimensions": [],
-                    "missing_evidence": missing}, error="missing evaluation input: " + ", ".join(missing),
+            result=lane_packets.missing_input_result(
+                judge_type, schema_version=_schema_version(judge_type, packet), missing=missing,
+            ),
+            error="missing evaluation input: " + ", ".join(missing),
             provider="deterministic", model="unknown",
         )
         result["attempt"] = 0
@@ -440,7 +447,7 @@ def run_judge(
         correlation_id=workflow_run_id,
         payload={
             "schema_version": "benchmark.evaluation.judge.v1",
-            "evaluation_contract": "channel-prd-eval.v1",
+            "evaluation_contract": evaluation_contract,
             "request_id": request_id,
             "channel_id": channel_id,
             "attempt": result["attempt"],
@@ -451,7 +458,7 @@ def run_judge(
             "run_id": str(packet.get("run_id") or ""),
             "status": status,
             "source_snapshot_digest": str(packet.get("source_snapshot_digest") or ""),
-            "prompt_version": EVALUATION_PROMPT_VERSION,
+            "prompt_version": prompt_version,
             "freeze_event_id": str((packet.get("task_details") or {}).get("freeze_event_id") or ""),
             "artifact_ref": _rel(path, state_dir),
             "artifact_digest": stable_digest(result),
@@ -459,28 +466,6 @@ def run_judge(
         },
     )
     return result
-
-
-def _missing_prd_inputs(packet: Any) -> list[str]:
-    def has_body(value: Any) -> bool:
-        # Markdown and scalar JSON artifacts are wrapped by the observer.
-        while isinstance(value, dict) and set(value) == {"body"}:
-            value = value["body"]
-        if isinstance(value, str):
-            return bool(value.strip())
-        return isinstance(value, (dict, list)) and bool(value)
-
-    missing = []
-    statement = ((packet.get("task_details") or {}).get("statement")
-                 or (packet.get("task") or {}).get("statement"))
-    if not isinstance(statement, str) or not statement.strip():
-        missing.append("task.statement")
-    if not has_body((packet.get("channel_frozen_prd") or {}).get("body")):
-        missing.append("channel_frozen_prd.body")
-    bound = packet.get("workflow_bound_prd")
-    if bound and not has_body(bound.get("body")):
-        missing.append("workflow_bound_prd.body")
-    return missing
 
 
 def run_conclusion(
@@ -748,6 +733,7 @@ def _run_request_turns(
     from zf.runtime.evaluation_scheduler import PROGRESS_EVENT
     from zf.runtime.evaluation_tmux import resolve_judge_backend
 
+    prompt_version = str(packet.get("prompt_version") or "") or prompt_version_for_stage(judge_type)
     max_attempts = 2
     previous = int((existing or {}).get("attempt") or (1 if existing else 0))
     path = (conclusion_result_path(state_dir, workflow_run_id, request_id)
@@ -757,7 +743,7 @@ def _run_request_turns(
     backend_name = resolve_judge_backend(config) if backend is _visible_tmux_backend else "injected"
     budgets = capture_evaluator_budgets()
     base_config = observed_evaluator_config(
-        backend=backend_name, provider=provider, prompt_version=EVALUATION_PROMPT_VERSION,
+        backend=backend_name, provider=provider, prompt_version=prompt_version,
         prompt_digest=stable_digest(_prompt_template(judge_type, packet)),
         system_prompt_digest=stable_digest(SYSTEM_PROMPT),
         role_ref=str(packet.get("role_ref") or ""), role_digest=str(packet.get("role_digest") or ""),
@@ -828,7 +814,7 @@ def _run_request_turns(
                 backend=backend_name, provider=provider,
                 observed_model=observed.observed_model,
                 observed_model_source=observed.observed_model_source,
-                prompt_version=EVALUATION_PROMPT_VERSION,
+                prompt_version=prompt_version,
                 prompt_digest=stable_digest(_prompt_template(judge_type, packet)),
                 system_prompt_digest=stable_digest(SYSTEM_PROMPT),
                 role_ref=str(packet.get("role_ref") or ""), role_digest=str(packet.get("role_digest") or ""),
@@ -859,6 +845,7 @@ def _run_request_turns(
                 expected_agent_ids=participants if judge_type == "contribution" else None,
                 workflow_bound=bool(packet.get("workflow_bound_prd")),
                 expected_schema_version=_schema_version(judge_type, packet),
+                cross_compare_context=lane_packets.cross_compare_context_from_packet(packet),
             ) if parsed is not None else (None, f"judge returned no single JSON object: {observed.reply[:240]}", {}))
             if repair:
                 turn["output_repair"] = record["output_repair"] = repair
@@ -933,6 +920,7 @@ def _judge_record(
     model: str,
 ) -> dict[str, Any]:
     packet_dict = packet.to_dict() if isinstance(packet, EvaluationPacket) else packet
+    prompt_version = str(packet_dict.get("prompt_version") or "") or prompt_version_for_stage(judge_type)
     record = JudgeRecord(
         schema_version="benchmark.evaluation.record.v1",
         judge_type=judge_type,
@@ -942,7 +930,7 @@ def _judge_record(
         workflow_run_id=workflow_run_id,
         trial_id=trial_id,
         source_snapshot_digest=str(packet_dict.get("source_snapshot_digest") or ""),
-        prompt_version=EVALUATION_PROMPT_VERSION,
+        prompt_version=prompt_version,
         prompt_digest=stable_digest(_prompt_template(judge_type, packet_dict)),
         provider=provider,
         model=model,
@@ -952,7 +940,7 @@ def _judge_record(
         evidence_refs=list(packet_dict.get("allowed_evidence_refs") or []),
     ).to_dict()
     record.update(
-        evaluation_contract="channel-prd-eval.v1",
+        evaluation_contract=evaluation_contract_for_stage(judge_type),
         freeze_event_id=str((packet_dict.get("task_details") or {}).get("freeze_event_id") or ""),
         role_ref=str(packet_dict.get("role_ref") or ""),
         role_digest=str(packet_dict.get("role_digest") or ""),
@@ -962,7 +950,7 @@ def _judge_record(
     if provider == "deterministic":
         audit = observed_evaluator_config(
             backend=provider, provider=provider, observed_model_source="not_applicable",
-            prompt_version=EVALUATION_PROMPT_VERSION, prompt_digest=record["prompt_digest"],
+            prompt_version=prompt_version, prompt_digest=record["prompt_digest"],
             system_prompt_digest=stable_digest(SYSTEM_PROMPT),
             role_ref=record["role_ref"], role_digest=record["role_digest"],
         )

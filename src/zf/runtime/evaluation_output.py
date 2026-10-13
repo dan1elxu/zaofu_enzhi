@@ -16,12 +16,14 @@ def normalize_provider_output(
     *, judge_type: str, raw: dict[str, Any], allowed_evidence_refs: list[str],
     expected_agent_ids: list[str] | None = None,
     workflow_bound: bool | None = None, expected_schema_version: str | None = None,
+    cross_compare_context: dict[str, Any] | None = None,
 ) -> tuple[JudgeResult | None, str, dict[str, Any]]:
     """Repair only the known differences shape; never change a judgment."""
     options = dict(
         judge_type=judge_type, allowed_evidence_refs=allowed_evidence_refs,
         expected_agent_ids=expected_agent_ids, workflow_bound=workflow_bound,
         expected_schema_version=expected_schema_version,
+        cross_compare_context=cross_compare_context,
     )
     result, error = normalize_judge_output(raw=raw, **options)
     if judge_type != "prd_fidelity" or error != PRD_DIFFERENCES_SHAPE_ERROR:

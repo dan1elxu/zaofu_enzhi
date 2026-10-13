@@ -8,9 +8,14 @@ from typing import Any
 
 from zf.core.events import EventLog, EventWriter
 from zf.runtime.channel_prd_freeze import emit_prd_frozen
+from zf.runtime.evaluation_cross_compare import (
+    candidate_prd_ref,
+    expected_pairs,
+)
 from zf.runtime.evaluation_packets import message_evidence_ref, build_packet
 from zf.runtime.evaluation_schemas import (
     DISCUSSION_DIMENSIONS,
+    LANE_PRD_FIDELITY_DIMENSIONS,
     PRD_FIDELITY_DIMENSIONS,
 )
 
@@ -233,7 +238,113 @@ def _judge_reply(judge_type: str, message_ref: str = "", with_bound: bool = Fals
     }, ensure_ascii=False)
 
 
+LANE_EVAL_REFS = ["eval/prompt", "eval/prd"]
+
+
+def _lane_prd_fidelity_reply(
+    *, refs: list[str] | None = None, score: int | None = 3,
+    confidence: float = 0.9, status: str = "scored",
+) -> str:
+    refs = list(refs or LANE_EVAL_REFS)
+    return json.dumps({
+        "schema_version": "lane_prd_fidelity_result.v1",
+        "judge_type": "lane_prd_fidelity",
+        "score_scale": "0-4",
+        "dimensions": [{
+            "dimension_id": dimension, "status": status, "score": score,
+            "confidence": confidence, "evidence_refs": refs,
+            "rationale": f"{dimension} 有明确证据支撑。", "verdict": "aligned",
+        } for dimension in LANE_PRD_FIDELITY_DIMENSIONS],
+        "differences": [], "missing_evidence": [],
+    }, ensure_ascii=False)
+
+
+def _cross_compare_reply(
+    *,
+    candidates: tuple[str, ...] = ("A", "B", "C"),
+    ranking: tuple[str, ...] | None = None,
+    confidence: int = 3,
+    conflicts: list[dict[str, Any]] | None = None,
+    divergence_explanation: str = "",
+    missing_evidence: list[str] | None = None,
+) -> str:
+    """Deterministic cross-compare reply consistent with the vote order."""
+    ranking = list(ranking or candidates)
+    pairwise = []
+    attributions = []
+    for pair in expected_pairs(list(candidates)):
+        first, second = pair.split("-", 1)
+        winner = first if ranking.index(first) < ranking.index(second) else second
+        for dimension in LANE_PRD_FIDELITY_DIMENSIONS:
+            pairwise.append({
+                "pair": pair, "dimension_id": dimension, "winner": winner,
+                "margin": "medium", "confidence": confidence,
+                "evidence_refs": [candidate_prd_ref(first), candidate_prd_ref(second)],
+                "rationale": f"{dimension} 维度 {winner} 更完整。",
+            })
+            attributions.append({
+                "dimension_id": dimension, "pair": pair, "category": "coverage_gap",
+                "summary": f"{first} 与 {second} 在 {dimension} 的章节摘录差异。",
+                "evidence_refs": [candidate_prd_ref(first), candidate_prd_ref(second)],
+            })
+    reply: dict[str, Any] = {
+        "schema_version": "cross_compare_result.v1",
+        "judge_type": "cross_compare",
+        "status": "scored" if not missing_evidence else "evidence_missing",
+        "score_scale": "0-4",
+        "candidates": list(candidates),
+        "dimension_rankings": [{
+            "dimension_id": dimension, "ranking": ranking,
+            "confidence": confidence,
+            "evidence_refs": [candidate_prd_ref(label) for label in candidates],
+            "rationale": f"{dimension} 排名与逐段对比一致。",
+        } for dimension in LANE_PRD_FIDELITY_DIMENSIONS],
+        "pairwise": pairwise,
+        "attributions": attributions,
+        "conflicts": conflicts if conflicts is not None else [],
+        "recommendation": {
+            "ranking": ranking, "top": ranking[0], "confidence": confidence,
+            "rationale": "维度票选领先且差距稳定。", "divergence_explanation": divergence_explanation,
+            "key_gaps": [{
+                "candidate": label, "gap": f"{label} 相对 {ranking[0]} 的覆盖缺口。",
+                "evidence_refs": [candidate_prd_ref(label), candidate_prd_ref(ranking[0])],
+            } for label in ranking[1:]],
+        },
+        "missing_evidence": list(missing_evidence or []),
+    }
+    return json.dumps(reply, ensure_ascii=False)
+
+
+def _cross_compare_blind(
+    candidates: tuple[str, ...] = ("A", "B", "C"),
+    scores: dict[str, int] | None = None,
+) -> list[dict[str, Any]]:
+    """Candidate dicts for build_cross_compare_packet with blind summaries."""
+    scores = scores or {
+        label: len(candidates) - index for index, label in enumerate(candidates)
+    }
+    return [{
+        "label": label,
+        "prd_body": f"# PRD {label}\n\n满足提示词需求的方案 {label}。\n",
+        "blind": {
+            "status": "scored",
+            "mean": float(scores[label]),
+            "dimensions": [{
+                "dimension_id": dimension, "score": scores[label],
+                "status": "scored", "verdict": "aligned",
+                "rationale": f"{dimension} 摘要。",
+            } for dimension in LANE_PRD_FIDELITY_DIMENSIONS],
+        },
+    } for label in candidates]
+
+
 __all__ = [
-    "_judge_reply", "_packet", "_seed_channel_state", "_team_findings",
+    "_cross_compare_blind",
+    "_cross_compare_reply",
+    "_judge_reply",
+    "_lane_prd_fidelity_reply",
+    "_packet",
+    "_seed_channel_state",
+    "_team_findings",
     "_workflow_binding_payload",
 ]

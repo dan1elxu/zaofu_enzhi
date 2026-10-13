@@ -18,8 +18,13 @@ import math
 from dataclasses import replace
 from typing import Any
 
+from zf.runtime.evaluation_cross_compare import (
+    CROSS_COMPARE_SCHEMA_VERSION,
+    normalize_cross_compare_output,
+)
 from zf.runtime.evaluation_types import (
     AgentFinding,
+    LANE_PRD_FIDELITY_DIMENSIONS,
     NECESSITY_UNDETERMINED,
     NECESSITY_VALUES,
     DiscussionResult,
@@ -27,10 +32,13 @@ from zf.runtime.evaluation_types import (
     DimensionScore,
     JudgeResult,
     ContributionResult,
+    LanePrdFidelityResult,
     PrdFidelityResult,
     TaskTypeResult,
     canonical_necessity,
 )
+
+LANE_PRD_FIDELITY_SCHEMA_VERSION = "lane_prd_fidelity_result.v1"
 
 SCHEMA_VERSIONS: dict[str, str] = {
     "task_type": "task_type_result.v1",
@@ -38,12 +46,17 @@ SCHEMA_VERSIONS: dict[str, str] = {
     "discussion": "discussion_result.v2",
     "prd_fidelity": "prd_fidelity_result.v2",
     "conclusion": "conclusion_result.v2",
+    "lane_prd_fidelity": LANE_PRD_FIDELITY_SCHEMA_VERSION,
+    "cross_compare": CROSS_COMPARE_SCHEMA_VERSION,
 }
 
 # Named registry for callers that distinguish role-bound stages from the task
-# classifier. There is no retired-stage fallback.
+# classifier. There is no retired-stage fallback.  Lane stages are deliberately
+# absent: they bind no role.md (three-lane eval rubrics live in the prompts).
 ROLE_SCHEMA_VERSIONS: dict[str, str] = {
-    key: value for key, value in SCHEMA_VERSIONS.items() if key != "task_type"
+    key: value
+    for key, value in SCHEMA_VERSIONS.items()
+    if key not in {"task_type", "lane_prd_fidelity", "cross_compare"}
 }
 SCORE_SCALE_RANGES: dict[str, tuple[int, int]] = {"0-4": (0, 4)}
 TASK_TYPES = frozenset({"bugfix", "refactor", "greenfield", "ambiguous"})
@@ -120,6 +133,25 @@ def prd_fidelity_score(
     )
 
 
+def lane_prd_fidelity_score(
+    dimensions: list[Any], *, score_scale: str | None = None,
+) -> float | None:
+    """Deterministic blind lane score: the equal-weight mean of all four
+    dimensions; None unless every dimension is scored."""
+
+    scale = score_scale or _score_scale_from_items(dimensions)
+    by_id = _dimension_index(dimensions, score_scale=scale)
+    if set(by_id) != set(LANE_PRD_FIDELITY_DIMENSIONS):
+        return None
+    return mean_scores(
+        [
+            _dimension_score_dataclass(by_id.get(dimension_id), score_scale=scale)
+            for dimension_id in LANE_PRD_FIDELITY_DIMENSIONS
+        ],
+        score_scale=scale,
+    )
+
+
 def normalize_judge_output(
     *,
     judge_type: str,
@@ -129,6 +161,7 @@ def normalize_judge_output(
     workflow_bound: bool | None = None,
     expected_schema_version: str | None = None,
     role_mode: bool = False,
+    cross_compare_context: dict[str, Any] | None = None,
 ) -> tuple[JudgeResult | None, str]:
     """Validate one judge JSON object against the canonical stage schema.
 
@@ -184,6 +217,21 @@ def normalize_judge_output(
             )
         elif judge_type == "conclusion":
             result, norm_error = _normalize_conclusion(raw, score_scale=score_scale)
+        elif judge_type == "lane_prd_fidelity":
+            result, norm_error = _normalize_lane_prd_fidelity(
+                raw, allowed, score_scale=score_scale,
+            )
+        elif judge_type == "cross_compare":
+            context = cross_compare_context or {}
+            result, norm_error = normalize_cross_compare_output(
+                raw,
+                allowed_evidence_refs=list(allowed),
+                expected_candidates=list(context.get("candidates") or []),
+                blind_scores=(
+                    context.get("blind_scores")
+                    if isinstance(context.get("blind_scores"), dict) else {}
+                ),
+            )
         else:
             return None, f"unknown judge_type: {judge_type}"
     except (ValueError, TypeError, OverflowError) as exc:
@@ -429,6 +477,51 @@ def _normalize_prd_fidelity(
             dims, workflow_bound=workflow_bound, score_scale=score_scale,
         ) if status == "scored" else None,
         prd_ready_for_next_stage=prd_ready_for_next_stage,
+        missing_evidence=missing,
+        score_scale=score_scale,
+        **_result_metadata(raw),
+    ), ""
+
+
+def _normalize_lane_prd_fidelity(
+    raw: dict[str, Any],
+    allowed: set[str],
+    *,
+    score_scale: str = "0-4",
+) -> tuple[LanePrdFidelityResult | None, str]:
+    """Blind lane PRD scoring: fixed four dimensions, no role/workflow gate."""
+
+    dimensions = _dimension_entries(raw.get("dimensions"))
+    if not dimensions:
+        return None, "dimensions must be a non-empty list"
+    _require_ids(dimensions, "dimension_id", LANE_PRD_FIDELITY_DIMENSIONS)
+    default_confidence = raw.get("confidence")
+    dims = [
+        _normalize_dimension(item, allowed, default_confidence, score_scale=score_scale)
+        for item in dimensions
+    ]
+    if any(d is None for d in dims):
+        return None, "dimension entry malformed (needs dimension_id)"
+    dims = [d for d in dims if d is not None]
+    missing = _string_list(
+        raw.get("missing_evidence") or raw.get("missing_evidence_keys")
+    )
+    status = _result_status(dims, missing)
+    try:
+        differences = _string_list(raw.get("differences") or [])
+    except (TypeError, ValueError):
+        return None, PRD_DIFFERENCES_SHAPE_ERROR
+    return LanePrdFidelityResult(
+        schema_version=str(raw["schema_version"]),
+        judge_type="lane_prd_fidelity",
+        status=status,
+        run_id=str(raw.get("run_id") or ""),
+        source_snapshot_digest=str(raw.get("source_snapshot_digest") or ""),
+        dimensions=dims,
+        differences=differences,
+        lane_prd_fidelity_score=lane_prd_fidelity_score(
+            dims, score_scale=score_scale,
+        ) if status == "scored" else None,
         missing_evidence=missing,
         score_scale=score_scale,
         **_result_metadata(raw),
@@ -805,6 +898,8 @@ def _normalize_task_type(
 
 __all__ = [
     "DISCUSSION_DIMENSIONS",
+    "LANE_PRD_FIDELITY_DIMENSIONS",
+    "LANE_PRD_FIDELITY_SCHEMA_VERSION",
     "NECESSITY_VOCAB",
     "NECESSITY_ALLOWED",
     "PRD_FIDELITY_DIMENSIONS",
@@ -812,6 +907,7 @@ __all__ = [
     "TASK_TYPES",
     "SCHEMA_VERSIONS",
     "discussion_score",
+    "lane_prd_fidelity_score",
     "mean_scores",
     "normalize_judge_output",
     "prd_fidelity_score",

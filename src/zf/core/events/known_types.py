@@ -860,6 +860,11 @@ KNOWN_EVENT_TYPES: frozenset[str] = frozenset({
     "benchmark.evaluation.judge.completed",
     "benchmark.evaluation.conclusion.completed",
     "benchmark.evaluation.progress",
+    # Three-lane PRD eval run lifecycle (docs/ideas/three-lane-prd-eval.md):
+    # same informational/projection-only contract as benchmark.evaluation.*.
+    "benchmark.eval.run.started",
+    "benchmark.eval.lane.completed",
+    "benchmark.eval.run.completed",
     # Misc
     "handoff.generated", "event.malformed",
 })

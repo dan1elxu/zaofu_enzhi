@@ -75,6 +75,12 @@ def render_report(
         "## 2. 逐 Agent 作用分析（Contribution Judge）",
         "",
     ]
+    lane_score_lines = _lane_score_lines(judges)
+    if lane_score_lines:
+        # Lane/eval-run stages append to the Scores block without disturbing
+        # the channel report's fixed line order or section numbering.
+        anchor = lines.index("## 2. 逐 Agent 作用分析（Contribution Judge）")
+        lines[anchor - 1: anchor - 1] = lane_score_lines
     findings = contribution.get("agent_findings") or []
     if findings:
         for item in findings:
@@ -163,7 +169,91 @@ def render_report(
         f"- conclusions dir: `{conclusion_dir.as_posix()}/`",
         "",
     ]
+    lane_fidelity = judges.get("lane_prd_fidelity")
+    if lane_fidelity is not None:
+        lines += _lane_fidelity_section(lane_fidelity)
+    cross_compare = judges.get("cross_compare")
+    if cross_compare is not None:
+        lines += _cross_compare_section(cross_compare)
     return "\n".join(lines)
+
+
+def _lane_score_lines(judges: dict[str, dict[str, Any]]) -> list[str]:
+    lines: list[str] = []
+    if "lane_prd_fidelity" in judges:
+        record = judges.get("lane_prd_fidelity") or {}
+        lines.append(
+            "- Lane PRD fidelity (`lane_prd_fidelity`): "
+            f"**{record.get('status', 'pending')}**"
+        )
+    if "cross_compare" in judges:
+        record = judges.get("cross_compare") or {}
+        lines.append(
+            f"- Cross compare (`cross_compare`): **{record.get('status', 'pending')}**"
+        )
+    return lines
+
+
+def _lane_fidelity_section(record: dict[str, Any]) -> list[str]:
+    result = record.get("result") or {}
+    lines = ["", "## Lane PRD Fidelity（blind 四维度）", ""]
+    dims = result.get("dimensions") or []
+    if dims:
+        for item in dims:
+            lines.append(
+                f"- `{item.get('dimension_id')}`: {item.get('score')} "
+                f"（{item.get('rationale')}）"
+            )
+        mean = result.get("lane_prd_fidelity_score")
+        if isinstance(mean, (int, float)):
+            lines.append(f"- 综合参考分（四维度算术平均）: {mean:.1f}")
+    else:
+        lines.append(f"- 无可用分数（status: {record.get('status', 'pending')}）")
+    for diff in result.get("differences") or []:
+        lines.append(f"- difference: {diff}")
+    return lines
+
+
+def _cross_compare_section(record: dict[str, Any]) -> list[str]:
+    result = record.get("result") or {}
+    lines = ["", "## Cross Compare 横向对比", ""]
+    lines.append(f"- status: `{record.get('status')}`")
+    recommendation = result.get("recommendation") or {}
+    if recommendation:
+        ranking = " > ".join(str(label) for label in recommendation.get("ranking") or [])
+        lines.append(
+            f"- 推荐排名: {ranking}"
+            f"（置信 {recommendation.get('confidence')}）：{recommendation.get('rationale')}"
+        )
+        if recommendation.get("divergence_explanation"):
+            lines.append(
+                "- 综合推荐与逐维度排名不一致说明: "
+                f"{recommendation['divergence_explanation']}"
+            )
+        for gap in recommendation.get("key_gaps") or []:
+            lines.append(f"- 关键差距（{gap.get('candidate')}）: {gap.get('gap')}")
+    for entry in result.get("dimension_rankings") or []:
+        ranking = " > ".join(str(label) for label in entry.get("ranking") or [])
+        lines.append(
+            f"- 维度 `{entry.get('dimension_id')}`: {ranking}"
+            f"（置信 {entry.get('confidence')}）"
+        )
+    for conflict in result.get("conflicts") or []:
+        lines.append(
+            f"- 冲突仲裁 `{conflict.get('dimension_id')}`: "
+            f"blind 分偏好 {conflict.get('blind_favorite')}，"
+            f"逐段对比偏好 {conflict.get('pairwise_favorite')} — "
+            f"{conflict.get('resolution')}"
+        )
+    for attribution in result.get("attributions") or []:
+        lines.append(
+            f"- 归因 `{attribution.get('dimension_id')}` "
+            f"{attribution.get('pair')} [{attribution.get('category')}]: "
+            f"{attribution.get('summary')}"
+        )
+    if record.get("error"):
+        lines.append(f"- error: {record.get('error')}")
+    return lines
 
 
 def _canonical_necessity(value: Any) -> str:

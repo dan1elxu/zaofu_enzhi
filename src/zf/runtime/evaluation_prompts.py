@@ -13,6 +13,8 @@ versioned because packet identity binds the prompt version.
 
 from __future__ import annotations
 
+from typing import Any
+
 EVALUATION_PROMPT_VERSION = "prd-eval-prompts.v8"
 
 JUDGE_TYPES: tuple[str, ...] = (
@@ -23,6 +25,60 @@ JUDGE_TYPES: tuple[str, ...] = (
     "conclusion",
 )
 CONCLUSION_JUDGE_TYPE = "conclusion"
+
+# Three-lane PRD eval stages (docs/ideas/three-lane-prd-eval.md).  They are a
+# separate prompt family: their versions are pinned per stage so rewording the
+# cross-compare rubric never re-identifies channel or per-lane blind results.
+LANE_PRD_FIDELITY_JUDGE_TYPE = "lane_prd_fidelity"
+CROSS_COMPARE_JUDGE_TYPE = "cross_compare"
+LANE_JUDGE_TYPES: tuple[str, ...] = (
+    LANE_PRD_FIDELITY_JUDGE_TYPE,
+    CROSS_COMPARE_JUDGE_TYPE,
+)
+LANE_PRD_FIDELITY_PROMPT_VERSION = "lane-prd-eval-prompts.v1"
+CROSS_COMPARE_PROMPT_VERSION = "cross-compare-prompts.v1"
+
+CHANNEL_EVALUATION_CONTRACT = "channel-prd-eval.v1"
+LANE_EVALUATION_CONTRACT = "three-lane-prd-eval.v1"
+
+_STAGE_PROMPT_VERSIONS: dict[str, str] = {
+    LANE_PRD_FIDELITY_JUDGE_TYPE: LANE_PRD_FIDELITY_PROMPT_VERSION,
+    CROSS_COMPARE_JUDGE_TYPE: CROSS_COMPARE_PROMPT_VERSION,
+}
+
+
+def prompt_version_for_stage(judge_type: str) -> str:
+    """Pin the prompt identity of every stage; lane stages version apart."""
+
+    return _STAGE_PROMPT_VERSIONS.get(judge_type, EVALUATION_PROMPT_VERSION)
+
+
+def require_stage_prompt_version(judge_type: str, packet: Any) -> str:
+    """Resolve a packet's prompt version, rejecting cross-stage claims.
+
+    Packet identity binds the prompt version; a packet that claims a foreign
+    version must never mint a request under this stage.
+    """
+
+    get = packet.get if hasattr(packet, "get") else lambda _key, default=None: default
+    expected = prompt_version_for_stage(judge_type)
+    claimed = str(get("prompt_version") or "") or expected
+    if claimed != expected:
+        raise ValueError(
+            f"packet prompt_version {claimed!r} does not match "
+            f"stage {judge_type} ({expected!r})"
+        )
+    return expected
+
+
+def evaluation_contract_for_stage(judge_type: str) -> str:
+    """Route records/events of lane stages to the eval-run contract family."""
+
+    return (
+        LANE_EVALUATION_CONTRACT
+        if judge_type in LANE_JUDGE_TYPES
+        else CHANNEL_EVALUATION_CONTRACT
+    )
 
 SCORE_RUBRIC = """\
 角色绑定评估统一使用 0–4 分整数：
@@ -288,16 +344,212 @@ EVALUATION_PROMPTS: dict[str, str] = {
     "conclusion": CONCLUSION_PROMPT,
 }
 
+
+LANE_SCORE_RUBRIC = """\
+Blind per-PRD scoring uses 0–4 integers per dimension:
+- 4: no substantive defect;
+- 3: minor defects that do not block use;
+- 2: obvious defects, partially satisfying the prompt;
+- 1: severe defects, essentially unusable;
+- 0: entirely missing or off-topic.
+Every scored dimension must cite refs from allowed_evidence_refs. Missing
+evidence means score=null with status=evidence_missing. Confidence below 0.60
+means status=abstain with score=null. Judge how well the PRD satisfies the
+prompt's requirements, never its format, template, or length.
+"""
+
+LANE_PRD_FIDELITY_PROMPT = """\
+You are an independent blind PRD quality evaluator. You see exactly one PRD
+answering one prompt. You do not know whether other PRDs exist, and you must
+not speculate about how or by whom this PRD was produced. Score how well the
+PRD satisfies the prompt's requirements; format, template, and stylistic
+differences are irrelevant and must not affect the score.
+
+Entry prompt: {prompt_statement}
+PRD under review: {prd_document}
+Allowed evidence: {allowed_evidence_refs}
+
+Score exactly these four dimensions, each once, with equal weight:
+- coverage: every requirement explicitly stated in the prompt is answered by
+  the PRD. Check the prompt's requirement list item by item; each omitted
+  explicit requirement costs score; full coverage without unrelated scope
+  earns a high score.
+- fidelity: the PRD stays faithful to the prompt and never widens or rewrites
+  its scope. Unsupported major additions, changed constraints, or distorted
+  intent cost score.
+- actionability: a developer can start work directly from this PRD.
+  Acceptance criteria are checkable (step -> verify style), boundaries and
+  non-goals are stated, dependencies and risks are identified.
+- structure: the PRD is complete and self-consistent as a document:
+  background, goals, scope, feature descriptions, acceptance, and risks are
+  present, without internal contradictions or unresolved placeholders.
+
+Return exactly one JSON object with EXACTLY these fields:
+{{
+  "schema_version": "lane_prd_fidelity_result.v1",
+  "judge_type": "lane_prd_fidelity",
+  "score_scale": "0-4",
+  "dimensions": [
+    {{
+      "dimension_id": "coverage|fidelity|actionability|structure",
+      "status": "scored|evidence_missing|abstain",
+      "score": <integer 0-4 or null>,
+      "confidence": <number 0.0-1.0>,
+      "evidence_refs": ["<refs from allowed evidence>"],
+      "rationale": "<covered, omitted, contradicted or unsupported findings>",
+      "verdict": "aligned|partial|deviated"
+    }}
+  ],
+  "differences": [],
+  "missing_evidence": []
+}}
+""" + "\n" + LANE_SCORE_RUBRIC
+
+
+CROSS_COMPARE_PROMPT = """\
+You are the independent cross-comparison judge for anonymized PRD candidates.
+You receive one entry prompt, {candidate_count} de-identified PRDs labeled
+{candidate_labels}, and each candidate's blind per-dimension scores. You never
+learn which production lane produced a candidate; do not speculate about it.
+Decisiveness is required: ties are not allowed. Only when two candidates are
+genuinely indistinguishable on a dimension may you mark the pair "similar",
+and "similar" never counts as an agreement conclusion.
+
+Entry prompt: {prompt_statement}
+Candidates (label, PRD body, blind score summary): {candidates}
+Allowed evidence: {allowed_evidence_refs}
+
+Work in four steps:
+1. Pairwise matrix: for every dimension (coverage, fidelity, actionability,
+   structure) and every pair of candidates, decide the winner, the advantage
+   margin (large|medium|small), and one short reason. A decided pair needs a
+   confidence of 1-4; use 0 only when comparison is impossible, and then the
+   winner must be "similar" with margin "none".
+2. Dimension ranking: combine each dimension's pair outcomes into one strict
+   ranking of all candidates (best first). The ranking must agree with your
+   own pairwise decisions. Rankings must stay consistent with the blind
+   per-dimension scores; where your close reading disagrees with a blind
+   score, record the conflict explicitly and arbitrate it with paragraph-level
+   evidence instead of silently picking one.
+3. Difference attribution: for every decided pair on every dimension, cite
+   the concrete sections and verbatim excerpts of BOTH PRDs that cause the
+   difference, and classify the cause as coverage_gap, scope_drift,
+   acceptance_missing, or ambiguity (mapped to the four dimensions).
+4. Recommendation: the overall ranking follows dimension votes (winning a
+   dimension earns one vote; ties break by average blind score). If your
+   recommendation intentionally diverges from the vote order, explain why in
+   divergence_explanation. List the top candidate's key gaps over every other
+   candidate; each gap must trace to attribution evidence.
+
+Confidence uses 0-4 integers: 4 = clear and uncontroversial; 3 = clear but
+small gap; 2 = winner exists but rests on subjective trade-offs; 1 =
+candidates are essentially equivalent; 0 = cannot compare (insufficient
+information or both too poor).
+
+Return exactly one JSON object with EXACTLY these fields:
+{{
+  "schema_version": "cross_compare_result.v1",
+  "judge_type": "cross_compare",
+  "status": "scored|evidence_missing",
+  "score_scale": "0-4",
+  "candidates": ["<labels in the order supplied above>"],
+  "dimension_rankings": [
+    {{
+      "dimension_id": "coverage|fidelity|actionability|structure",
+      "ranking": ["<best label first>"],
+      "confidence": <integer 0-4>,
+      "evidence_refs": ["<refs from allowed evidence>"],
+      "rationale": "<why this order>"
+    }}
+  ],
+  "pairwise": [
+    {{
+      "pair": "A-B",
+      "dimension_id": "coverage|fidelity|actionability|structure",
+      "winner": "<one label of the pair>|similar",
+      "margin": "large|medium|small|none",
+      "confidence": <integer 0-4>,
+      "evidence_refs": ["<refs from allowed evidence>"],
+      "rationale": "<one-sentence reason>"
+    }}
+  ],
+  "attributions": [
+    {{
+      "dimension_id": "coverage|fidelity|actionability|structure",
+      "pair": "A-B",
+      "category": "coverage_gap|scope_drift|acceptance_missing|ambiguity",
+      "summary": "<section + verbatim excerpt of both PRDs>",
+      "evidence_refs": ["<both candidates' PRD refs>"]
+    }}
+  ],
+  "conflicts": [
+    {{
+      "dimension_id": "coverage|fidelity|actionability|structure",
+      "blind_favorite": "<label the blind score prefers>",
+      "pairwise_favorite": "<label your ranking prefers>",
+      "resolution": "<arbitration conclusion with paragraph evidence>",
+      "evidence_refs": ["<refs from allowed evidence>"]
+    }}
+  ],
+  "recommendation": {{
+    "ranking": ["<best label first>"],
+    "top": "<best label>",
+    "confidence": <integer 0-4>,
+    "rationale": "<one-sentence reason>",
+    "divergence_explanation": "<required when ranking ignores the vote order>",
+    "key_gaps": [
+      {{"candidate": "<non-top label>", "gap": "<key gap vs the top PRD>",
+        "evidence_refs": ["<refs from allowed evidence>"]}}
+    ]
+  }},
+  "missing_evidence": []
+}}
+"""
+
+
+LANE_EVALUATION_PROMPTS: dict[str, str] = {
+    LANE_PRD_FIDELITY_JUDGE_TYPE: LANE_PRD_FIDELITY_PROMPT,
+    CROSS_COMPARE_JUDGE_TYPE: CROSS_COMPARE_PROMPT,
+}
+
+
+def prompt_for_stage(judge_type: str) -> str:
+    """Return the pinned prompt template of any supported stage."""
+
+    try:
+        return EVALUATION_PROMPTS[judge_type]
+    except KeyError:
+        try:
+            return LANE_EVALUATION_PROMPTS[judge_type]
+        except KeyError as exc:
+            raise KeyError(f"unknown evaluation prompt stage: {judge_type}") from exc
+
+
 __all__ = [
+    "CHANNEL_EVALUATION_CONTRACT",
     "CONCLUSION_JUDGE_TYPE",
     "CONCLUSION_PROMPT",
     "CONTRIBUTION_PROMPT",
+    "CROSS_COMPARE_JUDGE_TYPE",
+    "CROSS_COMPARE_PROMPT",
+    "CROSS_COMPARE_PROMPT_VERSION",
     "DISCUSSION_PROMPT",
     "EVALUATION_PROMPT_VERSION",
     "EVALUATION_PROMPTS",
     "JUDGE_TYPES",
+    "LANE_EVALUATION_CONTRACT",
+    "LANE_EVALUATION_PROMPTS",
+    "LANE_JUDGE_TYPES",
+    "LANE_PRD_FIDELITY_JUDGE_TYPE",
+    "LANE_PRD_FIDELITY_PROMPT",
+    "LANE_PRD_FIDELITY_PROMPT_VERSION",
+    "LANE_SCORE_RUBRIC",
     "PRD_FIDELITY_PROMPT",
     "SCORE_RUBRIC",
     "SYSTEM_PROMPT",
     "TASK_TYPE_PROMPT",
+    "evaluation_contract_for_stage",
+    "prompt_for_stage",
+    "prompt_version_for_stage",
+    "require_stage_prompt_version",
 ]
