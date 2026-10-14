@@ -113,10 +113,13 @@ def _drive_lane(
         )
         if channel_shared_state and lane == LANE_CHANNEL:
             # Run the channel on the workspace ledger so a watching Web
-            # dashboard shows the discussion live; scope by per-trial id.
-            trial = eval_run.parse_eval_run_id(run_id)[1]
+            # dashboard shows the discussion live; scope by per-trial id and
+            # name the channel after the run so multiple trials stay
+            # distinguishable in the channel list.
+            digest, trial = eval_run.parse_eval_run_id(run_id)
             lane_kwargs["state_dir"] = state_dir
             lane_kwargs["channel_id"] = f"eval-prd-t{trial}"
+            lane_kwargs["channel_name"] = f"Eval {digest[:8]} · trial-{trial}"
         result = run_lane(
             lane,
             lane_dir=eval_run.lane_dir(run_dir, lane),

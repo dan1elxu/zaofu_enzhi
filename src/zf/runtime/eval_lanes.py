@@ -365,6 +365,7 @@ def run_channel_lane(
     config: ZfConfig | None = None,
     template_id: str = "auto",
     channel_id: str = "eval-prd",
+    channel_name: str = "Eval PRD",
     state_dir: Path | None = None,
     poll_interval_s: float = DEFAULT_CHANNEL_POLL_INTERVAL_S,
     sleep_fn: Callable[[float], None] = time.sleep,
@@ -410,7 +411,7 @@ def run_channel_lane(
         payload={
             "template_id": template_id,
             "channel_id": channel_id,
-            "name": "Eval PRD",
+            "name": channel_name,
             "message": prompt,
             "overrides": {
                 "backend": _CHANNEL_BACKENDS.get(backend, backend),

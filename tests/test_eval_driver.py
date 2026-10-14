@@ -608,6 +608,7 @@ def test_drive_lane_channel_shared_state_injects_workspace_ledger(tmp_path: Path
     )
     assert captured["state_dir"] == state_dir
     assert captured["channel_id"] == "eval-prd-t3"
+    assert captured["channel_name"] == f"Eval {manifest.prompt_digest[:8]} · trial-3"
 
 
 def test_drive_lane_channel_isolated_default_unchanged(tmp_path: Path, monkeypatch) -> None:
