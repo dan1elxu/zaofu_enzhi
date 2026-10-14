@@ -1,4 +1,8 @@
-"""zf eval preset — static `zf.yaml` evaluation before real E2E (doc 68 S4)."""
+"""zf eval preset/output — static `zf.yaml` evaluation before real E2E (doc 68 S4).
+
+The ``eval`` command group is owned by ``zf.cli.eval`` (three-lane PRD eval);
+this module's subcommands attach to that shared group via ``register_static``.
+"""
 
 from __future__ import annotations
 
@@ -9,9 +13,12 @@ from pathlib import Path
 
 
 def register(subparsers: argparse._SubParsersAction) -> None:
-    parser = subparsers.add_parser("eval", help="Static evaluation of zaofu config")
-    sub = parser.add_subparsers(dest="eval_cmd")
+    from zf.cli import eval as eval_cli
 
+    eval_cli.register(subparsers)
+
+
+def register_static(sub: argparse._SubParsersAction) -> None:
     preset = sub.add_parser("preset", help="Statically evaluate a zf.yaml preset")
     preset.add_argument("yaml_path", help="Path to a zf.yaml to evaluate")
     preset.add_argument("--format", choices=["text", "json"], default="text")
@@ -30,13 +37,6 @@ def register(subparsers: argparse._SubParsersAction) -> None:
     output.add_argument("--timeout", type=int, default=1800)
     output.add_argument("--state-dir")
     output.set_defaults(func=run_eval_output)
-
-    parser.set_defaults(func=lambda args: _show_help(parser))
-
-
-def _show_help(parser: argparse.ArgumentParser) -> int:
-    parser.print_help()
-    return 0
 
 
 def run_eval_preset(args: argparse.Namespace) -> int:

@@ -3,7 +3,7 @@
 > Generated from `src/zf/cli/main.py::build_parser()`; do not edit by hand.
 > Regenerate with `uv run python scripts/manual-docs.py generate`.
 
-The parser currently exposes **71** top-level families and **301** addressable command paths.
+The parser currently exposes **71** top-level families and **304** addressable command paths.
 Descriptions come directly from argparse help text.
 
 ## `zf agents`
@@ -218,13 +218,16 @@ Emit an event
 
 ## `zf eval`
 
-Static evaluation of zaofu config
+Three-lane PRD eval runs (run/list/show) and static evaluation
 
 | Command | Parser description |
 |---|---|
-| `zf eval` | Static evaluation of zaofu config |
+| `zf eval` | Three-lane PRD eval runs (run/list/show) and static evaluation |
+| `zf eval list` | List eval runs grouped by prompt digest |
 | `zf eval output` | Independently evaluate a frozen text output |
 | `zf eval preset` | Statically evaluate a zf.yaml preset |
+| `zf eval run` | Run a three-lane PRD eval run-group |
+| `zf eval show` | Show one eval run's status and conclusion |
 
 ## `zf evaluation-regrade`
 

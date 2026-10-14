@@ -82,13 +82,6 @@ _KNOWN_ORPHAN_RUNTIME_MODULES = {
     # bridge 落地 posted→sent 桥接时移除本条并接真实消费者。
     # (cursor/check_preflight 已于 c106086 真接线,按双向门移出。)
     "agent_mailbox",
-    # Three-lane PRD eval (docs/ideas/three-lane-prd-eval.md Phase A1):
-    # state model lands first; defer trigger = Phase B1 eval_driver/CLI
-    # wiring imports it, at which point remove this entry.
-    "eval_run",
-    # Three-lane PRD eval (Phase A3): lane launchers; defer trigger =
-    # Phase B1 eval_driver imports run_lane, then remove this entry.
-    "eval_lanes",
 }
 
 
