@@ -285,7 +285,7 @@ function EvalTrialRow({
         ))}
       </span>
       <span className="eval-trial-rec">
-        {trial.recommendation?.length ? `推荐 ${trial.recommendation.join(" > ")}` : ""}
+        {trial.recommendation?.length ? `推荐 ${trial.recommendation.join(" → ")}` : ""}
       </span>
       <span className="muted">{formatEvalTimestamp(trial.started_at)}</span>
     </button>
@@ -371,12 +371,15 @@ function EvalRunDetailView({
       <EvalScoreCard detail={detail} />
       <CrossCompareCard crossCompare={detail.evaluation?.cross_compare} labelMap={labelMap} />
       <section className="eval-card" data-testid="eval-conclusion">
-        <h3>结论报告</h3>
-        {detail.report_markdown ? (
-          <MarkdownText className="eval-report-body" content={detail.report_markdown} />
-        ) : (
-          <p className="muted">报告将在评测完成后生成。</p>
-        )}
+        <details className="eval-report-fold">
+          <summary>
+            <h3>结论报告</h3>
+            <span className="muted">{detail.report_markdown ? "点击展开完整报告" : "报告将在评测完成后生成"}</span>
+          </summary>
+          {detail.report_markdown ? (
+            <MarkdownText className="eval-report-body" content={detail.report_markdown} />
+          ) : null}
+        </details>
       </section>
     </div>
   );
@@ -475,6 +478,16 @@ function CrossCompareCard({
           {evalLaneStatusLabel(crossCompare.status)}
         </span>
       </div>
+      {Object.keys(labelMap).length ? (
+        <p className="eval-label-legend muted" data-testid="eval-label-legend">
+          盲评标签对照：
+          {Object.entries(labelMap)
+            .sort(([a], [b]) => a.localeCompare(b))
+            .map(([label, lane]) => `${label} = ${evalLaneLabel(lane)}`)
+            .join(" · ")}
+          （judge 评分时不知道标签对应的 lane，排名确定后才揭示）
+        </p>
+      ) : null}
       <h4 className="eval-sub-head">推荐排名</h4>
       {recommendation.length ? (
         <ol className="eval-rec-ranking" data-testid="eval-rec-ranking">

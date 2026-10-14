@@ -140,6 +140,40 @@
   color: var(--text-tertiary);
 }
 
+.eval-label-legend {
+  margin: 2px 0 10px;
+  font-size: var(--type-body);
+}
+
+.eval-report-fold > summary {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  cursor: pointer;
+  list-style: none;
+}
+
+.eval-report-fold > summary::-webkit-details-marker {
+  display: none;
+}
+
+.eval-report-fold > summary::after {
+  content: "▸";
+  color: var(--text-tertiary);
+}
+
+.eval-report-fold[open] > summary::after {
+  content: "▾";
+}
+
+.eval-report-fold > summary h3 {
+  margin: 0;
+}
+
+.eval-report-body {
+  margin-top: 10px;
+}
+
 .eval-status-pill.tone-ok {
   color: var(--ok-strong);
   border-color: color-mix(in oklab, var(--ok) 45%, var(--line));

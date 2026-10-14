@@ -209,7 +209,7 @@ test("run list groups trials by prompt digest and opens the run detail", async (
   await expect(rows.nth(1)).toContainText("trial-1");
   await expect(rows.nth(1)).toContainText("超时");
   await expect(rows.nth(1)).toContainText("Terminal 3.5");
-  await expect(rows.nth(1)).toContainText("推荐 A > B");
+  await expect(rows.nth(1)).toContainText("推荐 A → B");
   await expect(rows.nth(0)).toContainText("运行中");
   await expect(rows.nth(0).getByTestId("eval-reuse-badge")).toHaveText("复用 trial-1 产物");
   await expect(rows.nth(1).getByTestId("eval-reuse-badge")).toHaveCount(0);
@@ -248,6 +248,8 @@ test("run list groups trials by prompt digest and opens the run detail", async (
 
   const crossCompare = detail.getByTestId("eval-cross-compare");
   await expect(crossCompare).toContainText("推荐排名");
+  await expect(crossCompare.getByTestId("eval-label-legend")).toContainText("A = Terminal");
+  await expect(crossCompare.getByTestId("eval-label-legend")).toContainText("B = Kanban");
   const recRanking = crossCompare.getByTestId("eval-rec-ranking");
   await expect(recRanking.locator("li")).toHaveCount(2);
   await expect(recRanking).toContainText("Terminal（A）");
@@ -285,7 +287,11 @@ test("run list groups trials by prompt digest and opens the run detail", async (
 
   await expect(crossCompare.getByTestId("eval-conflicts")).toContainText("CONFLICT_MARKER");
 
-  await expect(detail.getByTestId("eval-conclusion")).toContainText("REPORT_MARKER");
+  const reportFold = detail.getByTestId("eval-conclusion");
+  await expect(reportFold).toContainText("结论报告");
+  await expect(reportFold.locator(".eval-report-body")).not.toBeAttached();
+  await reportFold.locator("summary").click();
+  await expect(reportFold.locator(".eval-report-body")).toContainText("REPORT_MARKER");
 
   await detail.getByTestId("eval-back").click();
   await expect(page.getByTestId("eval-run-list")).toBeVisible();
