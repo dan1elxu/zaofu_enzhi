@@ -9,6 +9,7 @@ import {
   evalRunTone,
   evalScoreDimensions,
   evalTaskTypeLabel,
+  evalArtifactsSourceLabel,
   formatEvalChecklist,
   formatEvalConfidence,
   formatEvalScore,
@@ -185,6 +186,18 @@ assert(
 assert(formatEvalChecklist(null) === "", "null checklist is hidden");
 assert(formatEvalChecklist(undefined) === "", "missing checklist is hidden");
 assert(formatEvalChecklist({ total: 0, pass: 0, partial: 0, missing: 0 }) === "", "empty checklist is hidden");
+
+assert(
+  evalArtifactsSourceLabel("ab9f2a6bc286-trial-1") === "复用 trial-1 产物",
+  "reuse label parses the trial suffix",
+);
+assert(
+  evalArtifactsSourceLabel("some-run-id") === "复用 some-run-id 产物",
+  "reuse label falls back to the raw source id",
+);
+assert(evalArtifactsSourceLabel("") === "", "empty source is hidden");
+assert(evalArtifactsSourceLabel(null) === "", "null source is hidden");
+assert(evalArtifactsSourceLabel(undefined) === "", "missing source is hidden");
 
 {
   const grouped = groupEvalKeyGaps(

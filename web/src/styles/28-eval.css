@@ -128,6 +128,18 @@
   white-space: nowrap;
 }
 
+.eval-reuse-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border: 1px dashed var(--line);
+  border-radius: 999px;
+  font-size: var(--type-body);
+  line-height: 1.4;
+  white-space: nowrap;
+  color: var(--text-tertiary);
+}
+
 .eval-status-pill.tone-ok {
   color: var(--ok-strong);
   border-color: color-mix(in oklab, var(--ok) 45%, var(--line));

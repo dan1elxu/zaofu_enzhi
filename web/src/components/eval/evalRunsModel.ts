@@ -233,6 +233,15 @@ export function formatEvalChecklist(checklist: EvalLaneChecklist | null | undefi
   return parts.join(" · ");
 }
 
+export function evalArtifactsSourceLabel(source: string | null | undefined): string {
+  // Trials whose lane PRDs were copied from an earlier trial for re-judging
+  // must be visibly marked; otherwise they look like fresh generations.
+  const value = String(source ?? "").trim();
+  if (!value) return "";
+  const match = value.match(/-trial-(\d+)$/);
+  return `复用 ${match ? `trial-${match[1]}` : value} 产物`;
+}
+
 export interface EvalKeyGapGroup {
   lane: string;
   title: string;

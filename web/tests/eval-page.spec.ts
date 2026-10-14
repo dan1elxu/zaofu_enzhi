@@ -50,6 +50,7 @@ function listPayload(runStatus = "completed") {
             },
             composite_scores: null,
             recommendation: null,
+            artifacts_source: RUN_ID,
           },
         ],
       },
@@ -210,6 +211,8 @@ test("run list groups trials by prompt digest and opens the run detail", async (
   await expect(rows.nth(1)).toContainText("Terminal 3.5");
   await expect(rows.nth(1)).toContainText("推荐 A > B");
   await expect(rows.nth(0)).toContainText("运行中");
+  await expect(rows.nth(0).getByTestId("eval-reuse-badge")).toHaveText("复用 trial-1 产物");
+  await expect(rows.nth(1).getByTestId("eval-reuse-badge")).toHaveCount(0);
 
   await rows.nth(1).click();
   await expect(page.getByTestId("eval-run-detail")).toBeVisible();

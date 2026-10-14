@@ -2070,6 +2070,7 @@ export interface EvalRunTrialSummary {
   lanes: Record<string, EvalLaneStatus>;
   composite_scores?: Record<string, number | null> | null;
   recommendation?: string[] | null;
+  artifacts_source?: string | null;
 }
 
 export interface EvalRunGroup {
@@ -2150,6 +2151,7 @@ export interface EvalRunDetail {
   prompt_text?: string;
   trial: number;
   status: string;
+  artifacts_source?: string | null;
   lanes: Record<string, EvalRunLaneDetail>;
   evaluation?: EvalRunEvaluation;
   label_map?: Record<string, string>;

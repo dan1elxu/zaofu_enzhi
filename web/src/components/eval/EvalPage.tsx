@@ -12,6 +12,7 @@ import type { LiveState } from "../../app/sharedTypes";
 import { MarkdownText } from "../agent-session/MarkdownText";
 import {
   errorMessage,
+  evalArtifactsSourceLabel,
   evalDimensionLabel,
   evalLaneLabel,
   evalLaneStatusLabel,
@@ -262,6 +263,11 @@ function EvalTrialRow({
       <span className={`eval-status-pill tone-${evalRunTone(trial.status)}`}>
         {evalRunStatusLabel(trial.status)}
       </span>
+      {trial.artifacts_source ? (
+        <span className="eval-reuse-badge" data-testid="eval-reuse-badge">
+          {evalArtifactsSourceLabel(trial.artifacts_source)}
+        </span>
+      ) : null}
       <span className="eval-trial-lanes">
         {orderedEvalLanes(trial.lanes).map(({ lane, state }) => (
           <span
@@ -305,6 +311,11 @@ function EvalRunDetailView({
         <span className={`eval-status-pill tone-${evalRunTone(detail.status)}`}>
           {evalRunStatusLabel(detail.status)}
         </span>
+        {detail.artifacts_source ? (
+          <span className="eval-reuse-badge" data-testid="eval-detail-reuse-badge">
+            {evalArtifactsSourceLabel(detail.artifacts_source)} · 仅重新评分
+          </span>
+        ) : null}
         <span className="mono muted">{detail.run_id}</span>
       </header>
       <section className="eval-card" data-testid="eval-prompt">
