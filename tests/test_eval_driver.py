@@ -9,7 +9,7 @@ from collections import Counter
 from pathlib import Path
 
 from zf.core.events import EventLog, EventWriter
-from zf.runtime import channel_moderator, eval_run
+from zf.runtime import channel_moderator, eval_lane_driver, eval_run
 from zf.runtime import eval_driver
 from zf.runtime.eval_driver import run_eval, run_summary
 from zf.runtime.evaluation_artifacts import report_path
@@ -465,7 +465,7 @@ def test_run_eval_resumes_completed_lanes_without_rerun(
     def _boom(*args, **kwargs):
         raise AssertionError("run_lane must not be called for terminal lanes")
 
-    monkeypatch.setattr(eval_driver, "run_lane", _boom)
+    monkeypatch.setattr(eval_lane_driver, "run_lane", _boom)
     calls: list[str] = []
     result = run_eval(**_run_kwargs(state_dir, tmp_path, calls))[0]
     assert result.status == "completed"
@@ -573,3 +573,65 @@ def test_cli_eval_bare_group_prints_help(capsys) -> None:
 
     assert main(["eval"]) == 0
     assert "run" in capsys.readouterr().out
+
+
+def test_drive_lane_channel_shared_state_injects_workspace_ledger(tmp_path: Path, monkeypatch) -> None:
+    from zf.runtime.eval_lanes import LaneResult
+
+    captured: dict = {}
+
+    def fake_run_lane(lane, **kwargs):
+        captured.update(kwargs)
+        return LaneResult(
+            lane=lane, ok=False, status="failed", reason="stop",
+            started_at="", finished_at="", detail={},
+        )
+
+    monkeypatch.setattr(eval_lane_driver, "run_lane", fake_run_lane)
+    state_dir = tmp_path / "state"
+    manifest = eval_run.start_eval_run(
+        state_dir, prompt_text="p", prompt_version="v", trial=3,
+        lanes=["channel"], writer=None,
+    )
+    run_dir = eval_run.eval_run_dir(
+        state_dir, prompt_digest=manifest.prompt_digest, trial=3
+    )
+    eval_lane_driver._drive_lane(
+        state_dir=state_dir, run_id=manifest.run_id, run_dir=run_dir,
+        lane="channel", prompt_text="p", backend="codex-headless",
+        channel_backend="", channel_shared_state=True, timeout_s=1.0,
+        writer=None, lane_overrides=None,
+    )
+    assert captured["state_dir"] == state_dir
+    assert captured["channel_id"] == "eval-prd-t3"
+
+
+def test_drive_lane_channel_isolated_default_unchanged(tmp_path: Path, monkeypatch) -> None:
+    from zf.runtime.eval_lanes import LaneResult
+
+    captured: dict = {}
+
+    def fake_run_lane(lane, **kwargs):
+        captured.update(kwargs)
+        return LaneResult(
+            lane=lane, ok=False, status="failed", reason="stop",
+            started_at="", finished_at="", detail={},
+        )
+
+    monkeypatch.setattr(eval_lane_driver, "run_lane", fake_run_lane)
+    state_dir = tmp_path / "state"
+    manifest = eval_run.start_eval_run(
+        state_dir, prompt_text="p", prompt_version="v", trial=1,
+        lanes=["channel"], writer=None,
+    )
+    run_dir = eval_run.eval_run_dir(
+        state_dir, prompt_digest=manifest.prompt_digest, trial=1
+    )
+    eval_lane_driver._drive_lane(
+        state_dir=state_dir, run_id=manifest.run_id, run_dir=run_dir,
+        lane="channel", prompt_text="p", backend="codex-headless",
+        channel_backend="", channel_shared_state=False, timeout_s=1.0,
+        writer=None, lane_overrides=None,
+    )
+    assert "state_dir" not in captured
+    assert "channel_id" not in captured

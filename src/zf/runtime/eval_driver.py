@@ -18,7 +18,6 @@ from __future__ import annotations
 
 import json
 import time
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Iterable
@@ -26,13 +25,8 @@ from typing import Any, Callable, Iterable
 from zf.core.events import EventLog, EventWriter
 from zf.core.state.atomic_io import atomic_write_text
 from zf.runtime import eval_run
-from zf.runtime.eval_lanes import (
-    DEFAULT_LANE_TIMEOUT_S,
-    LANE_CHANNEL,
-    LaneResult,
-    canonical_lane_id,
-    run_lane,
-)
+from zf.runtime.eval_lane_driver import _drive_lanes
+from zf.runtime.eval_lanes import DEFAULT_LANE_TIMEOUT_S, canonical_lane_id
 from zf.runtime.evaluation_artifacts import (
     read_judge_result,
     report_path,
@@ -107,6 +101,7 @@ def run_eval(
     lanes: Iterable[str] = eval_run.DEFAULT_LANES,
     backend: str = "",
     channel_backend: str = "",
+    channel_shared_state: bool = False,
     timeout_s: float = DEFAULT_LANE_TIMEOUT_S,
     prompt_version: str = eval_run.DEFAULT_PROMPT_VERSION,
     state_dir: Path,
@@ -137,6 +132,7 @@ def run_eval(
                 prompt_version=prompt_version, prompt_digest=digest,
                 trial=trial, lane_names=lane_names, backend=backend,
                 channel_backend=channel_backend, timeout_s=timeout_s,
+                channel_shared_state=channel_shared_state,
                 config=config, project_root=project_root, writer=writer,
                 judge_backend=judge_backend, lane_overrides=lane_overrides,
             ))
@@ -164,6 +160,7 @@ def _run_trial(
     lane_names: list[str],
     backend: str,
     channel_backend: str,
+    channel_shared_state: bool,
     timeout_s: float,
     config: Any | None,
     project_root: Path | None,
@@ -185,6 +182,7 @@ def _run_trial(
     _drive_lanes(
         state_dir=state_dir, run_id=run_id, run_dir=run_dir,
         prompt_text=prompt_text, backend=backend, channel_backend=channel_backend,
+        channel_shared_state=channel_shared_state,
         timeout_s=timeout_s, writer=writer, lane_overrides=lane_overrides,
     )
     manifest = eval_run.load_manifest(state_dir, run_id)
@@ -253,142 +251,6 @@ def _normalize_lanes(lanes: Iterable[str]) -> list[str]:
     if not names:
         raise ValueError("eval run requires at least one lane")
     return names
-
-
-def _lane_kwargs(
-    lane: str,
-    *,
-    backend: str,
-    channel_backend: str,
-    lane_overrides: dict[str, dict[str, Any]] | None,
-) -> dict[str, Any]:
-    kwargs: dict[str, Any] = {}
-    if lane == LANE_CHANNEL:
-        selected = channel_backend or backend or "claude-headless"
-        kwargs["backend"] = selected
-    elif backend:
-        kwargs["backend"] = backend
-    kwargs.update((lane_overrides or {}).get(lane) or {})
-    return kwargs
-
-
-def _drive_lanes(
-    *,
-    state_dir: Path,
-    run_id: str,
-    run_dir: Path,
-    prompt_text: str,
-    backend: str,
-    channel_backend: str,
-    timeout_s: float,
-    writer: EventWriter,
-    lane_overrides: dict[str, dict[str, Any]] | None,
-) -> None:
-    manifest = eval_run.load_manifest(state_dir, run_id)
-    open_lanes = [
-        lane for lane, lane_state in manifest.lanes.items()
-        if lane_state.status not in eval_run.LANE_TERMINAL_STATUSES
-    ]
-    if not open_lanes:
-        return
-
-    def work(lane: str) -> None:
-        _drive_lane(
-            state_dir=state_dir,
-            run_id=run_id,
-            run_dir=run_dir,
-            lane=lane,
-            prompt_text=prompt_text,
-            backend=backend,
-            channel_backend=channel_backend,
-            timeout_s=timeout_s,
-            writer=writer,
-            lane_overrides=lane_overrides,
-        )
-
-    with ThreadPoolExecutor(max_workers=len(open_lanes), thread_name_prefix="zf-eval-lane") as pool:
-        list(pool.map(work, open_lanes))
-
-
-def _drive_lane(
-    *,
-    state_dir: Path,
-    run_id: str,
-    run_dir: Path,
-    lane: str,
-    prompt_text: str,
-    backend: str,
-    channel_backend: str,
-    timeout_s: float,
-    writer: EventWriter,
-    lane_overrides: dict[str, dict[str, Any]] | None,
-) -> None:
-    try:
-        lane_state = eval_run.load_manifest(state_dir, run_id).lanes[lane]
-        if lane_state.status in eval_run.LANE_TERMINAL_STATUSES:
-            return
-        prd = eval_run.lane_prd_path(run_dir, lane)
-        if lane_state.status == eval_run.LANE_STATUS_PENDING:
-            eval_run.mark_lane_running(state_dir, run_id, lane)
-        elif (
-            lane_state.status == eval_run.LANE_STATUS_RUNNING
-            and prd.is_file()
-            and prd.read_text(encoding="utf-8").strip()
-        ):
-            # A previous driver died after the lane transcribed its PRD but
-            # before completing the lane; bind the existing artifact instead
-            # of re-running the provider.
-            eval_run.complete_lane(
-                state_dir, run_id, lane,
-                status=eval_run.LANE_STATUS_PRD_FROZEN, writer=writer,
-            )
-            return
-        result = run_lane(
-            lane,
-            lane_dir=eval_run.lane_dir(run_dir, lane),
-            prompt=prompt_text,
-            timeout_s=timeout_s,
-            **_lane_kwargs(
-                lane, backend=backend, channel_backend=channel_backend,
-                lane_overrides=lane_overrides,
-            ),
-        )
-        _complete_lane_from_result(state_dir, run_id, lane, result, writer=writer)
-    except Exception as exc:
-        try:
-            eval_run.complete_lane(
-                state_dir, run_id, lane,
-                status=eval_run.LANE_STATUS_FAILED,
-                error=f"driver:{type(exc).__name__}: {exc}"[:300],
-                writer=writer,
-            )
-        except ValueError:
-            pass
-
-
-def _complete_lane_from_result(
-    state_dir: Path,
-    run_id: str,
-    lane: str,
-    result: LaneResult,
-    *,
-    writer: EventWriter,
-) -> None:
-    if result.ok:
-        eval_run.complete_lane(
-            state_dir, run_id, lane,
-            status=eval_run.LANE_STATUS_PRD_FROZEN, writer=writer,
-        )
-        return
-    error = (
-        eval_run.LANE_ERROR_TIMEOUT
-        if result.status == "timeout"
-        else (result.reason or result.status or "failed")
-    )
-    eval_run.complete_lane(
-        state_dir, run_id, lane,
-        status=eval_run.LANE_STATUS_FAILED, error=error[:300], writer=writer,
-    )
 
 
 # ---------------------------------------------------------------- evaluation

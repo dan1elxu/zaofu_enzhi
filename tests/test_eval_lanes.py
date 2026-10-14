@@ -7,7 +7,7 @@ import textwrap
 import time
 from pathlib import Path
 
-from zf.core.events import EventLog
+from zf.core.events import EventLog, EventWriter
 from zf.runtime import channel_moderator, eval_lanes
 from zf.runtime.channel_dispatch_claim import ChannelDispatchResult
 from zf.runtime.eval_lanes import (
@@ -215,3 +215,37 @@ def test_run_lane_dispatch_and_alias(tmp_path: Path, monkeypatch) -> None:
     assert canonical_lane_id("channel-auto") == "channel"
     assert canonical_lane_id("kanban") == "kanban"
     assert canonical_lane_id("bogus") == ""
+
+
+def test_channel_lane_shared_state_dir_scopes_by_channel(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(
+        channel_moderator, "agent_json_turn", _fake_moderator_json_turn
+    )
+    shared = tmp_path / "workspace-state"
+    shared.mkdir()
+    shared_log = EventLog(shared / "events.jsonl")
+    EventWriter(shared_log).emit(
+        "channel.prd.frozen",
+        actor="test",
+        payload={"channel_id": "ch-other", "prd_ref": "nope.json", "prd_digest": "x"},
+    )
+    lane_dir = tmp_path / "lane-channel"
+    result = run_channel_lane(
+        lane_dir=lane_dir,
+        prompt="为一个小工具产品写 PRD:命令行天气预报,支持城市参数与缓存。",
+        timeout_s=120,
+        backend="fake",
+        poll_interval_s=0.05,
+        state_dir=shared,
+        channel_id="eval-prd-t1",
+    )
+    assert result.ok, f"{result.reason} {result.detail}"
+    assert result.detail["channel_id"] != "ch-other"
+    assert result.prd_path == lane_dir / "prd" / "prd.md"
+    shared_events = shared_log.read_all()
+    assert any(
+        event.type == "channel.prd.frozen"
+        and (event.payload or {}).get("channel_id") == result.detail["channel_id"]
+        for event in shared_events
+    )
+    assert not (lane_dir / ".zf" / "events.jsonl").exists()

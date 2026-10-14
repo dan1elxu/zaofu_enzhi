@@ -341,9 +341,17 @@ def _run_guarded_step(
         return None
 
 
-def _latest_discussion_closed(events: list[Any]) -> Any | None:
+def _event_channel_id(event: Any) -> str:
+    payload = event.payload if isinstance(event.payload, dict) else {}
+    return str(payload.get("channel_id") or "")
+
+
+def _latest_discussion_closed(events: list[Any], *, channel_id: str) -> Any | None:
     for event in reversed(events):
-        if event.type == "channel.discussion.closed":
+        if (
+            event.type == "channel.discussion.closed"
+            and _event_channel_id(event) == channel_id
+        ):
             return event
     return None
 
@@ -357,6 +365,7 @@ def run_channel_lane(
     config: ZfConfig | None = None,
     template_id: str = "auto",
     channel_id: str = "eval-prd",
+    state_dir: Path | None = None,
     poll_interval_s: float = DEFAULT_CHANNEL_POLL_INTERVAL_S,
     sleep_fn: Callable[[float], None] = time.sleep,
 ) -> LaneResult:
@@ -370,7 +379,10 @@ def run_channel_lane(
     """
     lane_dir = Path(lane_dir)
     lane_dir.mkdir(parents=True, exist_ok=True)
-    state_dir = lane_state_dir(lane_dir)
+    # An explicit state_dir shares the ledger with its owner (e.g. the
+    # workspace the Web server projects), making the discussion visible
+    # there; the default stays isolated inside the lane dir.
+    state_dir = Path(state_dir) if state_dir is not None else lane_state_dir(lane_dir)
     state_dir.mkdir(parents=True, exist_ok=True)
     started_at = _utc_now()
     config = config if config is not None else ZfConfig(
@@ -433,14 +445,20 @@ def run_channel_lane(
     while True:
         events = writer.event_log.read_all()
         frozen = next(
-            (event for event in events if event.type == PRD_FROZEN_EVENT), None
+            (
+                event
+                for event in events
+                if event.type == PRD_FROZEN_EVENT
+                and _event_channel_id(event) == channel_id
+            ),
+            None,
         )
         if frozen is not None:
             return _channel_lane_success(
                 lane_dir, state_dir, channel_id, frozen,
                 started_at=started_at, warnings=warnings,
             )
-        closed = _latest_discussion_closed(events)
+        closed = _latest_discussion_closed(events, channel_id=channel_id)
         if closed is not None:
             outcome = str(
                 (closed.payload if isinstance(closed.payload, dict) else {}).get(
@@ -458,6 +476,10 @@ def run_channel_lane(
         new_events = events[cursor:]
         cursor = len(events)
         for event in new_events:
+            event_channel = _event_channel_id(event)
+            if event_channel and event_channel != channel_id:
+                # A shared ledger carries other channels' events too.
+                continue
             if event.type == "channel.discussion.started":
                 channel = project_channel(state_dir, channel_id) or {}
                 if channel_discussion_moderator_enabled(channel):

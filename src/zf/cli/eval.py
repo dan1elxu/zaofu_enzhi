@@ -33,6 +33,11 @@ def register(subparsers: argparse._SubParsersAction) -> None:
                      help="channel lane provider override (default: mapped from --backend)")
     run.add_argument("--channel-poll-s", type=float, default=2.0,
                      help="channel lane pump poll interval in seconds (default 2)")
+    run.add_argument("--channel-state", choices=["isolated", "shared"],
+                     default="isolated",
+                     help="channel lane ledger: isolated lane dir (default) or the "
+                          "workspace state dir so the discussion is visible in "
+                          "the Web Channels page")
     run.add_argument("--timeout-s", type=float, default=1800.0,
                      help="per-lane timeout budget in seconds (default 1800)")
     run.add_argument("--prompt-version", default="eval-prompt.v1",
@@ -132,6 +137,7 @@ def run_eval_run(args: argparse.Namespace) -> int:
         lanes=lanes,
         backend=args.backend,
         channel_backend=args.channel_backend,
+        channel_shared_state=args.channel_state == "shared",
         timeout_s=args.timeout_s,
         prompt_version=args.prompt_version,
         state_dir=context.state_dir,
