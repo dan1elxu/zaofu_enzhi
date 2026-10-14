@@ -110,6 +110,7 @@ def run_eval(
     writer: EventWriter | None = None,
     judge_backend: Callable[..., Any] | None = None,
     lane_overrides: dict[str, dict[str, Any]] | None = None,
+    reuse_lane_prds_from_trial: int | None = None,
 ) -> list[EvalRunResult]:
     """Run ``n_trials`` eval runs of one prompt; completed trials are skipped."""
     if prompt_file is not None:
@@ -135,6 +136,7 @@ def run_eval(
                 channel_shared_state=channel_shared_state,
                 config=config, project_root=project_root, writer=writer,
                 judge_backend=judge_backend, lane_overrides=lane_overrides,
+                reuse_lane_prds_from_trial=reuse_lane_prds_from_trial,
             ))
         except Exception as exc:
             results.append(EvalRunResult(
@@ -167,6 +169,7 @@ def _run_trial(
     writer: EventWriter,
     judge_backend: Callable[..., Any] | None,
     lane_overrides: dict[str, dict[str, Any]] | None,
+    reuse_lane_prds_from_trial: int | None = None,
 ) -> EvalRunResult:
     run_id = eval_run.eval_run_id(prompt_digest=prompt_digest, trial=trial)
     run_dir = eval_run.eval_run_dir(state_dir, prompt_digest=prompt_digest, trial=trial)
@@ -175,10 +178,22 @@ def _run_trial(
         if manifest.status == eval_run.RUN_STATUS_COMPLETED:
             return _result_from_run_dir(state_dir, run_id, skipped=True)
     else:
+        artifacts_source = ""
+        if reuse_lane_prds_from_trial is not None:
+            artifacts_source = _validate_reuse_source(
+                state_dir, prompt_digest=prompt_digest,
+                reuse_trial=reuse_lane_prds_from_trial, lane_names=lane_names,
+            )
         manifest = eval_run.start_eval_run(
             state_dir, prompt_text=prompt_text, prompt_version=prompt_version,
-            trial=trial, lanes=lane_names, writer=writer,
+            trial=trial, lanes=lane_names, artifacts_source=artifacts_source,
+            writer=writer,
         )
+        if artifacts_source:
+            _copy_lane_prds(
+                state_dir, run_id=run_id, run_dir=run_dir,
+                source_run_id=artifacts_source, lane_names=lane_names,
+            )
     _drive_lanes(
         state_dir=state_dir, run_id=run_id, run_dir=run_dir,
         prompt_text=prompt_text, backend=backend, channel_backend=channel_backend,
@@ -210,6 +225,61 @@ def _run_trial(
         conclusion_status=str(conclusion.get("status") or ""),
         lanes=conclusion.get("lanes") or {},
     )
+
+
+def _validate_reuse_source(
+    state_dir: Path,
+    *,
+    prompt_digest: str,
+    reuse_trial: int,
+    lane_names: list[str],
+) -> str:
+    """Fail-closed check that an earlier trial has frozen PRDs for all lanes."""
+    source_run_id = eval_run.eval_run_id(prompt_digest=prompt_digest, trial=reuse_trial)
+    try:
+        source_manifest = eval_run.load_manifest(state_dir, source_run_id)
+    except (FileNotFoundError, ValueError) as exc:
+        raise ValueError(
+            f"cannot reuse lane PRDs: source trial {reuse_trial} not found"
+        ) from exc
+    source_dir = eval_run.eval_run_dir(
+        state_dir, prompt_digest=prompt_digest, trial=reuse_trial
+    )
+    for lane in lane_names:
+        lane_state = source_manifest.lanes.get(lane)
+        src = eval_run.lane_prd_path(source_dir, lane)
+        if (
+            lane_state is None
+            or lane_state.status != eval_run.LANE_STATUS_PRD_FROZEN
+            or not src.is_file()
+        ):
+            raise ValueError(
+                f"cannot reuse lane PRDs from trial {reuse_trial}: "
+                f"lane {lane!r} has no frozen PRD"
+            )
+    return source_run_id
+
+
+def _copy_lane_prds(
+    state_dir: Path,
+    *,
+    run_id: str,
+    run_dir: Path,
+    source_run_id: str,
+    lane_names: list[str],
+) -> None:
+    digest, source_trial = eval_run.parse_eval_run_id(source_run_id)
+    source_dir = eval_run.eval_run_dir(
+        state_dir, prompt_digest=digest, trial=source_trial
+    )
+    for lane in lane_names:
+        src = eval_run.lane_prd_path(source_dir, lane)
+        dst = eval_run.lane_prd_path(run_dir, lane)
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        dst.write_bytes(src.read_bytes())
+        # Status running + PRD present is the driver's bind-existing-artifact
+        # path, so lanes complete without re-calling providers.
+        eval_run.mark_lane_running(state_dir, run_id, lane)
 
 
 def _result_from_run_dir(state_dir: Path, run_id: str, *, skipped: bool) -> EvalRunResult:

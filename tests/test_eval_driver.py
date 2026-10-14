@@ -640,3 +640,60 @@ def test_drive_lane_channel_isolated_default_unchanged(tmp_path: Path, monkeypat
     )
     assert "state_dir" not in captured
     assert "channel_id" not in captured
+
+
+def test_run_eval_reuse_lane_prds_rejudges_without_lane_providers(tmp_path: Path, monkeypatch) -> None:
+    _setup_fake_providers(tmp_path, monkeypatch)
+    state_dir = tmp_path / "state"
+    calls: list[str] = []
+    first = run_eval(**_run_kwargs(state_dir, tmp_path, calls))[0]
+    assert first.status == "completed"
+    calls.clear()
+
+    def _boom(*args, **kwargs):
+        raise AssertionError("run_lane must not be called when reusing lane PRDs")
+
+    monkeypatch.setattr(eval_lane_driver, "run_lane", _boom)
+    results = run_eval(**_run_kwargs(
+        state_dir, tmp_path, calls, n_trials=2, reuse_lane_prds_from_trial=1,
+    ))
+    assert len(results) == 2
+    assert results[0].skipped
+    reused = results[1]
+    assert reused.status == "completed", reused.error
+    assert reused.trial == 2
+    manifest = eval_run.load_manifest(state_dir, reused.run_id)
+    assert manifest.artifacts_source == first.run_id
+    assert manifest.all_lanes_prd_frozen
+    run_dir = eval_run.eval_run_dir(
+        state_dir, prompt_digest=manifest.prompt_digest, trial=2
+    )
+    for lane in LANES:
+        assert eval_run.lane_prd_path(run_dir, lane).is_file()
+    assert Counter(calls) == Counter({
+        "task_type": 1, "lane_prd_fidelity": 3, "cross_compare": 1,
+    })
+    started = [
+        event for event in _events(state_dir)
+        if event.type == "benchmark.eval.run.started" and event.payload.get("trial") == 2
+    ]
+    assert started and started[0].payload["artifacts_source"] == first.run_id
+
+
+def test_run_eval_reuse_lane_prds_requires_frozen_source(tmp_path: Path, monkeypatch) -> None:
+    _setup_fake_providers(tmp_path, monkeypatch)
+    state_dir = tmp_path / "state"
+    calls: list[str] = []
+    results = run_eval(**_run_kwargs(
+        state_dir, tmp_path, calls, reuse_lane_prds_from_trial=9,
+    ))
+    assert results[0].status == "failed"
+    assert "reuse" in results[0].error
+    # The failed reuse must not leave a manifest behind for the new trial.
+    assert not eval_run.run_manifest_path(
+        eval_run.eval_run_dir(
+            state_dir,
+            prompt_digest=eval_run.prompt_digest(PROMPT, prompt_version=PROMPT_VERSION),
+            trial=1,
+        ),
+    ).exists()

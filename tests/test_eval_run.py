@@ -434,3 +434,24 @@ def test_lane_state_dataclass_round_trip() -> None:
     })
     assert manifest.lanes["terminal"] == lane
     assert manifest.to_dict()["lanes"]["terminal"]["status"] == "prd_frozen"
+
+
+def test_manifest_artifacts_source_round_trip(tmp_path: Path) -> None:
+    writer = EventWriter(EventLog(tmp_path / "state" / "events.jsonl"))
+    manifest = eval_run.start_eval_run(
+        tmp_path / "state", prompt_text=PROMPT, prompt_version="v", trial=1,
+        lanes=["terminal"], artifacts_source="digest0-trial-9", writer=writer,
+    )
+    assert manifest.artifacts_source == "digest0-trial-9"
+    loaded = eval_run.load_manifest(tmp_path / "state", manifest.run_id)
+    assert loaded.artifacts_source == "digest0-trial-9"
+    events = EventLog(tmp_path / "state" / "events.jsonl").read_all()
+    started = [e for e in events if e.type == "benchmark.eval.run.started"]
+    assert started[0].payload["artifacts_source"] == "digest0-trial-9"
+    # Old manifests without the field load with an empty marker.
+    run_dir = eval_run.eval_run_dir(
+        tmp_path / "state", prompt_digest=manifest.prompt_digest, trial=1,
+    )
+    raw = json.loads(eval_run.run_manifest_path(run_dir).read_text(encoding="utf-8"))
+    del raw["artifacts_source"]
+    assert eval_run.EvalRunManifest.from_dict(raw).artifacts_source == ""

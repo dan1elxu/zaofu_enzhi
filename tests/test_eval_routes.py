@@ -486,3 +486,26 @@ def test_eval_run_detail_hides_tampered_prompt_packet(tmp_path: Path, monkeypatc
     payload = client.get(f"/api/projects/{project_id}/eval/runs/{manifest.run_id}").json()
 
     assert payload["prompt_text"] == ""
+
+
+def test_eval_runs_surface_artifacts_source(tmp_path: Path, monkeypatch) -> None:
+    client, state_dir, project_id = _client(tmp_path, monkeypatch)
+    manifest, _ = _completed_run(state_dir)
+    reused = eval_run.start_eval_run(
+        state_dir,
+        prompt_text=PROMPT,
+        prompt_version=PROMPT_VERSION,
+        trial=2,
+        lanes=LANES,
+        artifacts_source=manifest.run_id,
+        writer=_writer(state_dir),
+    )
+
+    index = client.get(f"/api/projects/{project_id}/eval/runs")
+    trials = index.json()["groups"][0]["trials"]
+    assert trials[0]["artifacts_source"] is None
+    assert trials[1]["artifacts_source"] == manifest.run_id
+
+    detail = client.get(f"/api/projects/{project_id}/eval/runs/{reused.run_id}")
+    assert detail.status_code == 200
+    assert detail.json()["artifacts_source"] == manifest.run_id

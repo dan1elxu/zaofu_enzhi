@@ -38,6 +38,10 @@ def register(subparsers: argparse._SubParsersAction) -> None:
                      help="channel lane ledger: isolated lane dir (default) or the "
                           "workspace state dir so the discussion is visible in "
                           "the Web Channels page")
+    run.add_argument("--reuse-lane-prds", type=int, default=None, metavar="TRIAL",
+                     help="reuse lane PRDs from an earlier trial of the same "
+                          "prompt; lanes are not re-run, only re-judged, and the "
+                          "manifest records the source trial")
     run.add_argument("--timeout-s", type=float, default=1800.0,
                      help="per-lane timeout budget in seconds (default 1800)")
     run.add_argument("--prompt-version", default="eval-prompt.v1",
@@ -145,6 +149,7 @@ def run_eval_run(args: argparse.Namespace) -> int:
         project_root=context.project_root,
         writer=writer,
         lane_overrides={"channel": {"poll_interval_s": args.channel_poll_s}},
+        reuse_lane_prds_from_trial=args.reuse_lane_prds,
     )
     if args.format == "json":
         print(json.dumps([item.to_dict() for item in results], ensure_ascii=False, indent=2))

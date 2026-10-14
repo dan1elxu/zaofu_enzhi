@@ -206,6 +206,9 @@ class EvalRunManifest:
     created_at: str = ""
     completed_at: str = ""
     started_event_id: str = ""
+    # Source run_id when this trial reuses another trial's lane PRDs and only
+    # re-runs judging; empty means lanes genuinely ran in this trial.
+    artifacts_source: str = ""
 
     @property
     def all_lanes_prd_frozen(self) -> bool:
@@ -232,6 +235,7 @@ class EvalRunManifest:
             "created_at": self.created_at,
             "completed_at": self.completed_at,
             "started_event_id": self.started_event_id,
+            "artifacts_source": self.artifacts_source,
         }
 
     @classmethod
@@ -254,6 +258,7 @@ class EvalRunManifest:
             created_at=str(value.get("created_at") or ""),
             completed_at=str(value.get("completed_at") or ""),
             started_event_id=str(value.get("started_event_id") or ""),
+            artifacts_source=str(value.get("artifacts_source") or ""),
         )
 
 
@@ -305,6 +310,7 @@ def start_eval_run(
     trial: int,
     prompt_version: str = DEFAULT_PROMPT_VERSION,
     lanes: Iterable[str] = DEFAULT_LANES,
+    artifacts_source: str = "",
     writer: EventWriter | None = None,
     actor: str = DEFAULT_ACTOR,
     now: Callable[[], str] = _now_iso,
@@ -335,6 +341,7 @@ def start_eval_run(
             trial=_trial_number(trial),
             lanes={lane: LaneState(lane=lane) for lane in lane_names},
             created_at=now(),
+            artifacts_source=str(artifacts_source or ""),
         )
         _write_manifest(run_dir, manifest)
         if writer is not None:
@@ -350,6 +357,7 @@ def start_eval_run(
                     "prompt_ref": manifest.prompt_ref,
                     "trial": manifest.trial,
                     "lanes": lane_names,
+                    "artifacts_source": manifest.artifacts_source,
                     "run_dir": _rel(run_dir, state_dir),
                 },
             )

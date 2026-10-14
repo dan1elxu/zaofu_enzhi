@@ -429,6 +429,7 @@ def _trial_summary(state_dir: Path, manifest: EvalRunManifest) -> dict[str, Any]
         "lanes": lanes,
         "composite_scores": composite if any_score else None,
         "recommendation": recommendation or None,
+        "artifacts_source": manifest.artifacts_source or None,
     }
 
 
@@ -489,6 +490,7 @@ def build_eval_run_detail(state_dir: Path, run_id: str) -> dict[str, Any] | None
         "prompt_text": _prompt_text(state_dir, manifest),
         "trial": manifest.trial,
         "status": manifest.status,
+        "artifacts_source": manifest.artifacts_source or None,
         "lanes": lanes,
         "evaluation": {
             "task_type": _task_type_section(run_dir, entries),
