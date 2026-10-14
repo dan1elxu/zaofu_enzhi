@@ -242,6 +242,14 @@ export function evalArtifactsSourceLabel(source: string | null | undefined): str
   return `复用 ${match ? `trial-${match[1]}` : value} 产物`;
 }
 
+export function evalConcernSummary(concerns: readonly unknown[] | null | undefined): string {
+  // v3 judges must list per-dimension concerns or explicitly justify none;
+  // pre-v3 records carry null and render nothing.
+  if (concerns === null || concerns === undefined) return "";
+  if (!Array.isArray(concerns)) return "";
+  return concerns.length ? `疑虑 ${concerns.length} 项` : "疑虑 0（已核查）";
+}
+
 export interface EvalKeyGapGroup {
   lane: string;
   title: string;

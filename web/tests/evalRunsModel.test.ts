@@ -10,6 +10,7 @@ import {
   evalScoreDimensions,
   evalTaskTypeLabel,
   evalArtifactsSourceLabel,
+  evalConcernSummary,
   formatEvalChecklist,
   formatEvalConfidence,
   formatEvalScore,
@@ -198,6 +199,11 @@ assert(
 assert(evalArtifactsSourceLabel("") === "", "empty source is hidden");
 assert(evalArtifactsSourceLabel(null) === "", "null source is hidden");
 assert(evalArtifactsSourceLabel(undefined) === "", "missing source is hidden");
+
+assert(evalConcernSummary([{ text: "a" }, { text: "b" }]) === "疑虑 2 项", "concern count");
+assert(evalConcernSummary([]) === "疑虑 0（已核查）", "checked-none concerns");
+assert(evalConcernSummary(null) === "", "null concerns render nothing (pre-v3)");
+assert(evalConcernSummary(undefined) === "", "missing concerns render nothing");
 
 {
   const grouped = groupEvalKeyGaps(

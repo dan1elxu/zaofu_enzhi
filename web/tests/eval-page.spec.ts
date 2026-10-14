@@ -118,12 +118,17 @@ function detailPayload() {
           dimensions: { coverage: 4, fidelity: 3, actionability: 3, structure: 4 },
           composite: 3.5,
           checklist: { total: 12, pass: 9, partial: 2, missing: 1 },
+          concerns: [
+            { dimension_id: "fidelity", text: "CONCERN_MARKER 范围扩写未登记" },
+            { dimension_id: "actionability", text: "CONCERN_A2 验收命令缺超时" },
+          ],
         },
         kanban: {
           status: "scored",
           dimensions: { coverage: 3, fidelity: 3, actionability: 2, structure: 3 },
           composite: 2.8,
           checklist: { total: 12, pass: 7, partial: 3, missing: 2 },
+          concerns: [],
         },
         channel: null,
       },
@@ -245,6 +250,14 @@ test("run list groups trials by prompt digest and opens the run detail", async (
   await expect(detail.getByTestId("eval-checklist-terminal")).toContainText("需求清单 9/12 通过 · 部分 2 · 缺失 1");
   await expect(detail.getByTestId("eval-checklist-kanban")).toContainText("需求清单 7/12 通过 · 部分 3 · 缺失 2");
   await expect(detail.getByTestId("eval-checklist-channel")).toHaveCount(0);
+
+  const terminalConcerns = detail.getByTestId("eval-concerns-terminal");
+  await expect(terminalConcerns).toContainText("疑虑 2 项");
+  await expect(terminalConcerns.locator("ul")).not.toBeVisible();
+  await terminalConcerns.locator("summary").click();
+  await expect(terminalConcerns.locator("li")).toHaveCount(2);
+  await expect(terminalConcerns).toContainText("CONCERN_MARKER");
+  await expect(detail.getByTestId("eval-concerns-kanban")).toContainText("疑虑 0（已核查）");
 
   const crossCompare = detail.getByTestId("eval-cross-compare");
   await expect(crossCompare).toContainText("推荐排名");

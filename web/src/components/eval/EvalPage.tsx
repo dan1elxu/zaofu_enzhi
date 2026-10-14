@@ -13,6 +13,7 @@ import { MarkdownText } from "../agent-session/MarkdownText";
 import {
   errorMessage,
   evalArtifactsSourceLabel,
+  evalConcernSummary,
   evalDimensionLabel,
   evalLaneLabel,
   evalLaneStatusLabel,
@@ -442,6 +443,30 @@ function EvalScoreCard({ detail }: { detail: EvalRunDetail }) {
           <p className="eval-lane-checklist" data-testid={`eval-checklist-${lane}`} key={lane}>
             {evalLaneLabel(lane)} {checklist}
           </p>
+        );
+      })}
+      {laneIds.map((lane) => {
+        const concerns = laneScores[lane]?.concerns;
+        const summary = evalConcernSummary(concerns);
+        if (!summary) return null;
+        const items = (concerns ?? []).filter((item) => item && item.text);
+        return (
+          <div className="eval-lane-concerns" data-testid={`eval-concerns-${lane}`} key={lane}>
+            {items.length ? (
+              <details>
+                <summary>{evalLaneLabel(lane)} {summary}（点击展开）</summary>
+                <ul>
+                  {items.map((item, index) => (
+                    <li key={index}>
+                      <strong>{evalDimensionLabel(item.dimension_id)}</strong>：{item.text}
+                    </li>
+                  ))}
+                </ul>
+              </details>
+            ) : (
+              <p className="muted">{evalLaneLabel(lane)} {summary}</p>
+            )}
+          </div>
         );
       })}
       {laneIds.map((lane) => {

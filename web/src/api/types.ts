@@ -2103,11 +2103,17 @@ export interface EvalLaneChecklist {
   missing: number;
 }
 
+export interface EvalLaneConcern {
+  dimension_id?: string;
+  text?: string;
+}
+
 export interface EvalLaneScore {
   status: string;
   dimensions?: Record<string, number | null>;
   composite?: number | null;
   checklist?: EvalLaneChecklist | null;
+  concerns?: EvalLaneConcern[] | null;
 }
 
 export interface EvalCrossCompareGap {
