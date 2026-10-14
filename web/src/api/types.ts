@@ -2095,10 +2095,18 @@ export interface EvalTaskTypeResult {
   confidence?: number | null;
 }
 
+export interface EvalLaneChecklist {
+  total: number;
+  pass: number;
+  partial: number;
+  missing: number;
+}
+
 export interface EvalLaneScore {
   status: string;
   dimensions?: Record<string, number | null>;
   composite?: number | null;
+  checklist?: EvalLaneChecklist | null;
 }
 
 export interface EvalCrossCompareGap {
@@ -2110,6 +2118,7 @@ export interface EvalDimensionRanking {
   dimension_id?: string;
   ranking?: string[];
   confidence?: number | string | null;
+  rationale?: string;
 }
 
 export interface EvalCrossCompareConflict {

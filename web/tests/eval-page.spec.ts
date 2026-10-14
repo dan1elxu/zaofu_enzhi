@@ -116,20 +116,32 @@ function detailPayload() {
           status: "scored",
           dimensions: { coverage: 4, fidelity: 3, actionability: 3, structure: 4 },
           composite: 3.5,
+          checklist: { total: 12, pass: 9, partial: 2, missing: 1 },
         },
         kanban: {
           status: "scored",
           dimensions: { coverage: 3, fidelity: 3, actionability: 2, structure: 3 },
           composite: 2.8,
+          checklist: { total: 12, pass: 7, partial: 3, missing: 2 },
         },
         channel: null,
       },
       cross_compare: {
         status: "scored",
         recommendation: ["A", "B"],
-        key_gaps: [{ candidate: "B", gap: "验收标准缺失 KEY_GAP_MARKER" }],
+        key_gaps: [
+          { candidate: "B", gap: "验收标准缺失 KEY_GAP_MARKER" },
+          { candidate: "B", gap: "缺少错误处理章节 KEY_GAP_B2" },
+          { candidate: "A", gap: "性能预算未量化 KEY_GAP_A1" },
+        ],
         dimension_rankings: [
-          { dimension_id: "coverage", ranking: ["A", "B"], confidence: 4 },
+          {
+            dimension_id: "coverage",
+            ranking: ["A", "B"],
+            confidence: 4,
+            rationale: "RATIONALE_MARKER Terminal 对需求清单覆盖更完整。",
+          },
+          { dimension_id: "fidelity", ranking: ["B", "A"], confidence: 2 },
         ],
         conflicts: [
           {
@@ -227,13 +239,48 @@ test("run list groups trials by prompt digest and opens the run detail", async (
   await expect(scores).toContainText("3.5");
   await expect(scores).toContainText("2.8");
   await expect(scores.locator("tfoot")).toContainText("—");
+  await expect(detail.getByTestId("eval-checklist-terminal")).toContainText("需求清单 9/12 通过 · 部分 2 · 缺失 1");
+  await expect(detail.getByTestId("eval-checklist-kanban")).toContainText("需求清单 7/12 通过 · 部分 3 · 缺失 2");
+  await expect(detail.getByTestId("eval-checklist-channel")).toHaveCount(0);
 
   const crossCompare = detail.getByTestId("eval-cross-compare");
   await expect(crossCompare).toContainText("推荐排名");
-  await expect(crossCompare).toContainText("Terminal（A）");
-  await expect(crossCompare).toContainText("Kanban（B）");
-  await expect(crossCompare).toContainText("KEY_GAP_MARKER");
-  await expect(crossCompare).toContainText("CONFLICT_MARKER");
+  const recRanking = crossCompare.getByTestId("eval-rec-ranking");
+  await expect(recRanking.locator("li")).toHaveCount(2);
+  await expect(recRanking).toContainText("Terminal（A）");
+  await expect(recRanking).toContainText("Kanban（B）");
+
+  const dimTable = crossCompare.getByTestId("eval-dim-table");
+  await expect(dimTable.locator("[data-testid^='eval-dim-row-']")).toHaveCount(2);
+  const coverageRow = dimTable.getByTestId("eval-dim-row-coverage");
+  await expect(coverageRow).toContainText("需求覆盖");
+  await expect(coverageRow).toContainText("Terminal");
+  await expect(coverageRow).toContainText("Kanban");
+  await expect(coverageRow).toContainText("极高");
+  const fidelityRow = dimTable.getByTestId("eval-dim-row-fidelity");
+  await expect(fidelityRow).toContainText("需求忠实");
+  await expect(fidelityRow).toContainText("中");
+
+  const rationale = crossCompare.locator(".eval-dim-rationale");
+  await expect(rationale).toHaveCount(1);
+  await expect(rationale.locator("p")).not.toBeVisible();
+  await rationale.locator("summary").click();
+  await expect(rationale.locator("p")).toBeVisible();
+  await expect(rationale.locator("p")).toContainText("RATIONALE_MARKER");
+
+  const gapGroups = crossCompare.getByTestId("eval-gap-groups");
+  await expect(gapGroups.locator("[data-testid^='eval-gap-group-']")).toHaveCount(2);
+  const kanbanGaps = gapGroups.getByTestId("eval-gap-group-kanban");
+  await expect(kanbanGaps).toContainText("Kanban（B）");
+  await expect(kanbanGaps.locator("li")).toHaveCount(2);
+  await expect(kanbanGaps).toContainText("KEY_GAP_MARKER");
+  await expect(kanbanGaps).toContainText("KEY_GAP_B2");
+  const terminalGaps = gapGroups.getByTestId("eval-gap-group-terminal");
+  await expect(terminalGaps).toContainText("Terminal（A）");
+  await expect(terminalGaps.locator("li")).toHaveCount(1);
+  await expect(terminalGaps).toContainText("KEY_GAP_A1");
+
+  await expect(crossCompare.getByTestId("eval-conflicts")).toContainText("CONFLICT_MARKER");
 
   await expect(detail.getByTestId("eval-conclusion")).toContainText("REPORT_MARKER");
 

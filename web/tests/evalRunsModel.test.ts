@@ -4,13 +4,16 @@ import {
   evalLaneLabel,
   evalLaneStatusLabel,
   evalLaneTone,
+  evalRankingConfidenceLabel,
   evalRunStatusLabel,
   evalRunTone,
   evalScoreDimensions,
   evalTaskTypeLabel,
+  formatEvalChecklist,
   formatEvalConfidence,
   formatEvalScore,
   formatEvalTimestamp,
+  groupEvalKeyGaps,
   groupLaneAggregates,
   laneStatusOf,
   orderedEvalLanes,
@@ -159,6 +162,49 @@ assert(/^\d{1,2}-\d{1,2} \d{2}:\d{2}$/.test(formatEvalTimestamp("2026-10-13T08:3
 
 assert(errorMessage(new Error("boom")) === "boom", "error message unwraps Error");
 assert(errorMessage("raw") === "raw", "error message passes strings through");
+
+assert(evalRankingConfidenceLabel(4) === "极高", "confidence 4 is 极高");
+assert(evalRankingConfidenceLabel(3) === "高", "confidence 3 is 高");
+assert(evalRankingConfidenceLabel(2) === "中", "confidence 2 is 中");
+assert(evalRankingConfidenceLabel(1) === "低", "confidence 1 is 低");
+assert(evalRankingConfidenceLabel(0) === "无法比较", "confidence 0 is 无法比较");
+assert(evalRankingConfidenceLabel("4") === "极高", "string confidence is coerced");
+assert(evalRankingConfidenceLabel(5) === "", "out-of-range confidence has no label");
+assert(evalRankingConfidenceLabel(null) === "", "null confidence has no label");
+assert(evalRankingConfidenceLabel("high") === "", "non-numeric confidence has no label");
+assert(evalRankingConfidenceLabel(undefined) === "", "missing confidence has no label");
+
+assert(
+  formatEvalChecklist({ total: 12, pass: 9, partial: 2, missing: 1 }) === "需求清单 9/12 通过 · 部分 2 · 缺失 1",
+  "checklist summary formats pass/partial/missing",
+);
+assert(
+  formatEvalChecklist({ total: 12, pass: 12, partial: 0, missing: 0 }) === "需求清单 12/12 通过",
+  "zero partial/missing segments are omitted",
+);
+assert(formatEvalChecklist(null) === "", "null checklist is hidden");
+assert(formatEvalChecklist(undefined) === "", "missing checklist is hidden");
+assert(formatEvalChecklist({ total: 0, pass: 0, partial: 0, missing: 0 }) === "", "empty checklist is hidden");
+
+{
+  const grouped = groupEvalKeyGaps(
+    [
+      { candidate: "B", gap: "gap-b1" },
+      { candidate: "A", gap: "gap-a1" },
+      { candidate: "B", gap: "gap-b2" },
+      { candidate: "C", gap: "gap-c1" },
+    ],
+    { A: "terminal", B: "kanban" },
+  );
+  assert(grouped.map((group) => group.lane).join(",") === "terminal,kanban,C", "gap groups use canonical lane order, unmapped last");
+  assert(grouped.map((group) => group.title).join(",") === "Terminal,Kanban,C", "group titles reveal mapped lanes");
+  assert(grouped.map((group) => group.blindLabel).join(",") === "A,B,", "blind labels kept only for mapped lanes");
+  const kanban = grouped.find((group) => group.lane === "kanban");
+  assert(kanban && kanban.gaps.length === 2 && kanban.gaps[0].gap === "gap-b1", "gaps stay grouped in first-seen order");
+  assert(groupEvalKeyGaps(null).length === 0, "missing gaps yield no groups");
+  const unmapped = groupEvalKeyGaps([{ candidate: "", gap: "gap-x" }]);
+  assert(unmapped.length === 1 && unmapped[0].lane === "unknown" && unmapped[0].title === "未知 lane", "empty candidate groups under unknown");
+}
 
 assert(readInitialEvalRunId() === "", "node context has no initial run id");
 writeEvalRunSelection("run-1");

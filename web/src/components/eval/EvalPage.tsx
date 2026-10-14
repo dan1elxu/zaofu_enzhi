@@ -1,5 +1,5 @@
 import { ArrowLeft, CircleDashed } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { Fragment, useEffect, useMemo, useState } from "react";
 import { getEvalRunDetail, getEvalRuns } from "../../api/client";
 import type {
   EvalCrossCompare,
@@ -16,13 +16,16 @@ import {
   evalLaneLabel,
   evalLaneStatusLabel,
   evalLaneTone,
+  evalRankingConfidenceLabel,
   evalRunStatusLabel,
   evalRunTone,
   evalScoreDimensions,
   evalTaskTypeLabel,
+  formatEvalChecklist,
   formatEvalConfidence,
   formatEvalScore,
   formatEvalTimestamp,
+  groupEvalKeyGaps,
   groupLaneAggregates,
   orderedEvalLanes,
   readInitialEvalRunId,
@@ -419,6 +422,15 @@ function EvalScoreCard({ detail }: { detail: EvalRunDetail }) {
         <p className="muted">各 lane 单项评分尚未完成。</p>
       )}
       {laneIds.map((lane) => {
+        const checklist = formatEvalChecklist(laneScores[lane]?.checklist);
+        if (!checklist) return null;
+        return (
+          <p className="eval-lane-checklist" data-testid={`eval-checklist-${lane}`} key={lane}>
+            {evalLaneLabel(lane)} {checklist}
+          </p>
+        );
+      })}
+      {laneIds.map((lane) => {
         const score = laneScores[lane];
         if (!score || score.status === "scored") return null;
         return (
@@ -441,7 +453,7 @@ function CrossCompareCard({
   if (!crossCompare) return null;
   const recommendation = crossCompare.recommendation ?? [];
   const rankings = crossCompare.dimension_rankings ?? [];
-  const gaps = crossCompare.key_gaps ?? [];
+  const gapGroups = groupEvalKeyGaps(crossCompare.key_gaps, labelMap);
   const conflicts = crossCompare.conflicts ?? [];
   const reveal = (label: unknown) => revealCandidateLabel(label, labelMap);
   return (
@@ -452,51 +464,105 @@ function CrossCompareCard({
           {evalLaneStatusLabel(crossCompare.status)}
         </span>
       </div>
+      <h4 className="eval-sub-head">推荐排名</h4>
       {recommendation.length ? (
-        <p className="eval-recommendation">
-          推荐排名：
+        <ol className="eval-rec-ranking" data-testid="eval-rec-ranking">
           {recommendation.map((label, index) => (
-            <span key={`${label}-${index}`}>
-              {index > 0 ? " &gt; " : ""}
-              <strong>{reveal(label)}</strong>
+            <li className="eval-rec-rank" key={`${String(label)}-${index}`}>
+              <span className={`eval-rank-medal eval-rank-${index + 1}`} aria-label={`第 ${index + 1} 名`}>
+                {index + 1}
+              </span>
+              <span className="eval-lane-tag">{reveal(label)}</span>
               {labelMap[label] ? <span className="muted">（{label}）</span> : null}
-            </span>
+            </li>
           ))}
-        </p>
+        </ol>
       ) : (
         <p className="muted">暂无推荐排名。</p>
       )}
       {rankings.length ? (
-        <ul className="eval-dim-rankings">
-          {rankings.map((entry, index) => (
-            <li key={entry.dimension_id || index}>
-              <strong>{evalDimensionLabel(entry.dimension_id)}</strong>：
-              {(entry.ranking ?? []).map((label) => reveal(label)).join(" > ")}
-              {entry.confidence !== undefined && entry.confidence !== null && entry.confidence !== ""
-                ? `（置信 ${entry.confidence}）`
-                : ""}
-            </li>
-          ))}
-        </ul>
+        <>
+          <h4 className="eval-sub-head">维度排名</h4>
+          <div className="eval-table-scroll">
+            <table className="eval-dim-table" data-testid="eval-dim-table">
+              <thead>
+                <tr>
+                  <th>维度</th>
+                  <th>第 1 名</th>
+                  <th>第 2 名</th>
+                  <th>第 3 名</th>
+                  <th>置信度</th>
+                </tr>
+              </thead>
+              <tbody>
+                {rankings.map((entry, index) => {
+                  const confidence = evalRankingConfidenceLabel(entry.confidence);
+                  return (
+                    <Fragment key={entry.dimension_id || index}>
+                      <tr data-testid={`eval-dim-row-${entry.dimension_id || index}`}>
+                        <td>{evalDimensionLabel(entry.dimension_id)}</td>
+                        {[0, 1, 2].map((place) => {
+                          const label = entry.ranking?.[place];
+                          return (
+                            <td key={place}>
+                              {label ? (
+                                <span className="eval-lane-tag">{reveal(label)}</span>
+                              ) : (
+                                <span className="muted">—</span>
+                              )}
+                            </td>
+                          );
+                        })}
+                        <td>{confidence || "—"}</td>
+                      </tr>
+                      {entry.rationale ? (
+                        <tr className="eval-dim-rationale-row">
+                          <td colSpan={5}>
+                            <details className="eval-dim-rationale">
+                              <summary>判定理由</summary>
+                              <p>{entry.rationale}</p>
+                            </details>
+                          </td>
+                        </tr>
+                      ) : null}
+                    </Fragment>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        </>
       ) : null}
-      {gaps.length ? (
-        <ul className="eval-key-gaps">
-          {gaps.map((gap, index) => (
-            <li key={index}>
-              <strong>{reveal(gap.candidate)}</strong>：{gap.gap}
-            </li>
+      {gapGroups.length ? (
+        <div className="eval-gap-groups" data-testid="eval-gap-groups">
+          <h4 className="eval-sub-head">关键缺口</h4>
+          {gapGroups.map((group) => (
+            <section className="eval-gap-group" data-testid={`eval-gap-group-${group.lane}`} key={group.lane}>
+              <h5 className="eval-gap-group-title">
+                {group.title}
+                {group.blindLabel ? <span className="muted">（{group.blindLabel}）</span> : null}
+              </h5>
+              <ul className="eval-gap-list">
+                {group.gaps.map((gap, index) => (
+                  <li key={index}>{gap.gap}</li>
+                ))}
+              </ul>
+            </section>
           ))}
-        </ul>
+        </div>
       ) : null}
       {conflicts.length ? (
-        <ul className="eval-conflicts">
-          {conflicts.map((conflict, index) => (
-            <li key={index}>
-              {evalDimensionLabel(conflict.dimension_id)}：blind 分偏好 {reveal(conflict.blind_favorite)}，
-              逐段对比偏好 {reveal(conflict.pairwise_favorite)} — {conflict.resolution}
-            </li>
-          ))}
-        </ul>
+        <div className="eval-conflict-section" data-testid="eval-conflicts">
+          <h4 className="eval-sub-head">评分冲突</h4>
+          <ul className="eval-conflicts">
+            {conflicts.map((conflict, index) => (
+              <li key={index}>
+                {evalDimensionLabel(conflict.dimension_id)}：blind 分偏好 {reveal(conflict.blind_favorite)}，
+                逐段对比偏好 {reveal(conflict.pairwise_favorite)} — {conflict.resolution}
+              </li>
+            ))}
+          </ul>
+        </div>
       ) : null}
     </section>
   );

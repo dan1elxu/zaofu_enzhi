@@ -1,4 +1,6 @@
 import type {
+  EvalCrossCompareGap,
+  EvalLaneChecklist,
   EvalLaneStatus,
   EvalLaneScore,
   EvalRunGroup,
@@ -198,6 +200,73 @@ export function revealCandidateLabel(label: unknown, labelMap?: Record<string, s
   const key = String(label ?? "");
   const lane = labelMap?.[key];
   return lane ? evalLaneLabel(lane) : key;
+}
+
+const RANKING_CONFIDENCE_LABELS: Record<number, string> = {
+  4: "极高",
+  3: "高",
+  2: "中",
+  1: "低",
+  0: "无法比较",
+};
+
+export function evalRankingConfidenceLabel(value: unknown): string {
+  // Dimension-ranking confidence is a 0–4 judge scale (may arrive as a
+  // string); anything unparsable or out of range renders as "no label".
+  const numeric =
+    typeof value === "number" ? value : typeof value === "string" ? Number(value.trim()) : Number.NaN;
+  if (!Number.isFinite(numeric)) return "";
+  return RANKING_CONFIDENCE_LABELS[Math.round(numeric)] ?? "";
+}
+
+export function formatEvalChecklist(checklist: EvalLaneChecklist | null | undefined): string {
+  if (!checklist) return "";
+  const { total, pass, partial, missing } = checklist;
+  const counts = [total, pass, partial, missing];
+  if (!counts.every((value) => typeof value === "number" && Number.isFinite(value) && value >= 0)) {
+    return "";
+  }
+  if (total <= 0) return "";
+  const parts = [`需求清单 ${pass}/${total} 通过`];
+  if (partial > 0) parts.push(`部分 ${partial}`);
+  if (missing > 0) parts.push(`缺失 ${missing}`);
+  return parts.join(" · ");
+}
+
+export interface EvalKeyGapGroup {
+  lane: string;
+  title: string;
+  blindLabel: string;
+  gaps: EvalCrossCompareGap[];
+}
+
+export function groupEvalKeyGaps(
+  gaps: readonly EvalCrossCompareGap[] | null | undefined,
+  labelMap?: Record<string, string>,
+): EvalKeyGapGroup[] {
+  const byLane = new Map<string, EvalKeyGapGroup>();
+  for (const gap of gaps ?? []) {
+    const candidate = String(gap?.candidate ?? "");
+    const mapped = labelMap?.[candidate];
+    const lane = mapped || candidate || "unknown";
+    let group = byLane.get(lane);
+    if (!group) {
+      group = {
+        lane,
+        title: mapped ? evalLaneLabel(mapped) : candidate || "未知 lane",
+        blindLabel: mapped ? candidate : "",
+        gaps: [],
+      };
+      byLane.set(lane, group);
+    }
+    group.gaps.push(gap);
+  }
+  const rank = (lane: string) => {
+    const index = (EVAL_LANE_IDS as readonly string[]).indexOf(lane);
+    return index === -1 ? EVAL_LANE_IDS.length : index;
+  };
+  // Stable sort: canonical lane order first, unmapped lanes in first-seen order.
+  return [...byLane.values()].sort((left, right) => rank(left.lane) - rank(right.lane));
 }
 
 export function laneStatusOf(
