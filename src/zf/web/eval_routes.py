@@ -177,7 +177,30 @@ def _lane_score(
         "status": _stage_status(entry, record),
         "dimensions": dimensions,
         "composite": composite,
+        "checklist": _checklist_counts(record),
     }
+
+
+def _checklist_counts(record: dict[str, Any] | None) -> dict[str, int] | None:
+    """Verdict counts of the v2 requirement checklist; None for v1 records."""
+
+    result = (record or {}).get("result")
+    result = result if isinstance(result, dict) else {}
+    checklist = result.get("checklist")
+    if not isinstance(checklist, list) or not checklist:
+        return None
+    counts = {"pass": 0, "partial": 0, "missing": 0}
+    total = 0
+    for entry in checklist:
+        if not isinstance(entry, dict):
+            continue
+        verdict = str(entry.get("verdict") or "")
+        if verdict in counts:
+            counts[verdict] += 1
+            total += 1
+    if not total:
+        return None
+    return {"total": total, **counts}
 
 
 def _task_type_section(

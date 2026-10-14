@@ -38,7 +38,7 @@ from zf.runtime.evaluation_types import (
     canonical_necessity,
 )
 
-LANE_PRD_FIDELITY_SCHEMA_VERSION = "lane_prd_fidelity_result.v1"
+LANE_PRD_FIDELITY_SCHEMA_VERSION = "lane_prd_fidelity_result.v2"
 
 SCHEMA_VERSIONS: dict[str, str] = {
     "task_type": "task_type_result.v1",
@@ -503,6 +503,11 @@ def _normalize_lane_prd_fidelity(
     if any(d is None for d in dims):
         return None, "dimension entry malformed (needs dimension_id)"
     dims = [d for d in dims if d is not None]
+    checklist, checklist_error = _normalize_lane_checklist(
+        raw.get("checklist"), allowed,
+    )
+    if checklist_error:
+        return None, checklist_error
     missing = _string_list(
         raw.get("missing_evidence") or raw.get("missing_evidence_keys")
     )
@@ -519,6 +524,7 @@ def _normalize_lane_prd_fidelity(
         source_snapshot_digest=str(raw.get("source_snapshot_digest") or ""),
         dimensions=dims,
         differences=differences,
+        checklist=checklist,
         lane_prd_fidelity_score=lane_prd_fidelity_score(
             dims, score_scale=score_scale,
         ) if status == "scored" else None,
@@ -526,6 +532,60 @@ def _normalize_lane_prd_fidelity(
         score_scale=score_scale,
         **_result_metadata(raw),
     ), ""
+
+
+LANE_CHECKLIST_VERDICTS = frozenset({"pass", "partial", "missing"})
+
+
+def _normalize_lane_checklist(
+    value: Any, allowed: set[str],
+) -> tuple[list[dict[str, Any]], str]:
+    """Validate the v2 requirement checklist.
+
+    The checklist is the deduction evidence base of the v2 rubric: it must be
+    a non-empty list of unique items, every verdict must be in vocabulary,
+    every cited ref must stay inside the evidence allowlist, and a pass or
+    partial verdict must carry at least one ref (a claim without evidence is
+    rejected, never silently trusted).
+    """
+
+    if not isinstance(value, list) or not value:
+        return [], "checklist must be a non-empty list"
+    items: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for entry in value:
+        if not isinstance(entry, dict):
+            return [], "every checklist item must be an object"
+        item_id = str(entry.get("item_id") or "").strip()
+        if not item_id or item_id != str(entry.get("item_id") or ""):
+            return [], "every checklist item needs a non-empty item_id"
+        if item_id in seen:
+            return [], f"duplicate checklist item_id: {item_id!r}"
+        seen.add(item_id)
+        requirement = str(entry.get("requirement") or "").strip()
+        if not requirement:
+            return [], f"checklist item {item_id!r} needs a non-empty requirement"
+        verdict = str(entry.get("verdict") or "").strip()
+        if verdict not in LANE_CHECKLIST_VERDICTS:
+            return [], f"checklist verdict out of vocab: {verdict!r}"
+        try:
+            refs = _string_list(entry.get("evidence_refs"))
+        except (TypeError, ValueError):
+            return [], f"checklist item {item_id!r} evidence_refs must be a list of non-empty strings"
+        if any(not _evidence_bound(ref, allowed) for ref in refs):
+            return [], f"checklist item {item_id!r} cites evidence outside the allowlist"
+        if verdict in {"pass", "partial"} and not refs:
+            return [], (
+                f"checklist item {item_id!r} verdict {verdict} requires "
+                "evidence_refs from the allowlist"
+            )
+        items.append({
+            "item_id": item_id,
+            "requirement": requirement,
+            "verdict": verdict,
+            "evidence_refs": refs,
+        })
+    return items, ""
 
 
 def _normalize_conclusion(

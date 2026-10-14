@@ -65,8 +65,12 @@ if "bounded task-type classifier" in prompt:
     }, ensure_ascii=False))
 elif "blind PRD quality evaluator" in prompt:
     emit(json.dumps({
-        "schema_version": "lane_prd_fidelity_result.v1",
+        "schema_version": "lane_prd_fidelity_result.v2",
         "judge_type": "lane_prd_fidelity", "score_scale": "0-4",
+        "checklist": [{
+            "item_id": "req-1", "requirement": "prompt requirement",
+            "verdict": "pass", "evidence_refs": ["eval/prd"],
+        }],
         "dimensions": [{
             "dimension_id": d, "status": "scored", "score": 3, "confidence": 0.9,
             "evidence_refs": ["eval/prompt", "eval/prd"],

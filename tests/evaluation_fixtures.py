@@ -244,12 +244,23 @@ LANE_EVAL_REFS = ["eval/prompt", "eval/prd"]
 def _lane_prd_fidelity_reply(
     *, refs: list[str] | None = None, score: int | None = 3,
     confidence: float = 0.9, status: str = "scored",
+    checklist: list[dict[str, Any]] | None = None,
 ) -> str:
     refs = list(refs or LANE_EVAL_REFS)
+    if checklist is None:
+        checklist = [
+            {"item_id": "req-1", "requirement": "支持待办事项增删改查。",
+             "verdict": "pass", "evidence_refs": ["eval/prd"]},
+            {"item_id": "req-2", "requirement": "支持到期提醒。",
+             "verdict": "partial", "evidence_refs": ["eval/prd"]},
+            {"item_id": "req-3", "requirement": "数据本地存储。",
+             "verdict": "missing", "evidence_refs": ["eval/prompt"]},
+        ]
     return json.dumps({
-        "schema_version": "lane_prd_fidelity_result.v1",
+        "schema_version": "lane_prd_fidelity_result.v2",
         "judge_type": "lane_prd_fidelity",
         "score_scale": "0-4",
+        "checklist": checklist,
         "dimensions": [{
             "dimension_id": dimension, "status": status, "score": score,
             "confidence": confidence, "evidence_refs": refs,

@@ -209,9 +209,34 @@ def _lane_fidelity_section(record: dict[str, Any]) -> list[str]:
             lines.append(f"- 综合参考分（四维度算术平均）: {mean:.1f}")
     else:
         lines.append(f"- 无可用分数（status: {record.get('status', 'pending')}）")
+    checklist_line = _checklist_summary_line(result.get("checklist"))
+    if checklist_line:
+        lines.append(checklist_line)
     for diff in result.get("differences") or []:
         lines.append(f"- difference: {diff}")
     return lines
+
+
+def _checklist_summary_line(checklist: Any) -> str:
+    """Render the v2 requirement-checklist verdict counts; '' when absent."""
+
+    if not isinstance(checklist, list) or not checklist:
+        return ""
+    counts = {"pass": 0, "partial": 0, "missing": 0}
+    total = 0
+    for entry in checklist:
+        if not isinstance(entry, dict):
+            continue
+        verdict = str(entry.get("verdict") or "")
+        if verdict in counts:
+            counts[verdict] += 1
+            total += 1
+    if not total:
+        return ""
+    return (
+        f"- 需求清单：pass {counts['pass']}/{total}，"
+        f"partial {counts['partial']}，missing {counts['missing']}"
+    )
 
 
 def _cross_compare_section(record: dict[str, Any]) -> list[str]:

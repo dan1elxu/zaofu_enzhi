@@ -333,6 +333,9 @@ def test_eval_run_detail_completed_run(tmp_path: Path, monkeypatch) -> None:
             for dimension in ("coverage", "fidelity", "actionability", "structure")
         }
         assert score["composite"] == float(LANE_SCORES[lane])
+        assert score["checklist"] == {
+            "total": 3, "pass": 1, "partial": 1, "missing": 1,
+        }
     compare = evaluation["cross_compare"]
     assert compare["status"] == "scored"
     assert compare["recommendation"] == _expected_ranking(label_map)
@@ -387,6 +390,17 @@ def test_eval_run_detail_marks_lanes_outside_the_run_absent(tmp_path: Path, monk
     assert payload["lanes"]["channel"]["status"] == "absent"
     assert payload["lanes"]["channel"]["prd_markdown"] is None
     assert payload["evaluation"]["lane_scores"]["channel"] is None
+
+
+def test_lane_score_checklist_is_null_when_record_has_none() -> None:
+    from zf.web.eval_routes import _checklist_counts
+
+    assert _checklist_counts(None) is None
+    assert _checklist_counts({"result": {}}) is None
+    assert _checklist_counts({"result": {"checklist": []}}) is None
+    assert _checklist_counts({"result": {"checklist": [
+        {"verdict": "pass"}, {"verdict": "partial"}, {"verdict": "missing"},
+    ]}}) == {"total": 3, "pass": 1, "partial": 1, "missing": 1}
 
 
 @pytest.mark.parametrize("run_id", ["not-a-run", f"{'0' * 64}-trial-9", f"{'0' * 64}-trial-0"])

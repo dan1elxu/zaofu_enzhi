@@ -35,8 +35,8 @@ LANE_JUDGE_TYPES: tuple[str, ...] = (
     LANE_PRD_FIDELITY_JUDGE_TYPE,
     CROSS_COMPARE_JUDGE_TYPE,
 )
-LANE_PRD_FIDELITY_PROMPT_VERSION = "lane-prd-eval-prompts.v1"
-CROSS_COMPARE_PROMPT_VERSION = "cross-compare-prompts.v1"
+LANE_PRD_FIDELITY_PROMPT_VERSION = "lane-prd-eval-prompts.v2"
+CROSS_COMPARE_PROMPT_VERSION = "cross-compare-prompts.v2"
 
 CHANNEL_EVALUATION_CONTRACT = "channel-prd-eval.v1"
 LANE_EVALUATION_CONTRACT = "three-lane-prd-eval.v1"
@@ -346,12 +346,6 @@ EVALUATION_PROMPTS: dict[str, str] = {
 
 
 LANE_SCORE_RUBRIC = """\
-Blind per-PRD scoring uses 0–4 integers per dimension:
-- 4: no substantive defect;
-- 3: minor defects that do not block use;
-- 2: obvious defects, partially satisfying the prompt;
-- 1: severe defects, essentially unusable;
-- 0: entirely missing or off-topic.
 Every scored dimension must cite refs from allowed_evidence_refs. Missing
 evidence means score=null with status=evidence_missing. Confidence below 0.60
 means status=abstain with score=null. Judge how well the PRD satisfies the
@@ -369,11 +363,24 @@ Entry prompt: {prompt_statement}
 PRD under review: {prd_document}
 Allowed evidence: {allowed_evidence_refs}
 
-Score exactly these four dimensions, each once, with equal weight:
+Work in two steps:
+1. Requirement checklist: extract every explicit requirement from the entry
+   prompt into a numbered checklist. Give each item a stable item_id
+   (req-1, req-2, ...) and restate the requirement in one sentence.
+2. Item-by-item verification: check every checklist item against the PRD and
+   assign exactly one verdict:
+   - pass: the PRD fully answers the requirement; evidence_refs must cite
+     the PRD ref.
+   - partial: the PRD answers the requirement only partly or ambiguously;
+     evidence_refs must cite the PRD ref.
+   - missing: the PRD does not answer the requirement; evidence_refs must
+     cite the prompt ref.
+   Every verdict must carry evidence refs from allowed_evidence_refs.
+
+Then score exactly these four dimensions, each once, with equal weight:
 - coverage: every requirement explicitly stated in the prompt is answered by
-  the PRD. Check the prompt's requirement list item by item; each omitted
-  explicit requirement costs score; full coverage without unrelated scope
-  earns a high score.
+  the PRD, as proven by the checklist; each omitted explicit requirement
+  costs score.
 - fidelity: the PRD stays faithful to the prompt and never widens or rewrites
   its scope. Unsupported major additions, changed constraints, or distorted
   intent cost score.
@@ -384,11 +391,34 @@ Score exactly these four dimensions, each once, with equal weight:
   background, goals, scope, feature descriptions, acceptance, and risks are
   present, without internal contradictions or unresolved placeholders.
 
+Scoring is deduction-based. Start every dimension at 4 and deduct only for
+defects proven by checklist verdicts or cited PRD evidence:
+- 4: every checklist item passes AND an adversarial close reading still finds
+  no substantive defect; the rationale MUST briefly describe what you checked
+  (the verification process), never merely state the PRD looks complete.
+- 3: at most one checklist item is partial, or only minor defects that do not
+  block use.
+- 2: several checklist items are partial, or exactly one item is missing.
+- 1: several checklist items are missing.
+- 0: the PRD fails or is off-topic.
+从 4 分开始按证据扣分；找不到缺口时必须简述核查过程；禁止仅以“整体看起来
+完整”为由直接给满分。
+
+All rationale texts MUST be written in Chinese（rationale 一律用中文书写）。
+
 Return exactly one JSON object with EXACTLY these fields:
 {{
-  "schema_version": "lane_prd_fidelity_result.v1",
+  "schema_version": "lane_prd_fidelity_result.v2",
   "judge_type": "lane_prd_fidelity",
   "score_scale": "0-4",
+  "checklist": [
+    {{
+      "item_id": "req-1",
+      "requirement": "<one explicit requirement from the prompt>",
+      "verdict": "pass|partial|missing",
+      "evidence_refs": ["<refs from allowed evidence>"]
+    }}
+  ],
   "dimensions": [
     {{
       "dimension_id": "coverage|fidelity|actionability|structure",
@@ -445,6 +475,12 @@ Confidence uses 0-4 integers: 4 = clear and uncontroversial; 3 = clear but
 small gap; 2 = winner exists but rests on subjective trade-offs; 1 =
 candidates are essentially equivalent; 0 = cannot compare (insufficient
 information or both too poor).
+
+Language requirement (hard): every free-text field you emit — dimension
+rationale, pairwise rationale, attribution summary, conflict resolution,
+recommendation rationale, divergence_explanation, and key_gaps — MUST be
+written in Chinese（一律用中文书写）. Candidate labels, enum values, field
+names, and evidence refs stay exactly as given.
 
 Return exactly one JSON object with EXACTLY these fields:
 {{
