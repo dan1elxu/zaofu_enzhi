@@ -120,6 +120,7 @@ def _retry_hint(error: object) -> str:
     """
     return (
         f"Your previous answer failed validation ({str(error)[:60]}). "
+        "Fix only that error and keep every other section fully populated. "
         "Return exactly one JSON object matching the requested schema "
         "again. Output only the JSON object."
     )
