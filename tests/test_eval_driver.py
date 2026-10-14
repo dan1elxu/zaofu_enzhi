@@ -65,16 +65,27 @@ if "bounded task-type classifier" in prompt:
     }, ensure_ascii=False))
 elif "blind PRD quality evaluator" in prompt:
     emit(json.dumps({
-        "schema_version": "lane_prd_fidelity_result.v2",
+        "schema_version": "lane_prd_fidelity_result.v3",
         "judge_type": "lane_prd_fidelity", "score_scale": "0-4",
-        "checklist": [{
-            "item_id": "req-1", "requirement": "prompt requirement",
-            "verdict": "pass", "evidence_refs": ["eval/prd"],
-        }],
+        "checklist": [
+            {"item_id": "req-1", "kind": "explicit",
+             "requirement": "prompt requirement", "verdict": "pass",
+             "evidence_refs": ["eval/prd"]},
+            {"item_id": "req-2", "kind": "implicit",
+             "requirement": "error handling", "verdict": "pass",
+             "evidence_refs": ["eval/prd"]},
+            {"item_id": "req-3", "kind": "implicit",
+             "requirement": "edge cases", "verdict": "pass",
+             "evidence_refs": ["eval/prd"]},
+            {"item_id": "req-4", "kind": "implicit",
+             "requirement": "performance verification", "verdict": "pass",
+             "evidence_refs": ["eval/prd"]},
+        ],
         "dimensions": [{
             "dimension_id": d, "status": "scored", "score": 3, "confidence": 0.9,
             "evidence_refs": ["eval/prompt", "eval/prd"],
             "rationale": d + " ok", "verdict": "aligned",
+            "concerns": [], "no_concern_note": d + " checked, no doubt left",
         } for d in DIMS],
         "differences": [], "missing_evidence": [],
     }, ensure_ascii=False))

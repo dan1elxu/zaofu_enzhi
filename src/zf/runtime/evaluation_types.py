@@ -360,6 +360,7 @@ class LanePrdFidelityResult:
     dimensions: list[DimensionScore] = field(default_factory=list)
     differences: list[str] = field(default_factory=list)
     checklist: list[dict[str, Any]] = field(default_factory=list)
+    concerns: list[dict[str, Any]] = field(default_factory=list)
     lane_prd_fidelity_score: float | None = None
     missing_evidence: list[str] = field(default_factory=list)
     task_type: str = ""
@@ -385,12 +386,16 @@ class LanePrdFidelityResult:
                 if isinstance(item, dict)
             ],
             differences=_string_list(value.get("differences")),
-            # ``checklist`` only exists on lane_prd_fidelity_result.v2
-            # records; older v1 sidecars simply deserialize with an empty
-            # list.
+            # ``checklist`` exists on v2+ and ``concerns`` on v3+ records;
+            # older sidecars simply deserialize with empty lists.
             checklist=[
                 dict(item)
                 for item in value.get("checklist") or []
+                if isinstance(item, dict)
+            ],
+            concerns=[
+                dict(item)
+                for item in value.get("concerns") or []
                 if isinstance(item, dict)
             ],
             lane_prd_fidelity_score=_float_or_none(value.get("lane_prd_fidelity_score")),

@@ -334,8 +334,13 @@ def test_eval_run_detail_completed_run(tmp_path: Path, monkeypatch) -> None:
         }
         assert score["composite"] == float(LANE_SCORES[lane])
         assert score["checklist"] == {
-            "total": 3, "pass": 1, "partial": 1, "missing": 1,
+            "total": 6, "pass": 3, "partial": 2, "missing": 1,
         }
+        assert score["concerns"] == [
+            {"dimension_id": "coverage", "text": "到期提醒的触发时机未量化。"},
+            {"dimension_id": "fidelity", "text": "PRD 未说明本地存储的并发写冲突处理。"},
+            {"dimension_id": "fidelity", "text": "桌面通知超出提示词范围且未标注为扩展。"},
+        ]
     compare = evaluation["cross_compare"]
     assert compare["status"] == "scored"
     assert compare["recommendation"] == _expected_ranking(label_map)
@@ -401,6 +406,18 @@ def test_lane_score_checklist_is_null_when_record_has_none() -> None:
     assert _checklist_counts({"result": {"checklist": [
         {"verdict": "pass"}, {"verdict": "partial"}, {"verdict": "missing"},
     ]}}) == {"total": 3, "pass": 1, "partial": 1, "missing": 1}
+
+
+def test_lane_score_concerns_null_for_legacy_records() -> None:
+    from zf.web.eval_routes import _concern_items
+
+    assert _concern_items(None) is None
+    assert _concern_items({"result": {}}) is None  # v1/v2 record: no key
+    assert _concern_items({"result": {"concerns": []}}) == []
+    assert _concern_items({"result": {"concerns": [
+        {"dimension_id": "coverage", "text": "有疑虑。",
+         "evidence_refs": ["eval/prd"]},
+    ]}}) == [{"dimension_id": "coverage", "text": "有疑虑。"}]
 
 
 @pytest.mark.parametrize("run_id", ["not-a-run", f"{'0' * 64}-trial-9", f"{'0' * 64}-trial-0"])

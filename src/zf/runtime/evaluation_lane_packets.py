@@ -207,10 +207,15 @@ def blind_summary_from_record(record: dict[str, Any]) -> dict[str, Any]:
             "verdict": str(item.get("verdict") or ""),
             "rationale": str(item.get("rationale") or ""),
         })
+    concerns = result.get("concerns")
+    # v3 records expose the adversarial-concern count so the cross-compare
+    # judge can weigh how much doubt each blind review surfaced.
+    concern_count = len(concerns) if isinstance(concerns, list) else 0
     return {
         "status": str(record.get("status") or ""),
         "mean": result.get("lane_prd_fidelity_score"),
         "dimensions": dimensions,
+        "concern_count": concern_count,
     }
 
 

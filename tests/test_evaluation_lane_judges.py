@@ -106,8 +106,8 @@ def _compare_packet(**overrides):
     return build_cross_compare_packet(**kwargs)
 
 
-def _lane_raw(**overrides):
-    raw = json.loads(_lane_prd_fidelity_reply())
+def _lane_raw(_fixture: dict | None = None, **overrides):
+    raw = json.loads(_lane_prd_fidelity_reply(**(_fixture or {})))
     raw.update(overrides)
     return raw
 
@@ -172,7 +172,7 @@ def test_channel_prompt_registry_unchanged_by_lane_stages() -> None:
 def test_role_schema_registry_excludes_unbound_lane_stages() -> None:
     assert "lane_prd_fidelity" not in ROLE_SCHEMA_VERSIONS
     assert "cross_compare" not in ROLE_SCHEMA_VERSIONS
-    assert SCHEMA_VERSIONS["lane_prd_fidelity"] == "lane_prd_fidelity_result.v2"
+    assert SCHEMA_VERSIONS["lane_prd_fidelity"] == "lane_prd_fidelity_result.v3"
     assert SCHEMA_VERSIONS["cross_compare"] == "cross_compare_result.v1"
 
 
@@ -364,15 +364,22 @@ def test_lane_fidelity_rejects_object_differences() -> None:
     assert "differences" in error
 
 
-# --- lane prd fidelity checklist (v2) -----------------------------------------
+# --- lane prd fidelity checklist (v3) -----------------------------------------
 
 
 def test_lane_fidelity_stores_checklist_in_result() -> None:
     result, error = _normalize_lane(_lane_raw())
     assert error == ""
     assert result is not None
-    assert [item["item_id"] for item in result.checklist] == ["req-1", "req-2", "req-3"]
-    assert [item["verdict"] for item in result.checklist] == ["pass", "partial", "missing"]
+    assert [item["item_id"] for item in result.checklist] == [
+        "req-1", "req-2", "req-3", "req-4", "req-5", "req-6",
+    ]
+    assert [item["kind"] for item in result.checklist] == [
+        "explicit", "explicit", "explicit", "implicit", "implicit", "implicit",
+    ]
+    assert [item["verdict"] for item in result.checklist] == [
+        "pass", "partial", "missing", "partial", "pass", "pass",
+    ]
     assert result.to_dict()["checklist"] == result.checklist
 
 
@@ -388,9 +395,42 @@ def test_lane_fidelity_requires_a_non_empty_checklist() -> None:
     assert "checklist" in error
 
 
+def test_lane_fidelity_requires_at_least_three_implicit_items() -> None:
+    raw = _lane_raw()
+    for item in raw["checklist"]:
+        item["kind"] = "explicit"
+    result, error = _normalize_lane(raw)
+    assert result is None
+    assert "implicit" in error
+
+    checklist = [
+        {"item_id": f"req-{index}", "kind": "explicit",
+         "requirement": f"需求 {index}。",
+         "verdict": "pass", "evidence_refs": ["eval/prd"]}
+        for index in range(1, 4)
+    ] + [
+        {"item_id": "req-4", "kind": "implicit",
+         "requirement": "错误处理。", "verdict": "pass",
+         "evidence_refs": ["eval/prd"]},
+    ]
+    result, error = _normalize_lane(_lane_raw(checklist=checklist))
+    assert result is None
+    assert "implicit" in error
+
+
+def test_lane_fidelity_rejects_unknown_checklist_kind() -> None:
+    checklist = [{
+        "item_id": "req-1", "kind": "assumed", "requirement": "支持增删改查。",
+        "verdict": "pass", "evidence_refs": ["eval/prd"],
+    }]
+    result, error = _normalize_lane(_lane_raw(checklist=checklist))
+    assert result is None
+    assert "kind" in error
+
+
 def test_lane_fidelity_rejects_unknown_checklist_verdict() -> None:
     checklist = [{
-        "item_id": "req-1", "requirement": "支持增删改查。",
+        "item_id": "req-1", "kind": "explicit", "requirement": "支持增删改查。",
         "verdict": "unknown", "evidence_refs": ["eval/prd"],
     }]
     result, error = _normalize_lane(_lane_raw(checklist=checklist))
@@ -401,7 +441,7 @@ def test_lane_fidelity_rejects_unknown_checklist_verdict() -> None:
 @pytest.mark.parametrize("verdict", ["pass", "partial"])
 def test_lane_fidelity_pass_and_partial_verdicts_require_evidence(verdict: str) -> None:
     checklist = [{
-        "item_id": "req-1", "requirement": "支持增删改查。",
+        "item_id": "req-1", "kind": "explicit", "requirement": "支持增删改查。",
         "verdict": verdict, "evidence_refs": [],
     }]
     result, error = _normalize_lane(_lane_raw(checklist=checklist))
@@ -411,7 +451,7 @@ def test_lane_fidelity_pass_and_partial_verdicts_require_evidence(verdict: str) 
 
 def test_lane_fidelity_rejects_checklist_evidence_outside_allowlist() -> None:
     checklist = [{
-        "item_id": "req-1", "requirement": "支持增删改查。",
+        "item_id": "req-1", "kind": "explicit", "requirement": "支持增删改查。",
         "verdict": "pass", "evidence_refs": ["eval/prd/ZZZ"],
     }]
     result, error = _normalize_lane(_lane_raw(checklist=checklist))
@@ -419,7 +459,7 @@ def test_lane_fidelity_rejects_checklist_evidence_outside_allowlist() -> None:
     assert "allowlist" in error
 
     checklist = [{
-        "item_id": "req-1", "requirement": "支持增删改查。",
+        "item_id": "req-1", "kind": "explicit", "requirement": "支持增删改查。",
         "verdict": "missing", "evidence_refs": ["eval/prd/ZZZ"],
     }]
     result, error = _normalize_lane(_lane_raw(checklist=checklist))
@@ -429,9 +469,9 @@ def test_lane_fidelity_rejects_checklist_evidence_outside_allowlist() -> None:
 
 def test_lane_fidelity_rejects_duplicate_checklist_item_id() -> None:
     checklist = [
-        {"item_id": "req-1", "requirement": "支持增删改查。",
+        {"item_id": "req-1", "kind": "explicit", "requirement": "支持增删改查。",
          "verdict": "pass", "evidence_refs": ["eval/prd"]},
-        {"item_id": "req-1", "requirement": "支持到期提醒。",
+        {"item_id": "req-1", "kind": "implicit", "requirement": "错误处理。",
          "verdict": "missing", "evidence_refs": ["eval/prompt"]},
     ]
     result, error = _normalize_lane(_lane_raw(checklist=checklist))
@@ -441,7 +481,7 @@ def test_lane_fidelity_rejects_duplicate_checklist_item_id() -> None:
 
 def test_lane_fidelity_checklist_items_need_requirement_text() -> None:
     checklist = [{
-        "item_id": "req-1", "requirement": "  ",
+        "item_id": "req-1", "kind": "explicit", "requirement": "  ",
         "verdict": "pass", "evidence_refs": ["eval/prd"],
     }]
     result, error = _normalize_lane(_lane_raw(checklist=checklist))
@@ -449,17 +489,84 @@ def test_lane_fidelity_checklist_items_need_requirement_text() -> None:
     assert "requirement" in error
 
 
-def test_lane_prd_fidelity_result_reads_v1_records_without_checklist() -> None:
+# --- lane prd fidelity concerns (v3) -------------------------------------------
+
+
+def test_lane_fidelity_flattens_concerns_into_result() -> None:
+    result, error = _normalize_lane(_lane_raw())
+    assert error == ""
+    assert result is not None
+    assert [(item["dimension_id"], item["text"]) for item in result.concerns] == [
+        ("coverage", "到期提醒的触发时机未量化。"),
+        ("fidelity", "PRD 未说明本地存储的并发写冲突处理。"),
+        ("fidelity", "桌面通知超出提示词范围且未标注为扩展。"),
+    ]
+    assert result.to_dict()["concerns"] == result.concerns
+
+
+def test_lane_fidelity_requires_concerns_array_per_dimension() -> None:
+    raw = _lane_raw()
+    for item in raw["dimensions"]:
+        item.pop("concerns", None)
+        item.pop("no_concern_note", None)
+    result, error = _normalize_lane(raw)
+    assert result is None
+    assert "concerns" in error
+
+
+def test_lane_fidelity_empty_concerns_require_no_concern_note() -> None:
+    raw = _lane_raw({"concerns": {}})
+    for item in raw["dimensions"]:
+        assert item["concerns"] == []
+        item.pop("no_concern_note", None)
+    result, error = _normalize_lane(raw)
+    assert result is None
+    assert "no_concern_note" in error
+
+
+def test_lane_fidelity_rejects_concerns_and_note_together() -> None:
+    raw = _lane_raw()
+    raw["dimensions"][0]["no_concern_note"] = "已核查。"
+    result, error = _normalize_lane(raw)
+    assert result is None
+    assert "no_concern_note" in error
+
+
+def test_lane_fidelity_rejects_concern_without_text_or_with_bad_refs() -> None:
+    raw = _lane_raw({"concerns": {"coverage": [{"text": "  ", "evidence_refs": ["eval/prd"]}]}})
+    result, error = _normalize_lane(raw)
+    assert result is None
+    assert "text" in error
+
+    raw = _lane_raw({"concerns": {
+        "coverage": [{"text": "有疑虑。", "evidence_refs": ["eval/prd/ZZZ"]}],
+    }})
+    result, error = _normalize_lane(raw)
+    assert result is None
+    assert "allowlist" in error
+
+    raw = _lane_raw({"concerns": {
+        "coverage": [{"text": "有疑虑。", "evidence_refs": []}],
+    }})
+    result, error = _normalize_lane(raw)
+    assert result is None
+    assert "allowlist" in error
+
+
+def test_lane_prd_fidelity_result_reads_legacy_records() -> None:
     from zf.runtime.evaluation_types import LanePrdFidelityResult
 
-    legacy = LanePrdFidelityResult.from_dict({
-        "schema_version": "lane_prd_fidelity_result.v1",
-        "status": "scored",
-        "dimensions": [],
-        "lane_prd_fidelity_score": 4.0,
-    })
-    assert legacy.checklist == []
-    assert legacy.to_dict()["checklist"] == []
+    for schema_version in ("lane_prd_fidelity_result.v1", "lane_prd_fidelity_result.v2"):
+        legacy = LanePrdFidelityResult.from_dict({
+            "schema_version": schema_version,
+            "status": "scored",
+            "dimensions": [],
+            "checklist": [{"item_id": "req-1"}],
+            "lane_prd_fidelity_score": 4.0,
+        })
+        assert legacy.checklist == [{"item_id": "req-1"}]
+        assert legacy.concerns == []
+        assert legacy.to_dict()["concerns"] == []
 
 
 # --- cross_compare deterministic helpers --------------------------------------
@@ -742,9 +849,11 @@ def test_cross_compare_requires_candidate_order() -> None:
 
 
 def test_blind_summary_and_context_projection() -> None:
+    lane_result, error = _normalize_lane(_lane_raw())
+    assert error == "" and lane_result is not None
     record = {
         "status": "scored",
-        "result": json.loads(_lane_prd_fidelity_reply()) | {"lane_prd_fidelity_score": 3.0},
+        "result": lane_result.to_dict() | {"lane_prd_fidelity_score": 3.0},
     }
     summary = blind_summary_from_record(record)
     assert summary["status"] == "scored"
@@ -752,6 +861,11 @@ def test_blind_summary_and_context_projection() -> None:
     assert [item["dimension_id"] for item in summary["dimensions"]] == list(
         LANE_PRD_FIDELITY_DIMENSIONS
     )
+    assert summary["concern_count"] == 3
+    legacy_summary = blind_summary_from_record({
+        "status": "scored", "result": {"dimensions": []},
+    })
+    assert legacy_summary["concern_count"] == 0
 
     packet = _compare_packet()
     context = cross_compare_context_from_packet(packet)
@@ -1003,8 +1117,33 @@ def test_report_renders_lane_fidelity_and_cross_compare_sections() -> None:
     assert "Cross compare (`cross_compare`): **scored**" in report
     assert "## Lane PRD Fidelity（blind 四维度）" in report
     assert "综合参考分（四维度算术平均）: 3.0" in report
-    assert "需求清单：pass 1/3，partial 1，missing 1" in report
+    assert "需求清单：pass 3/6，partial 2，missing 1" in report
+    assert "疑虑：3 项（coverage 1、fidelity 2）" in report
     assert "## Cross Compare 横向对比" in report
     assert "推荐排名: A > B > C" in report
     assert "关键差距（B）" in report
     assert "归因 `coverage`" in report
+
+
+def test_report_renders_zero_concern_line_for_v3_records() -> None:
+    lane_result, error = _normalize_lane(_lane_raw({"concerns": {}}))
+    assert error == "" and lane_result is not None
+    judges = {
+        "lane_prd_fidelity": {
+            "status": lane_result.status, "result": lane_result.to_dict(),
+        },
+    }
+    report = render_report(
+        workflow_run_id="evalrun-1", trial_id="trial-1", channel_id="",
+        freeze={}, judges=judges,
+    )
+    assert "疑虑：0（已核查）" in report
+
+    # Pre-v3 records carry no concerns key: the line stays hidden.
+    legacy = lane_result.to_dict()
+    legacy.pop("concerns")
+    report = render_report(
+        workflow_run_id="evalrun-1", trial_id="trial-1", channel_id="",
+        freeze={}, judges={"lane_prd_fidelity": {"status": "scored", "result": legacy}},
+    )
+    assert "疑虑" not in report

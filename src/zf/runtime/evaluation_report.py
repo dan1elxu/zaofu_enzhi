@@ -212,9 +212,39 @@ def _lane_fidelity_section(record: dict[str, Any]) -> list[str]:
     checklist_line = _checklist_summary_line(result.get("checklist"))
     if checklist_line:
         lines.append(checklist_line)
+    concern_line = _concern_summary_line(result)
+    if concern_line:
+        lines.append(concern_line)
     for diff in result.get("differences") or []:
         lines.append(f"- difference: {diff}")
     return lines
+
+
+def _concern_summary_line(result: dict[str, Any]) -> str:
+    """Render the v3 adversarial-concern counts; '' for pre-v3 records."""
+
+    if "concerns" not in result:
+        return ""
+    concerns = result.get("concerns")
+    concerns = concerns if isinstance(concerns, list) else []
+    counts: dict[str, int] = {}
+    order: list[str] = []
+    total = 0
+    for entry in concerns:
+        if not isinstance(entry, dict):
+            continue
+        dimension = str(entry.get("dimension_id") or "")
+        if not dimension:
+            continue
+        if dimension not in counts:
+            counts[dimension] = 0
+            order.append(dimension)
+        counts[dimension] += 1
+        total += 1
+    if not total:
+        return "- 疑虑：0（已核查）"
+    detail = "、".join(f"{dimension} {counts[dimension]}" for dimension in order)
+    return f"- 疑虑：{total} 项（{detail}）"
 
 
 def _checklist_summary_line(checklist: Any) -> str:

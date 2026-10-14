@@ -35,7 +35,7 @@ LANE_JUDGE_TYPES: tuple[str, ...] = (
     LANE_PRD_FIDELITY_JUDGE_TYPE,
     CROSS_COMPARE_JUDGE_TYPE,
 )
-LANE_PRD_FIDELITY_PROMPT_VERSION = "lane-prd-eval-prompts.v2"
+LANE_PRD_FIDELITY_PROMPT_VERSION = "lane-prd-eval-prompts.v3"
 CROSS_COMPARE_PROMPT_VERSION = "cross-compare-prompts.v2"
 
 CHANNEL_EVALUATION_CONTRACT = "channel-prd-eval.v1"
@@ -363,10 +363,17 @@ Entry prompt: {prompt_statement}
 PRD under review: {prd_document}
 Allowed evidence: {allowed_evidence_refs}
 
-Work in two steps:
-1. Requirement checklist: extract every explicit requirement from the entry
-   prompt into a numbered checklist. Give each item a stable item_id
-   (req-1, req-2, ...) and restate the requirement in one sentence.
+Work in three steps:
+1. Requirement checklist: extract the requirements into a numbered checklist.
+   Give each item a stable item_id (req-1, req-2, ...), a one-sentence
+   requirement, and a kind:
+   - "explicit": a requirement the entry prompt states directly;
+   - "implicit": a requirement the prompt does NOT state but that a
+     reasonable domain/engineering review would expect — error handling,
+     edge cases, how performance claims are verified, security/injection
+     concerns, observability, upgrade compatibility, and the like.
+   The checklist MUST contain at least 3 implicit items; a checklist that
+   merely paraphrases the prompt is invalid.
 2. Item-by-item verification: check every checklist item against the PRD and
    assign exactly one verdict:
    - pass: the PRD fully answers the requirement; evidence_refs must cite
@@ -376,6 +383,15 @@ Work in two steps:
    - missing: the PRD does not answer the requirement; evidence_refs must
      cite the prompt ref.
    Every verdict must carry evidence refs from allowed_evidence_refs.
+3. Adversarial concerns: after the checklist pass, re-read the PRD
+   adversarially once per scoring dimension and record that dimension's
+   concrete doubts, risks, or gaps as its concerns array
+   ([{{"text": ..., "evidence_refs": [...]}}]). concerns may be empty ONLY when
+   the close reading genuinely surfaced nothing; an empty concerns array
+   MUST come with a no_concern_note briefly describing what you checked and
+   why no concern remains. Emitting both a non-empty concerns array and a
+   no_concern_note for the same dimension is contradictory and invalid.
+   All concerns and notes are written in Chinese.
 
 Then score exactly these four dimensions, each once, with equal weight:
 - coverage: every requirement explicitly stated in the prompt is answered by
@@ -392,29 +408,34 @@ Then score exactly these four dimensions, each once, with equal weight:
   present, without internal contradictions or unresolved placeholders.
 
 Scoring is deduction-based. Start every dimension at 4 and deduct only for
-defects proven by checklist verdicts or cited PRD evidence:
-- 4: every checklist item passes AND an adversarial close reading still finds
-  no substantive defect; the rationale MUST briefly describe what you checked
-  (the verification process), never merely state the PRD looks complete.
-- 3: at most one checklist item is partial, or only minor defects that do not
-  block use.
-- 2: several checklist items are partial, or exactly one item is missing.
+defects proven by checklist verdicts, concerns, or cited PRD evidence:
+- 4: every explicit checklist item passes AND implicit items are basically
+  satisfied (none missing) AND the dimension carries no unresolved concern
+  (empty concerns backed by a credible no_concern_note); the rationale MUST
+  briefly describe what you checked, never merely state the PRD looks
+  complete.
+- 3: at most one checklist item is partial, or only minor concerns that do
+  not block use.
+- 2: several checklist items are partial, or exactly one item is missing, or
+  a concern identifies a real defect.
 - 1: several checklist items are missing.
 - 0: the PRD fails or is off-topic.
-从 4 分开始按证据扣分；找不到缺口时必须简述核查过程；禁止仅以“整体看起来
-完整”为由直接给满分。
+从 4 分开始按证据扣分；找不到缺口时必须用 no_concern_note 简述核查过程；
+禁止仅以“整体看起来完整”为由直接给满分。
 
-All rationale texts MUST be written in Chinese（rationale 一律用中文书写）。
+All rationale, concerns, and note texts MUST be written in
+Chinese（rationale、concerns、no_concern_note 一律用中文书写）。
 
 Return exactly one JSON object with EXACTLY these fields:
 {{
-  "schema_version": "lane_prd_fidelity_result.v2",
+  "schema_version": "lane_prd_fidelity_result.v3",
   "judge_type": "lane_prd_fidelity",
   "score_scale": "0-4",
   "checklist": [
     {{
       "item_id": "req-1",
-      "requirement": "<one explicit requirement from the prompt>",
+      "kind": "explicit|implicit",
+      "requirement": "<one requirement, explicit from the prompt or implicit>",
       "verdict": "pass|partial|missing",
       "evidence_refs": ["<refs from allowed evidence>"]
     }}
@@ -427,7 +448,9 @@ Return exactly one JSON object with EXACTLY these fields:
       "confidence": <number 0.0-1.0>,
       "evidence_refs": ["<refs from allowed evidence>"],
       "rationale": "<covered, omitted, contradicted or unsupported findings>",
-      "verdict": "aligned|partial|deviated"
+      "verdict": "aligned|partial|deviated",
+      "concerns": [{{"text": "<中文疑虑>", "evidence_refs": ["<refs>"]}}],
+      "no_concern_note": "<仅当 concerns 为空时必填的中文核查说明>"
     }}
   ],
   "differences": [],

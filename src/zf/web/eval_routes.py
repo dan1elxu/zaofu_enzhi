@@ -178,7 +178,35 @@ def _lane_score(
         "dimensions": dimensions,
         "composite": composite,
         "checklist": _checklist_counts(record),
+        "concerns": _concern_items(record),
     }
+
+
+def _concern_items(record: dict[str, Any] | None) -> list[dict[str, str]] | None:
+    """Public per-dimension concern list; None for pre-v3 records.
+
+    Evidence refs stay inside the state dir (the public payload carries only
+    dimension_id + text), matching the redaction contract of this route.
+    """
+
+    result = (record or {}).get("result")
+    result = result if isinstance(result, dict) else {}
+    if "concerns" not in result:
+        return None
+    concerns = result.get("concerns")
+    if not isinstance(concerns, list):
+        return None
+    items: list[dict[str, str]] = []
+    for entry in concerns:
+        if not isinstance(entry, dict):
+            continue
+        text = str(entry.get("text") or "").strip()
+        if text:
+            items.append({
+                "dimension_id": str(entry.get("dimension_id") or ""),
+                "text": text,
+            })
+    return items
 
 
 def _checklist_counts(record: dict[str, Any] | None) -> dict[str, int] | None:

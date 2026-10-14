@@ -245,27 +245,62 @@ def _lane_prd_fidelity_reply(
     *, refs: list[str] | None = None, score: int | None = 3,
     confidence: float = 0.9, status: str = "scored",
     checklist: list[dict[str, Any]] | None = None,
+    concerns: dict[str, list[dict[str, Any]]] | None = None,
 ) -> str:
     refs = list(refs or LANE_EVAL_REFS)
     if checklist is None:
         checklist = [
-            {"item_id": "req-1", "requirement": "支持待办事项增删改查。",
+            {"item_id": "req-1", "kind": "explicit",
+             "requirement": "支持待办事项增删改查。",
              "verdict": "pass", "evidence_refs": ["eval/prd"]},
-            {"item_id": "req-2", "requirement": "支持到期提醒。",
+            {"item_id": "req-2", "kind": "explicit",
+             "requirement": "支持到期提醒。",
              "verdict": "partial", "evidence_refs": ["eval/prd"]},
-            {"item_id": "req-3", "requirement": "数据本地存储。",
+            {"item_id": "req-3", "kind": "explicit",
+             "requirement": "数据本地存储。",
              "verdict": "missing", "evidence_refs": ["eval/prompt"]},
+            {"item_id": "req-4", "kind": "implicit",
+             "requirement": "非法输入与错误处理有明确反馈。",
+             "verdict": "partial", "evidence_refs": ["eval/prd"]},
+            {"item_id": "req-5", "kind": "implicit",
+             "requirement": "边界场景（空列表、重复事项）有覆盖。",
+             "verdict": "pass", "evidence_refs": ["eval/prd"]},
+            {"item_id": "req-6", "kind": "implicit",
+             "requirement": "性能预期有可验证的方法。",
+             "verdict": "pass", "evidence_refs": ["eval/prd"]},
         ]
-    return json.dumps({
-        "schema_version": "lane_prd_fidelity_result.v2",
-        "judge_type": "lane_prd_fidelity",
-        "score_scale": "0-4",
-        "checklist": checklist,
-        "dimensions": [{
+    if concerns is None:
+        concerns = {
+            "coverage": [{
+                "text": "到期提醒的触发时机未量化。",
+                "evidence_refs": ["eval/prd"],
+            }],
+            "fidelity": [
+                {"text": "PRD 未说明本地存储的并发写冲突处理。",
+                 "evidence_refs": ["eval/prd"]},
+                {"text": "桌面通知超出提示词范围且未标注为扩展。",
+                 "evidence_refs": ["eval/prompt", "eval/prd"]},
+            ],
+        }
+    dimensions = []
+    for dimension in LANE_PRD_FIDELITY_DIMENSIONS:
+        entry: dict[str, Any] = {
             "dimension_id": dimension, "status": status, "score": score,
             "confidence": confidence, "evidence_refs": refs,
             "rationale": f"{dimension} 有明确证据支撑。", "verdict": "aligned",
-        } for dimension in LANE_PRD_FIDELITY_DIMENSIONS],
+            "concerns": list(concerns.get(dimension) or []),
+        }
+        if not entry["concerns"]:
+            entry["no_concern_note"] = (
+                f"已对 {dimension} 逐项核对需求清单与 PRD 全文，未发现额外疑虑。"
+            )
+        dimensions.append(entry)
+    return json.dumps({
+        "schema_version": "lane_prd_fidelity_result.v3",
+        "judge_type": "lane_prd_fidelity",
+        "score_scale": "0-4",
+        "checklist": checklist,
+        "dimensions": dimensions,
         "differences": [], "missing_evidence": [],
     }, ensure_ascii=False)
 
