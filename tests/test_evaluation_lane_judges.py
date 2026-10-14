@@ -620,6 +620,41 @@ def test_cross_compare_blind_conflict_must_be_recorded() -> None:
     assert "blind_favorite" in error
 
 
+def test_cross_compare_extra_documented_conflicts_allowed() -> None:
+    # 默认 BLIND_SCORES 每维度唯一 favorite 都是 A，默认 ranking top 也都是 A，
+    # 因此没有 mandatory 冲突；judge 主动记录的仲裁说明（如平局下的细读分歧）
+    # 应被接受而非判 invalid。
+    conflict = {
+        "dimension_id": "fidelity", "blind_favorite": "A", "pairwise_favorite": "A",
+        "resolution": "盲评并列高分，细读认为 A 略优，记录以备审计。",
+        "evidence_refs": [candidate_prd_ref("A"), candidate_prd_ref("B")],
+    }
+    result, error = _normalize_compare(_compare_raw(conflicts=[conflict]))
+    assert error == ""
+    assert result is not None and result.status == "scored"
+    assert [entry.dimension_id for entry in result.conflicts] == ["fidelity"]
+
+    # 但 extra 冲突仍受约束：维度必须合法、不可重复、pairwise_favorite 必须与
+    # 排名一致。
+    result, error = _normalize_compare(
+        _compare_raw(conflicts=[{**conflict, "dimension_id": "style"}])
+    )
+    assert result is None
+    assert "unknown conflict dimension" in error
+
+    result, error = _normalize_compare(
+        _compare_raw(conflicts=[conflict, {**conflict, "resolution": "重复"}])
+    )
+    assert result is None
+    assert "duplicate conflict" in error
+
+    result, error = _normalize_compare(
+        _compare_raw(conflicts=[{**conflict, "pairwise_favorite": "B"}])
+    )
+    assert result is None
+    assert "pairwise_favorite" in error
+
+
 def test_cross_compare_recommendation_follows_votes_or_explains() -> None:
     tied_blind = {
         label: {dimension: 3 for dimension in LANE_PRD_FIDELITY_DIMENSIONS}

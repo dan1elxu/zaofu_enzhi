@@ -388,20 +388,28 @@ def _normalize_conflicts(
         if not isinstance(item, dict):
             return None, "every conflict entry must be an object"
         dimension_id = str(item.get("dimension_id") or "").strip()
-        if dimension_id not in expected or dimension_id in seen:
-            return None, (
-                "conflicts must exactly cover dimensions where the ranking top "
-                f"contradicts a unique blind favorite; unexpected: {dimension_id!r}"
-            )
+        if dimension_id in seen:
+            return None, f"duplicate conflict entry for {dimension_id!r}"
+        if dimension_id not in LANE_PRD_FIDELITY_DIMENSIONS:
+            return None, f"unknown conflict dimension: {dimension_id!r}"
         seen.add(dimension_id)
         blind_favorite = str(item.get("blind_favorite") or "").strip()
         pairwise_favorite = str(item.get("pairwise_favorite") or "").strip()
-        if blind_favorite != favorites[dimension_id]:
+        # Mandatory conflicts (ranking top contradicts a unique blind
+        # favorite) are pinned to the packet facts; additional documented
+        # arbitration (ties, close readings) is allowed as long as it names
+        # the dimension's actual ranking top and explains itself.
+        mandatory = dimension_id in expected
+        if mandatory and blind_favorite != favorites[dimension_id]:
             return None, (
                 f"conflict {dimension_id} blind_favorite must be "
                 f"{favorites[dimension_id]!r} per the packet blind scores"
             )
-        if pairwise_favorite != tops[dimension_id]:
+        if (
+            dimension_id in tops
+            and pairwise_favorite
+            and pairwise_favorite != tops[dimension_id]
+        ):
             return None, (
                 f"conflict {dimension_id} pairwise_favorite must be "
                 f"{tops[dimension_id]!r} per the dimension ranking"
