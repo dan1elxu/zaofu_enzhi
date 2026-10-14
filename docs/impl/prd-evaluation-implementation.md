@@ -2,6 +2,8 @@
 
 本实现把 Kanban/Channel 的冻结快照送入一个持久化、有界并发的 Judge 队列。评估事件是只读投影事件，不改变任务、Channel 或 PRD 的权威状态。
 
+三通道 PRD 对比评测（terminal / kanban / channel-auto 三 lane 并行产出 PRD 并打分对比）复用本文的 Judge/scheduler 内核，其 eval-run 侧实现见 `three-lane-prd-eval.md`。
+
 ## 与上游手动 PRD 诊断共存
 
 2026-10-10 合入上游 `111488743` 后，Eval 保持下文的唯一自动入口；上游的 `channel-prd-evaluate` 是另一个显式受控动作，发出 `channel.prd_evaluation.requested`，由独立 reactor 生成 `artifacts/output-evaluations/<UUID>/report.json`。它不进入 Eval scheduler，也不写入 `artifacts/benchmark-evaluations/` 的报告。Web 的「Eval」与 PRD 全文/专项诊断分别读取各自接口。诊断反馈可参与尚未确认、未关闭的讨论修订，但不能倒灌进既有 frozen packet。
