@@ -12,6 +12,9 @@ const LazyProjectionPage = lazy(() => import("../components/projection/Projectio
 const LazyTracesPage = lazy(() => import("../components/traces/TracesPage").then((module) => ({
   default: module.TracesPage,
 })));
+const LazyEvalPage = lazy(() => import("../components/eval/EvalPage").then((module) => ({
+  default: module.EvalPage,
+})));
 
 function RouteLoading({ label }: { label: string }) {
   return (
@@ -35,4 +38,8 @@ export function ProjectionRoute(props: ComponentProps<typeof LazyProjectionPage>
 
 export function TracesRoute(props: ComponentProps<typeof LazyTracesPage>) {
   return <Suspense fallback={<RouteLoading label="traces" />}><LazyTracesPage {...props} /></Suspense>;
+}
+
+export function EvalRoute(props: ComponentProps<typeof LazyEvalPage>) {
+  return <Suspense fallback={<RouteLoading label="eval" />}><LazyEvalPage {...props} /></Suspense>;
 }

@@ -15,6 +15,7 @@ export const NAV_PAGES = [
   "workdirs",
   "skills",
   "traces",
+  "eval",
   "delivery",
   "control-room",
   "delivery-trace",

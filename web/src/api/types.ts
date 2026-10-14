@@ -2053,6 +2053,100 @@ export interface ChannelEvaluationDetail {
   };
 }
 
+// Three-lane PRD eval (docs/ideas/three-lane-prd-eval.md). Read-only
+// projections of `eval run` state; the API contract is `eval.runs.v1` /
+// `eval.run.v1` served by the B2 eval routes.
+export interface EvalLaneStatus {
+  status: string;
+  error?: string;
+}
+
+export interface EvalRunTrialSummary {
+  run_id: string;
+  trial: number;
+  status: string;
+  started_at?: string;
+  finished_at?: string | null;
+  lanes: Record<string, EvalLaneStatus>;
+  composite_scores?: Record<string, number | null> | null;
+  recommendation?: string[] | null;
+}
+
+export interface EvalRunGroup {
+  prompt_digest: string;
+  prompt_version?: string;
+  trials: EvalRunTrialSummary[];
+}
+
+export interface EvalRunsPage {
+  schema_version: string;
+  groups: EvalRunGroup[];
+}
+
+export interface EvalRunLaneDetail extends EvalLaneStatus {
+  started_at?: string;
+  finished_at?: string;
+  prd_markdown?: string | null;
+}
+
+export interface EvalTaskTypeResult {
+  status: string;
+  task_type?: string | null;
+  confidence?: number | null;
+}
+
+export interface EvalLaneScore {
+  status: string;
+  dimensions?: Record<string, number | null>;
+  composite?: number | null;
+}
+
+export interface EvalCrossCompareGap {
+  candidate?: string;
+  gap?: string;
+}
+
+export interface EvalDimensionRanking {
+  dimension_id?: string;
+  ranking?: string[];
+  confidence?: number | string | null;
+}
+
+export interface EvalCrossCompareConflict {
+  dimension_id?: string;
+  blind_favorite?: string;
+  pairwise_favorite?: string;
+  resolution?: string;
+}
+
+export interface EvalCrossCompare {
+  status: string;
+  recommendation?: string[];
+  key_gaps?: EvalCrossCompareGap[];
+  dimension_rankings?: EvalDimensionRanking[];
+  conflicts?: EvalCrossCompareConflict[];
+}
+
+export interface EvalRunEvaluation {
+  task_type?: EvalTaskTypeResult | null;
+  lane_scores?: Record<string, EvalLaneScore | null>;
+  cross_compare?: EvalCrossCompare | null;
+}
+
+export interface EvalRunDetail {
+  schema_version: string;
+  run_id: string;
+  prompt_digest: string;
+  prompt_version?: string;
+  prompt_text?: string;
+  trial: number;
+  status: string;
+  lanes: Record<string, EvalRunLaneDetail>;
+  evaluation?: EvalRunEvaluation;
+  label_map?: Record<string, string>;
+  report_markdown?: string | null;
+}
+
 export interface ExecutionPatternProjection {
   schema_version: string;
   source: string;

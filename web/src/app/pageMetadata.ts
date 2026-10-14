@@ -15,6 +15,7 @@ const PAGE_TITLES: Record<PageId, string> = {
   workdirs: "Workdirs",
   skills: "Skills",
   traces: "Traces",
+  eval: "Eval 对比",
   delivery: "Delivery",
   "delivery-trace": "Runs",
   "delivery-graph": "Graph",

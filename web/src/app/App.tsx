@@ -122,7 +122,7 @@ import {
 } from "./channelConversationState";
 import { useProjectRequestScope } from "./useProjectRequestScope";
 import { resolveWorkspaceProjectId } from "./workspaceProjectSelection";
-import { ChannelRoute, OrchestratorRoute, ProjectionRoute, TracesRoute } from "./lazyRoutes";
+import { ChannelRoute, EvalRoute, OrchestratorRoute, ProjectionRoute, TracesRoute } from "./lazyRoutes";
 import {
   canBootstrapScopedPageBeforeWorkspace,
   projectionPageQuery,
@@ -226,6 +226,7 @@ const PAGE_QUERY_KEYS: Partial<Record<PageId, ReadonlySet<string>>> = {
   traces: new Set(["trace_id", "span_id", "obs_q", "obs_status", "obs_duration", "obs_role", "obs_backend"]),
   events: new Set(["task"]),
   runs: new Set(["run_id"]),
+  eval: new Set(["run_id"]),
   fanouts: new Set(["fanout_id"]),
   candidates: new Set(["pdd_id"]),
 };
@@ -243,6 +244,7 @@ const REFRESH_EVENT_PREFIXES = [
   "fanout.",
   "channel.",
   "benchmark.evaluation.",
+  "benchmark.eval.",
   "workflow.invoke.",
   "run.",
   "ship.",
@@ -2259,6 +2261,14 @@ export function App() {
                 selectedChannelId={selectedChannelId}
                 onReviewPlans={() => openTaskAgent()}
               />
+          ) : page === "eval" ? (
+            <section className="projection-scroll">
+              <EvalRoute
+                events={events}
+                liveState={liveState}
+                projectId={activeProjectId}
+              />
+            </section>
           ) : page === "triage" ? (
             <TriagePage
               actionResult={actionResult}

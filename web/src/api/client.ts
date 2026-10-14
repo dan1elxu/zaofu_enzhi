@@ -16,6 +16,8 @@ import type {
   DeliveryFeaturesPage,
   DiagnosticsDetail,
   DiagnosticsLogsPage,
+  EvalRunDetail,
+  EvalRunsPage,
   OperationsObservability,
   EventsPage,
   FanoutDetail,
@@ -1111,6 +1113,18 @@ export function getChannelEvaluation(
   // shared across a new freeze or a return to this Channel.
   return cachedGetJson<import("./types").ChannelEvaluationDetail>(
     `${projectPrefix(projectId)}/channels/${encodeURIComponent(channelId)}/evaluation`,
+    { ttlMs: 0 },
+  );
+}
+
+export function getEvalRuns(projectId?: string): Promise<EvalRunsPage> {
+  // ttlMs 0: every SSE-driven refresh must see the latest run state.
+  return cachedGetJson<EvalRunsPage>(`${projectPrefix(projectId)}/eval/runs`, { ttlMs: 0 });
+}
+
+export function getEvalRunDetail(runId: string, projectId?: string): Promise<EvalRunDetail> {
+  return cachedGetJson<EvalRunDetail>(
+    `${projectPrefix(projectId)}/eval/runs/${encodeURIComponent(runId)}`,
     { ttlMs: 0 },
   );
 }
