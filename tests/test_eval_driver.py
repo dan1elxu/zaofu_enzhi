@@ -618,7 +618,7 @@ def test_drive_lane_channel_shared_state_injects_workspace_ledger(tmp_path: Path
         writer=None, lane_overrides=None,
     )
     assert captured["state_dir"] == state_dir
-    assert captured["channel_id"] == "eval-prd-t3"
+    assert captured["channel_id"] == f"eval-prd-{manifest.prompt_digest[:8]}-t3"
     assert captured["channel_name"] == f"Eval {manifest.prompt_digest[:8]} · trial-3"
 
 
